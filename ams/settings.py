@@ -81,11 +81,8 @@ WSGI_APPLICATION = 'ams.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'dynamic_ams_v5',
-        'USER': 'root',
-        'HOST': 'localhost',
-        'PASSWORD': 'insha659395',
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
 

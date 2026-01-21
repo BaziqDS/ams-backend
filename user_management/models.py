@@ -62,25 +62,61 @@ class UserProfile(models.Model):
     def get_accessible_locations(self, required_perm=None):
         """
         Returns a queryset of locations the user can access.
-        If required_perm is provided, it checks for that specific capability.
+        Includes:
+        1. Descendants (area of management)
+        2. Ancestors (for upward movement/visibility)
+        3. Peer/Related Stores (for specific hierarchy rules like L1 -> L2)
         """
         from inventory.models import Location
         
-        # If a specific perm is required and they don't have it globally, return none
         if required_perm and not self.user.has_perm(required_perm):
             return Location.objects.none()
 
         if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
-        # Retrieve all descendants of assigned locations
-        location_ids = []
+        location_ids = set()
         for loc in self.assigned_locations.all():
-            # Using the get_descendants method from our Location template
+            # 1. Include descendants (Managed area)
             descendants = loc.get_descendants(include_self=True)
-            location_ids.extend(descendants.values_list('id', flat=True))
+            location_ids.update(descendants.values_list('id', flat=True))
+            
+            # 2. Include ancestors and their stores (Visibility for upward movement)
+            curr = loc.parent_location
+            while curr:
+                location_ids.add(curr.id)
+                if curr.auto_created_store_id:
+                    location_ids.add(curr.auto_created_store_id)
+                curr = curr.parent_location
+
+            # 3. Special Rule: Level 1 Stores can see all Level 2 Stores 
+            # (e.g. Central Store issuing to any Department Main Store)
+            if loc.is_store and loc.hierarchy_level == 1:
+                location_ids.update(
+                    Location.objects.filter(is_store=True, hierarchy_level=2).values_list('id', flat=True)
+                )
             
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
+
+    def get_descendant_locations(self):
+        """
+        Returns a queryset of locations strictly at or below the user's assigned locations.
+        Used for inventory visibility (can't see above me).
+        """
+        from inventory.models import Location
+        
+        if self.user.is_superuser:
+            return Location.objects.filter(is_active=True)
+
+        location_ids = set()
+        for loc in self.assigned_locations.all():
+            descendants = loc.get_descendants(include_self=True)
+            location_ids.update(descendants.values_list('id', flat=True))
+            
+        return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
+
+
+
 
     def get_assigned_permissions(self):
         """Helper to list all dynamic permissions for UI displays."""

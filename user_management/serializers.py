@@ -1,18 +1,114 @@
 from rest_framework import serializers
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, Permission
 from .models import UserProfile
 from inventory.models.location_model import Location
 
 class UserSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
+    assigned_locations = serializers.PrimaryKeyRelatedField(
+        source='profile.assigned_locations',
+        many=True,
+        read_only=True
+    )
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'permissions')
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations')
+
 
     def get_permissions(self, obj):
-        # Return all permissions (from groups and individual)
         return list(obj.get_all_permissions())
+
+class UserManagementSerializer(serializers.ModelSerializer):
+    employee_id = serializers.CharField(source='profile.employee_id', required=False, allow_blank=True)
+    assigned_locations = serializers.PrimaryKeyRelatedField(
+        source='profile.assigned_locations',
+        many=True,
+        queryset=Location.objects.all(),
+        required=False
+    )
+    assigned_locations_display = serializers.StringRelatedField(
+        source='profile.assigned_locations',
+        many=True,
+        read_only=True
+    )
+    user_permissions_list = serializers.SlugRelatedField(
+        source='user_permissions',
+        many=True,
+        queryset=Permission.objects.all(),
+        slug_field='codename',
+        required=False
+    )
+    is_active = serializers.BooleanField(source='profile.is_active', required=False)
+    password = serializers.CharField(write_only=True, required=False)
+
+    class Meta:
+        model = User
+        fields = (
+            'id', 'username', 'email', 'first_name', 'last_name', 'password',
+            'is_superuser', 'is_staff', 'is_active',
+            'employee_id', 'assigned_locations', 'assigned_locations_display',
+            'user_permissions_list'
+        )
+
+    def create(self, validated_data):
+        profile_data = validated_data.pop('profile', {})
+        user_permissions = validated_data.pop('user_permissions', [])
+        password = validated_data.pop('password', None)
+        
+        # Create user using create_user to hash password
+        user = User.objects.create_user(
+            username=validated_data.get('username'),
+            email=validated_data.get('email', ''),
+            password=password,
+            first_name=validated_data.get('first_name', ''),
+            last_name=validated_data.get('last_name', ''),
+            is_superuser=validated_data.get('is_superuser', False),
+            is_staff=validated_data.get('is_staff', False)
+        )
+
+        if user_permissions:
+            user.user_permissions.set(user_permissions)
+
+        # Profile is created by signal, so we update it
+        profile = user.profile
+        if 'employee_id' in profile_data:
+            profile.employee_id = profile_data['employee_id']
+        if 'is_active' in profile_data:
+            profile.is_active = profile_data['is_active']
+        if 'assigned_locations' in profile_data:
+            profile.assigned_locations.set(profile_data['assigned_locations'])
+        
+        profile.save()
+        return user
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop('profile', {})
+        
+        # Update User fields
+        instance.username = validated_data.get('username', instance.username)
+        instance.email = validated_data.get('email', instance.email)
+        instance.first_name = validated_data.get('first_name', instance.first_name)
+        instance.last_name = validated_data.get('last_name', instance.last_name)
+        instance.is_superuser = validated_data.get('is_superuser', instance.is_superuser)
+        instance.is_staff = validated_data.get('is_staff', instance.is_staff)
+        
+        if 'user_permissions_list' in validated_data:
+            instance.user_permissions.set(validated_data['user_permissions_list'])
+            
+        instance.save()
+
+        # Update Profile fields
+        profile = instance.profile
+        if 'employee_id' in profile_data:
+            profile.employee_id = profile_data['employee_id']
+        if 'is_active' in profile_data:
+            profile.is_active = profile_data['is_active']
+        if 'assigned_locations' in profile_data:
+            profile.assigned_locations.set(profile_data['assigned_locations'])
+        
+        profile.save()
+        return instance
 
 class UserProfileSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)

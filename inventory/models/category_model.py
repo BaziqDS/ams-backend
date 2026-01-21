@@ -13,6 +13,7 @@ class TrackingType(models.TextChoices):
 class CategoryType(models.TextChoices):
     FIXED_ASSET = 'FIXED_ASSET', 'Fixed Asset'
     CONSUMABLE = 'CONSUMABLE', 'Consumable'
+    PERISHABLE = 'PERISHABLE', 'Perishable'
 
 class Category(models.Model):
     """
@@ -22,7 +23,7 @@ class Category(models.Model):
     - default_depreciation_rate: Set at parent, inherited by Fixed Asset subcategories.
     """
     name = models.CharField(max_length=255)
-    code = models.CharField(max_length=20, unique=True, blank=True, editable=False)
+    code = models.CharField(max_length=20, unique=True, blank=True)
     
     parent_category = models.ForeignKey(
         'self', on_delete=models.CASCADE, null=True, blank=True, 

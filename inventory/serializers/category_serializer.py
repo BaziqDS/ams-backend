@@ -1,14 +1,5 @@
 from rest_framework import serializers
-from .models.location_model import Location
-from .models.category_model import Category, CategoryRateHistory
-
-class LocationSerializer(serializers.ModelSerializer):
-    parent_location_display = serializers.StringRelatedField(source='parent_location', read_only=True)
-    
-    class Meta:
-        model = Location
-        fields = '__all__'
-        read_only_fields = ('created_by', 'code', 'hierarchy_level', 'hierarchy_path', 'auto_created_store')
+from ..models.category_model import Category, CategoryRateHistory
 
 class RateHistorySerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.username', read_only=True)
@@ -33,4 +24,19 @@ class CategorySerializer(serializers.ModelSerializer):
             'resolved_category_type', 'resolved_tracking_type', 'resolved_depreciation_rate',
             'rate_history', 'is_active', 'created_at', 'updated_at', 'notes'
         ]
-        read_only_fields = ('created_by', 'code')
+        read_only_fields = ('created_by',)
+
+    def create(self, validated_data):
+        request_user = validated_data.pop('request_user', None)
+        audit_notes = validated_data.pop('audit_notes', None)
+        instance = Category(**validated_data)
+        instance.save(request_user=request_user, audit_notes=audit_notes)
+        return instance
+
+    def update(self, instance, validated_data):
+        request_user = validated_data.pop('request_user', None)
+        audit_notes = validated_data.pop('audit_notes', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save(request_user=request_user, audit_notes=audit_notes)
+        return instance

@@ -19,7 +19,7 @@ class LocationType(models.TextChoices):
 
 class Location(models.Model):
     name = models.CharField(max_length=255, unique=True, help_text="Location name must be unique")
-    code = models.CharField(max_length=255, unique=True, blank=True, editable=False, help_text="Auto-generated if not provided")
+    code = models.CharField(max_length=255, unique=True, blank=True, help_text="Auto-generated if not provided")
     parent_location = models.ForeignKey(
         'self',
         on_delete=models.CASCADE,
