@@ -2,9 +2,9 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth.models import User, Permission
+from django.contrib.auth.models import User, Permission, Group
 from .models import UserProfile
-from .serializers import UserProfileSerializer, UserManagementSerializer, UserSerializer
+from .serializers import UserProfileSerializer, UserManagementSerializer, UserSerializer, GroupSerializer
 from ams.permissions import StrictDjangoModelPermissions
 
 class UserProfileViewSet(viewsets.ModelViewSet):
@@ -13,8 +13,13 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().select_related('profile').prefetch_related('user_permissions')
+    queryset = User.objects.all().select_related('profile').prefetch_related('user_permissions', 'groups')
     serializer_class = UserManagementSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+class GroupViewSet(viewsets.ModelViewSet):
+    queryset = Group.objects.all().prefetch_related('permissions')
+    serializer_class = GroupSerializer
     permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
 
 class AvailablePermissionsView(APIView):

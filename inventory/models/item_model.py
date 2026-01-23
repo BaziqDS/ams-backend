@@ -26,8 +26,9 @@ class Item(models.Model):
                 'category': "Items can only be linked to sub-categories, not top-level categories."
             })
 
-    # NEW: Tracking fields based on category
-    total_quantity = models.PositiveIntegerField(default=0)
+    # NOTE: Tracking fields (Total Quantity) are now dynamically calculated 
+    # from StockRecord entries in the ViewSets for accuracy and security.
+
 
     # NOTE: Expiry/maintenance fields removed from Item model
     # - Expiry date: Now tracked per batch in ItemBatch model

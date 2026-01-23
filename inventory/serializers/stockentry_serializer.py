@@ -25,6 +25,9 @@ class StockEntrySerializer(serializers.ModelSerializer):
     to_location_name = serializers.CharField(source='to_location.name', read_only=True)
     issued_to_name = serializers.CharField(source='issued_to.name', read_only=True, allow_null=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    cancelled_by_name = serializers.CharField(source='cancelled_by.username', read_only=True, allow_null=True)
+    can_acknowledge = serializers.SerializerMethodField()
+
 
     class Meta:
         model = StockEntry
@@ -34,9 +37,12 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'to_location', 'to_location_name',
             'issued_to', 'issued_to_name',
             'status', 'remarks', 'purpose', 'items',
-            'created_by', 'created_by_name', 'created_at'
+            'cancellation_reason', 'cancelled_by', 'cancelled_by_name', 'cancelled_at',
+            'created_by', 'created_by_name', 'created_at',
+            'can_acknowledge'
         )
-        read_only_fields = ('entry_number', 'created_by', 'created_at')
+        read_only_fields = ('entry_number', 'created_by', 'created_at', 'cancelled_by', 'cancelled_at')
+
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -49,7 +55,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
         entry_type = validated_data.get('entry_type')
 
         # Validate stock availability for all items before creating anything
-        if entry_type in ['ISSUE', 'TRANSFER', 'RETURN'] and from_location:
+        if entry_type == 'ISSUE' and from_location:
             for item_data in items_data:
                 item = item_data.get('item')
                 batch = item_data.get('batch')
@@ -81,4 +87,53 @@ class StockEntrySerializer(serializers.ModelSerializer):
                     item_entry.instances.set(instances)
         
         return stock_entry
+
+    def update(self, instance, validated_data):
+        if instance.status != 'DRAFT':
+            raise serializers.ValidationError({"detail": "Only DRAFT entries can be edited."})
+            
+        items_data = validated_data.pop('items', None)
+        
+        from django.db import transaction
+        with transaction.atomic():
+            # Update main entry fields
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            
+            # Update nested items if provided
+            if items_data is not None:
+                # Simple approach: clear and recreate
+                # (Appropriate since Draft entries don't have side effects yet)
+                instance.items.all().delete()
+                for item_data in items_data:
+                    instances = item_data.pop('instances', [])
+                    item_entry = StockEntryItem.objects.create(stock_entry=instance, **item_data)
+                    if instances:
+                        item_entry.instances.set(instances)
+                        
+        return instance
+
+    def get_can_acknowledge(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user:
+            return False
+        
+        user = request.user
+        if user.is_superuser:
+            return True if obj.status == 'PENDING_ACK' and obj.entry_type == 'RECEIPT' else False
+
+        # Must be PENDING_ACK RECEIPT
+        if obj.status != 'PENDING_ACK' or obj.entry_type != 'RECEIPT':
+            return False
+
+        # Must have permission
+        if not user.has_perm('inventory.acknowledge_stockentry'):
+            return False
+
+        # Must have location access to the destination
+        if hasattr(user, 'profile') and obj.to_location:
+            return user.profile.has_location_access(obj.to_location)
+
+        return False
 

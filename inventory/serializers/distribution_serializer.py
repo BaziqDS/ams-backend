@@ -10,5 +10,7 @@ class StockRecordSerializer(serializers.ModelSerializer):
         model = StockRecord
         fields = [
             'id', 'item', 'item_name', 'batch', 'batch_number', 
-            'location', 'location_name', 'quantity', 'last_updated'
+            'location', 'location_name', 'quantity', 'in_transit_quantity',
+            'available_quantity', 'last_updated'
         ]
+

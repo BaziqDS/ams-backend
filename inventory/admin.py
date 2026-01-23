@@ -7,6 +7,13 @@ from .models.instance_model import ItemInstance
 from .models.stock_record_model import StockRecord
 from .models.stockentry_model import StockEntry, StockEntryItem
 from .models.person_model import Person
+from .models.allocation_model import StockAllocation
+
+@admin.register(StockAllocation)
+class StockAllocationAdmin(admin.ModelAdmin):
+    list_display = ('item', 'batch', 'source_location', 'status', 'allocated_at', 'return_date')
+    list_filter = ('status', 'allocated_at', 'source_location')
+    search_fields = ('remarks',)
 
 @admin.register(Location)
 class LocationAdmin(admin.ModelAdmin):
@@ -37,9 +44,10 @@ class CategoryRateHistoryAdmin(admin.ModelAdmin):
 
 @admin.register(Item)
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('name', 'code', 'category', 'total_quantity', 'is_active')
+    list_display = ('name', 'code', 'category', 'is_active')
     list_filter = ('category', 'is_active')
     search_fields = ('name', 'code')
+
 
 @admin.register(ItemBatch)
 class ItemBatchAdmin(admin.ModelAdmin):

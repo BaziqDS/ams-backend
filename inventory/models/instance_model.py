@@ -8,6 +8,7 @@ from .location_model import Location
 class InstanceStatus(models.TextChoices):
     AVAILABLE = 'AVAILABLE', 'Available'
     ISSUED = 'ISSUED', 'Issued'
+    ALLOCATED = 'ALLOCATED', 'Allocated'
     IN_USE = 'IN_USE', 'In Use'
     MAINTENANCE = 'MAINTENANCE', 'In Maintenance'
     JUNK = 'JUNK', 'Junked/Disposed'

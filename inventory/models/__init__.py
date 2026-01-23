@@ -6,3 +6,5 @@ from .instance_model import *
 from .stock_record_model import *
 from .stockentry_model import *
 from .person_model import *
+from .allocation_model import *
+

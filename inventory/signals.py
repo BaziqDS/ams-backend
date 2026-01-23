@@ -1,10 +1,12 @@
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_save, pre_save, post_delete, m2m_changed
 from django.dispatch import receiver
+from django.db import transaction
+import logging
+
 from .models.location_model import Location, LocationType
-from .models.stockentry_model import StockEntry
+from .models.stockentry_model import StockEntry, StockEntryItem
 from .models.stock_record_model import StockRecord
 from .models.instance_model import ItemInstance
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -44,51 +46,27 @@ def auto_create_store_for_standalone(sender, instance, created, **kwargs):
         
         logger.info(f"[SIGNAL] Auto-created main store {store_name} for standalone location {instance.name}")
 
-from django.db.models.signals import post_save, m2m_changed
-from django.dispatch import receiver
-from django.db import transaction
-from .models.location_model import Location, LocationType
-from .models.stockentry_model import StockEntry, StockEntryItem
-from .models.stock_record_model import StockRecord
-from .models.instance_model import ItemInstance
-import logging
-
-logger = logging.getLogger(__name__)
-
-# ... (auto_create_store_for_standalone remains same)
-
 @receiver(post_save, sender=StockEntryItem)
 def process_stock_entry_item(sender, instance, created, **kwargs):
     """
-    Updates StockRecord and Item global quantity when a StockEntryItem is saved
-    AND its parent StockEntry is COMPLETED.
-    
-    Unidirectional Processing:
-    - ISSUE only decrements source
-    - RECEIPT only increments destination
-    - OTHER (RECEPT from None, ISSUE to None) handles global qty
+    Handles item-level stock records (in-transit or physical) when an item is saved.
+    Also handles linked receipt creation for inter-store movements.
     """
     stock_entry = instance.stock_entry
-    item = instance.item
-    qty = instance.quantity
-    batch = instance.batch
-    from_loc = stock_entry.from_location
-    to_loc = stock_entry.to_location
-    issued_to = stock_entry.issued_to
-
-    # 3. Create linked receipt for inter-store ISSUE (even if PENDING_ACK)
-    if stock_entry.entry_type == 'ISSUE' and to_loc and not stock_entry.reference_entry:
-        # Check if a linked receipt already exists or create it
-        # Status defaults to PENDING_ACK if the issue is PENDING_ACK
-        target_status = stock_entry.status if stock_entry.status in ['PENDING_ACK', 'DRAFT'] else 'COMPLETED'
+    
+    # 1. Linked RECEIPT creation (ISSUE -> RECEIPT bridge)
+    # CRITICAL: Do NOT create receipts for DRAFT entries. Wait until finalized.
+    if stock_entry.entry_type == 'ISSUE' and stock_entry.to_location and not stock_entry.reference_entry and stock_entry.status != 'DRAFT':
+        target_status = stock_entry.status if stock_entry.status == 'PENDING_ACK' else 'COMPLETED'
         
         linked_receipt, r_created = StockEntry.objects.get_or_create(
             reference_entry=stock_entry,
             entry_type='RECEIPT',
             defaults={
+                'entry_number': f"R-{stock_entry.entry_number}",
                 'entry_date': stock_entry.entry_date,
-                'from_location': from_loc,
-                'to_location': to_loc,
+                'from_location': stock_entry.from_location,
+                'to_location': stock_entry.to_location,
                 'status': target_status,
                 'remarks': f"Auto-generated receipt for {stock_entry.entry_number}",
                 'purpose': stock_entry.purpose,
@@ -96,115 +74,281 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
             }
         )
         
-        # Create linked item in the receipt
+        # Create/Update linked item in the receipt
         receipt_item, i_created = StockEntryItem.objects.get_or_create(
             stock_entry=linked_receipt,
-            item=item,
-            batch=batch,
-            defaults={'quantity': qty}
+            item=instance.item,
+            batch=instance.batch,
+            defaults={'quantity': instance.quantity}
         )
         if not i_created:
-            receipt_item.quantity = qty
+            receipt_item.quantity = instance.quantity
             receipt_item.save()
 
+        # Sync instances if they were already added (e.g. bulk create or retrospective save)
         if instance.instances.exists():
             receipt_item.instances.set(instance.instances.all())
         
-        logger.info(f"[SIGNAL] Linked RECEIPT item synced for ISSUE {stock_entry.entry_number}")
+        logger.info(f"[SIGNAL] Linked RECEIPT item synced for {stock_entry.entry_number}")
 
-    # Now handle stock updates ONLY if COMPLETED
-    if stock_entry.status != 'COMPLETED':
-        return
+    # 2. Trigger individual item processing (In-Transit / Stock Completion)
+    process_single_stock_item(instance)
 
-    if not created:
-        return
+def process_single_stock_item(instance):
+    """
+    Helper to process a single StockEntryItem's effect on StockRecord.
+    Handles PENDING_ACK (In-Transit) and COMPLETED (Balance Update).
+    """
+    entry = instance.stock_entry
+    item = instance.item
+    qty = instance.quantity
+    batch = instance.batch
+    from_loc = entry.from_location
+    to_loc = entry.to_location
 
     with transaction.atomic():
-        # 1. Processing for ISSUE (Sender)
-        if stock_entry.entry_type == 'ISSUE':
-            if from_loc:
-                StockRecord.update_balance(
-                    item=item,
-                    location=from_loc,
-                    quantity_change=-qty,
-                    batch=batch
-                )
-                logger.info(f"[SIGNAL] ISSUE: Decremented {qty} {item.name} from {from_loc.name}")
+        # A. Handle "In Transit" (Source side)
+        if entry.entry_type == 'ISSUE' and from_loc:
+            # If entry is PENDING_ACK: We need it in-transit
+            if entry.status == 'PENDING_ACK' and not instance.is_in_transit_recorded:
+                StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=qty)
+                instance.is_in_transit_recorded = True
+                instance.save(update_fields=['is_in_transit_recorded'])
+                logger.info(f"[SIGNAL] Recorded In-Transit: {item.name} at {from_loc.name}")
             
-            # Global adjustment: if it's leaving the system (to person or external)
-            if to_loc is None or issued_to is not None:
-                item.total_quantity -= qty
-                item.save(update_fields=['total_quantity'])
-                logger.info(f"[SIGNAL] ISSUE: Decreased global quantity of {item.name} by {qty}")
+            # If entry is CANCELLED/REJECTED: We reverse in-transit if it was recorded
+            elif entry.status in ['CANCELLED', 'REJECTED'] and instance.is_in_transit_recorded:
+                StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-qty)
+                instance.is_in_transit_recorded = False
+                instance.save(update_fields=['is_in_transit_recorded'])
+                logger.info(f"[SIGNAL] Reversed In-Transit: {item.name} at {from_loc.name}")
 
-        # 2. Processing for RECEIPT (Receiver)
-        elif stock_entry.entry_type == 'RECEIPT':
-            if to_loc:
-                StockRecord.update_balance(
-                    item=item,
-                    location=to_loc,
-                    quantity_change=qty,
-                    batch=batch
-                )
-                logger.info(f"[SIGNAL] RECEIPT: Incremented {qty} {item.name} in {to_loc.name}")
+        # B. Handle "Physical Completion" (Store or Allocation)
+        if entry.status == 'COMPLETED' and not instance.is_stock_recorded:
+            if entry.entry_type == 'ISSUE' and from_loc:
+                # Is this an allocation (to person or non-store)?
+                is_allocation = entry.issued_to or (entry.to_location and not entry.to_location.is_store)
+                
+                if is_allocation:
+                    # ALLOCATION logic: Decreases availability, increases allocated count, stays in total
+                    StockRecord.update_balance(item, from_loc, batch=batch, allocated_change=qty)
+                    
+                    # Create Allocation record
+                    from .models.allocation_model import StockAllocation
+                    StockAllocation.objects.create(
+                        item=item,
+                        batch=batch,
+                        source_location=from_loc,
+                        quantity=qty,
+                        allocated_to_person=entry.issued_to,
+                        allocated_to_location=entry.to_location if (entry.to_location and not entry.to_location.is_store) else None,
+                        stock_entry=entry,
+                        allocated_by=entry.created_by
+                    )
+
+                    # Update instances
+                    if instance.instances.exists():
+                        instance.instances.all().update(status='ALLOCATED')
+                    
+                    logger.info(f"[SIGNAL] ALLOCATED: {qty} {item.name} from {from_loc.name}")
+                else:
+                    # NORMAL ISSUE (to another store): Decreases total quantity
+                    StockRecord.update_balance(item, from_loc, quantity_change=-qty, batch=batch)
+                    logger.info(f"[SIGNAL] COMPLETED ISSUE (TRANSFER): Decremented {qty} {item.name} from {from_loc.name}")
+
+                # Deduct in-transit if it was previously recorded
+                if instance.is_in_transit_recorded:
+                    StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-qty)
+                    instance.is_in_transit_recorded = False
             
-            # Global adjustment: if it's coming from external
-            if from_loc is None:
-                item.total_quantity += qty
-                item.save(update_fields=['total_quantity'])
-                logger.info(f"[SIGNAL] RECEIPT: Increased global quantity of {item.name} by {qty}")
+            elif entry.entry_type == 'RECEIPT' and to_loc:
+                # Is this a return from an allocation (Person or Non-Store)?
+                is_return = entry.issued_to or (entry.from_location and not entry.from_location.is_store)
+                
+                if is_return:
+                    # RETURN logic: Decrements allocated_quantity, moves back to 'Available' but stays in 'Total'
+                    StockRecord.update_balance(item, to_loc, batch=batch, allocated_change=-qty)
+                    
+                    # Update StockAllocation records (Status -> RETURNED)
+                    from .models.allocation_model import StockAllocation, AllocationStatus
+                    from django.utils import timezone
+                    
+                    alloc_filter = {
+                        'item': item,
+                        'batch': batch,
+                        'source_location': to_loc,
+                        'status': AllocationStatus.ALLOCATED
+                    }
+                    if entry.issued_to:
+                        alloc_filter['allocated_to_person'] = entry.issued_to
+                    else:
+                        alloc_filter['allocated_to_location'] = entry.from_location
+                    
+                    # Find active allocations for this target and reduce them
+                    active_allocs = StockAllocation.objects.filter(**alloc_filter).order_by('allocated_at')
+                    remaining_to_return = qty
+                    for alloc in active_allocs:
+                        if remaining_to_return <= 0: break
+                        
+                        return_qty = min(alloc.quantity, remaining_to_return)
+                        if return_qty == alloc.quantity:
+                            alloc.status = AllocationStatus.RETURNED
+                            alloc.return_date = timezone.now()
+                        else:
+                            # Split or decrement allocation (for simplicity, we decrement in this MVP)
+                            alloc.quantity -= return_qty
+                        
+                        remaining_to_return -= return_qty
+                        alloc.save()
+
+                    # Update instances
+                    if instance.instances.exists():
+                        instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                    
+                    logger.info(f"[SIGNAL] RETURNED: {qty} {item.name} back to {to_loc.name} from {'person' if entry.issued_to else 'non-store'}")
+                else:
+                    # NORMAL RECEIPT (from another store): Increments total quantity
+                    StockRecord.update_balance(item, to_loc, quantity_change=qty, batch=batch)
+                    logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {qty} {item.name} in {to_loc.name}")
+            
+            instance.is_stock_recorded = True
+            instance.save(update_fields=['is_stock_recorded', 'is_in_transit_recorded'])
+
+        # C. Handle "Cancellation" (Reversals)
+        elif entry.status == 'CANCELLED' and instance.is_stock_recorded:
+             if entry.entry_type == 'ISSUE' and from_loc:
+                is_allocation = entry.issued_to or (entry.to_location and not entry.to_location.is_store)
+                if is_allocation:
+                    # Reverse allocation
+                    StockRecord.update_balance(item, from_loc, batch=batch, allocated_change=-qty)
+                    # Mark allocation records collectively as returned or just delete if it's a hard cancel?
+                    # Let's mark as returned/cancelled
+                    from .models.allocation_model import StockAllocation, AllocationStatus
+                    StockAllocation.objects.filter(stock_entry=entry, item=item, batch=batch).update(status=AllocationStatus.RETURNED)
+                    
+                    if instance.instances.exists():
+                        instance.instances.all().update(status='AVAILABLE')
+                else:
+                    # Reverse physical decrement
+                    StockRecord.update_balance(item, from_loc, quantity_change=qty, batch=batch)
+                
+                instance.is_stock_recorded = False
+                instance.save(update_fields=['is_stock_recorded'])
+                logger.info(f"[SIGNAL] CANCELLED ISSUE: Reversed stock/allocation for {item.name}")
 
 @receiver(post_save, sender=StockEntry)
 def process_stock_on_status_change(sender, instance, created, **kwargs):
     """
-    Trigger stock updates for all items when a StockEntry is marked as COMPLETED.
+    Trigger stock updates for all items when a StockEntry status changes.
     """
-    # Only process if status is COMPLETED
-    if instance.status != 'COMPLETED':
-        return
-
-    # 1. Update stock for all items in this entry
     with transaction.atomic():
-        for item_entry in instance.items.all():
-            # We call the same logic that StockEntryItem signal uses, but manually
-            item = item_entry.item
-            qty = item_entry.quantity
-            batch = item_entry.batch
-            from_loc = instance.from_location
-            to_loc = instance.to_location
-            issued_to = instance.issued_to
-
-            if instance.entry_type == 'ISSUE':
-                if from_loc:
-                    StockRecord.update_balance(item, from_loc, -qty, batch)
-                if to_loc is None or issued_to is not None:
-                    item.total_quantity -= qty
-                    item.save(update_fields=['total_quantity'])
+        # Ensure we have the latest items and process their stock effects
+        for entry_item in instance.items.all():
+            process_single_stock_item(entry_item)
             
-            elif instance.entry_type == 'RECEIPT':
-                if to_loc:
-                    StockRecord.update_balance(item, to_loc, qty, batch)
-                if from_loc is None:
-                    item.total_quantity += qty
-                    item.save(update_fields=['total_quantity'])
+            # CRITICAL: If an ISSUE is moving out of DRAFT, we need to create the linked RECEIPT item
+            # which was suppressed in process_stock_entry_item
+            if instance.status != 'DRAFT' and instance.entry_type == 'ISSUE' and instance.to_location and not instance.reference_entry:
+                # We reuse the logic from process_stock_entry_item implicitly by re-triggering the signal logic
+                # or we can explicitly call a helper. Let's just re-save the item to trigger the signal
+                # but wait, process_stock_entry_item is a post_save on StockEntryItem.
+                # If we just change the StockEntry status, the items aren't saved again.
+                # So we manually handle it here for reliability.
+                target_status = instance.status if instance.status == 'PENDING_ACK' else 'COMPLETED'
+                
+                linked_receipt, r_created = StockEntry.objects.get_or_create(
+                    reference_entry=instance,
+                    entry_type='RECEIPT',
+                    defaults={
+                        'entry_number': f"R-{instance.entry_number}",
+                        'entry_date': instance.entry_date,
+                        'from_location': instance.from_location,
+                        'to_location': instance.to_location,
+                        'status': target_status,
+                        'remarks': f"Auto-generated receipt for {instance.entry_number}",
+                        'purpose': instance.purpose,
+                        'created_by': instance.created_by
+                    }
+                )
+                
+                # Create/Update linked item in the receipt
+                receipt_item, i_created = StockEntryItem.objects.get_or_create(
+                    stock_entry=linked_receipt,
+                    item=entry_item.item,
+                    batch=entry_item.batch,
+                    defaults={'quantity': entry_item.quantity}
+                )
+                if not i_created:
+                    receipt_item.quantity = entry_item.quantity
+                    receipt_item.save()
+
+                if entry_item.instances.exists():
+                    receipt_item.instances.set(entry_item.instances.all())
         
-        # 2. Sync status to linked entries
-        # If this is a RECEIPT being acknowledged, ensure the parent ISSUE is also COMPLETED
-        if instance.entry_type == 'RECEIPT' and instance.reference_entry:
+        # Sync bridge status (RECEIPT completion marks Parent ISSUE completion)
+        if instance.status == 'COMPLETED' and instance.entry_type == 'RECEIPT' and instance.reference_entry:
             parent = instance.reference_entry
             if parent.status != 'COMPLETED':
                 parent.status = 'COMPLETED'
-                parent.save(update_fields=['status']) # Triggers this signal for the parent
-                logger.info(f"[SIGNAL] Sync: Marked parent ISSUE {parent.entry_number} as COMPLETED")
+                parent.save(update_fields=['status'])
+                logger.info(f"[SIGNAL] Status Sync: Completed parent ISSUE {parent.entry_number}")
 
-        # If this is an ISSUE (e.g. manually corrected to COMPLETED), ensure children are COMPLETED
-        elif instance.entry_type == 'ISSUE':
-            children = StockEntry.objects.filter(reference_entry=instance, entry_type='RECEIPT')
+        # Propagation: parent ISSUE cancellation cancels linked RECEIPT
+        if instance.status == 'CANCELLED' and instance.entry_type == 'ISSUE':
+            children = StockEntry.objects.filter(reference_entry=instance)
             for child in children:
-                if child.status != 'COMPLETED':
-                    child.status = 'COMPLETED'
-                    child.save(update_fields=['status'])
-                    logger.info(f"[SIGNAL] Sync: Marked child RECEIPT {child.entry_number} as COMPLETED")
+                if child.status != 'CANCELLED':
+                    child.status = 'CANCELLED'
+                    child.cancellation_reason = f"Parent {instance.entry_number} was cancelled. {instance.cancellation_reason or ''}"
+                    child.cancelled_by = instance.cancelled_by
+                    child.cancelled_at = instance.cancelled_at
+                    child.save(update_fields=['status', 'cancellation_reason', 'cancelled_by', 'cancelled_at'])
+                    logger.info(f"[SIGNAL] Propagation: Cancelled linked RECEIPT {child.entry_number}")
+
+@receiver(post_delete, sender=StockEntry)
+def auto_delete_linked_entries(sender, instance, **kwargs):
+    """
+    Automatically delete linked RECEIPT entries when the parent ISSUE is deleted.
+    Prevents orphaned pending receipts in the receiver's list.
+    """
+    # Only delete linked receipts if they are not yet completed
+    # (though COMPLETED entries shouldn't ideally be deleted)
+    linked_entries = StockEntry.objects.filter(reference_entry=instance)
+    for entry in linked_entries:
+        if entry.status in ['PENDING_ACK', 'DRAFT']: # Safety check
+            entry.delete()
+            logger.info(f"[SIGNAL] Auto-deleted orphaned linked RECEIPT {entry.entry_number}")
+
+@receiver(post_delete, sender=StockEntryItem)
+
+def reverse_stock_on_item_delete(sender, instance, **kwargs):
+    """
+    Reverses the effect of a StockEntryItem on StockRecord if it's deleted.
+    Crucial for correcting "In Transit" and physical balances upon deletion.
+    """
+    entry = instance.stock_entry
+    item = instance.item
+    qty = instance.quantity
+    batch = instance.batch
+    from_loc = entry.from_location
+    to_loc = entry.to_location
+
+    with transaction.atomic():
+        # 1. Reverse "In Transit" if it was recorded
+        if instance.is_in_transit_recorded and from_loc:
+            StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-qty)
+            logger.info(f"[SIGNAL] Reversed In-Transit for deleted item: {item.name}")
+
+        # 2. Reverse "Physical Stock" if it was recorded
+        if instance.is_stock_recorded:
+            if entry.entry_type == 'ISSUE' and from_loc:
+                StockRecord.update_balance(item, from_loc, quantity_change=qty, batch=batch)
+            elif entry.entry_type == 'RECEIPT' and to_loc:
+                StockRecord.update_balance(item, to_loc, quantity_change=-qty, batch=batch)
+            elif entry.entry_type in ['TRANSFER', 'CORRECTION']:
+                if from_loc: StockRecord.update_balance(item, from_loc, qty, batch)
+                if to_loc: StockRecord.update_balance(item, to_loc, -qty, batch)
+            logger.info(f"[SIGNAL] Reversed COMPLETED stock for deleted item: {item.name}")
 
 @receiver(m2m_changed, sender=StockEntryItem.instances.through)
 def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
@@ -216,5 +360,3 @@ def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
         if to_loc:
             ItemInstance.objects.filter(pk__in=pk_set).update(current_location=to_loc)
             logger.info(f"Updated {len(pk_set)} instances to location {to_loc.name}")
-
-

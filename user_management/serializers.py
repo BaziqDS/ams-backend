@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from django.contrib.auth.models import User, Permission
+from django.contrib.auth.models import User, Permission, Group
 from .models import UserProfile
 from inventory.models.location_model import Location
 
@@ -39,21 +39,33 @@ class UserManagementSerializer(serializers.ModelSerializer):
         slug_field='codename',
         required=False
     )
+    groups = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Group.objects.all(),
+        required=False
+    )
+    groups_display = serializers.StringRelatedField(
+        source='groups',
+        many=True,
+        read_only=True
+    )
     is_active = serializers.BooleanField(source='profile.is_active', required=False)
+    power_level = serializers.IntegerField(source='profile.power_level', read_only=True)
     password = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         model = User
         fields = (
             'id', 'username', 'email', 'first_name', 'last_name', 'password',
-            'is_superuser', 'is_staff', 'is_active',
+            'is_superuser', 'is_staff', 'is_active', 'power_level',
             'employee_id', 'assigned_locations', 'assigned_locations_display',
-            'user_permissions_list'
+            'user_permissions_list', 'groups', 'groups_display'
         )
 
     def create(self, validated_data):
         profile_data = validated_data.pop('profile', {})
         user_permissions = validated_data.pop('user_permissions', [])
+        groups = validated_data.pop('groups', [])
         password = validated_data.pop('password', None)
         
         # Create user using create_user to hash password
@@ -69,6 +81,9 @@ class UserManagementSerializer(serializers.ModelSerializer):
 
         if user_permissions:
             user.user_permissions.set(user_permissions)
+        
+        if groups:
+            user.groups.set(groups)
 
         # Profile is created by signal, so we update it
         profile = user.profile
@@ -95,6 +110,9 @@ class UserManagementSerializer(serializers.ModelSerializer):
         
         if 'user_permissions_list' in validated_data:
             instance.user_permissions.set(validated_data['user_permissions_list'])
+        
+        if 'groups' in validated_data:
+            instance.groups.set(validated_data['groups'])
             
         instance.save()
 
@@ -150,3 +168,27 @@ class RegisterSerializer(serializers.ModelSerializer):
         profile.save()
         
         return user
+
+class GroupSerializer(serializers.ModelSerializer):
+    permissions_details = serializers.SerializerMethodField()
+    permissions = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Permission.objects.all(),
+        required=False
+    )
+
+    class Meta:
+        model = Group
+        fields = ('id', 'name', 'permissions', 'permissions_details')
+
+    def get_permissions_details(self, obj):
+        perms = obj.permissions.select_related('content_type')
+        return [
+            {
+                'id': p.id,
+                'name': p.name,
+                'codename': p.codename,
+                'model': p.content_type.model
+            }
+            for p in perms
+        ]

@@ -15,9 +15,6 @@ class StockEntry(models.Model):
     ENTRY_TYPE_CHOICES = [
         ('RECEIPT', 'Receipt'),
         ('ISSUE', 'Issue'),
-        ('TRANSFER', 'Transfer'),
-        ('CORRECTION', 'Correction'),
-        ('RETURN', 'Return'),
     ]
 
     STATUS_CHOICES = [
@@ -66,14 +63,6 @@ class StockEntry(models.Model):
         related_name='correction_entries'
     )
 
-    # Transfer tracking
-    requires_acknowledgment = models.BooleanField(default=False)
-    is_cross_location = models.BooleanField(default=False)
-    is_upward_transfer = models.BooleanField(
-        default=False,
-        help_text="True if this is a main store issuing UP to parent standalone location"
-    )
-    
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     created_by = models.ForeignKey(
         User, 
@@ -93,26 +82,69 @@ class StockEntry(models.Model):
     remarks = models.TextField(blank=True, null=True)
     purpose = models.CharField(max_length=255, blank=True, null=True)
     
-    # NEW: Acknowledgment details for bulk items
-    acknowledgment_details = models.JSONField(
-        default=dict,
+    cancellation_reason = models.TextField(blank=True, null=True)
+    cancelled_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        help_text="Details of what was accepted/rejected for bulk items"
+        related_name='cancelled_entries'
     )
-    
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def delete(self, *args, **kwargs):
+        if self.status != 'DRAFT':
+            raise ValidationError("Only DRAFT entries can be deleted. Cancel instead to maintain an audit trail.")
+        super().delete(*args, **kwargs)
+
     def clean(self):
         super().clean()
-        # Validation for Stock Availability
-        if self.entry_type in ['ISSUE', 'TRANSFER'] and self.from_location:
-            from .stock_record_model import StockRecord
-            # Note: Since StockEntry has multiple items now, we can't easily validate 
-            # the whole entry in the main clean() if the items aren't saved yet.
-            # However, for single-item legacy logic or validation during save, 
-            # we should move this to the StockEntryItem or Serializer.
-            pass
+        
+        # 1. Hierarchical Movement Validation (Store-to-Store)
+        if self.from_location and self.to_location and self.from_location.is_store and self.to_location.is_store:
+            level_from = self.from_location.hierarchy_level
+            level_to = self.to_location.hierarchy_level
+            
+            # L1 Rules
+            if level_from == 1:
+                if level_to != 2:
+                    raise ValidationError("L1 Store (Central) can only issue to L2 Stores (Department Stores).")
+            
+            # L2 Rules
+            elif level_from == 2:
+                is_return_to_l1 = (level_to == 1)
+                is_issue_to_l3_child = (level_to == 3 and self.to_location.parent_location == self.from_location)
+                if not (is_return_to_l1 or is_issue_to_l3_child):
+                    raise ValidationError("L2 Store can only return to L1 or issue to its direct L3 Sub-Stores.")
+            
+            # L3 Rules
+            elif level_from == 3:
+                is_return_to_l2_parent = (level_to == 2 and self.from_location.parent_location == self.to_location)
+                if not is_return_to_l2_parent:
+                    raise ValidationError("L3 Store can only return to its parent L2 Store.")
+
+        # 2. Allocation Scope Validation (Issuance to Use)
+        if self.entry_type == 'ISSUE' and (self.issued_to or (self.to_location and not self.to_location.is_store)):
+            if self.created_by and hasattr(self.created_by, 'profile'):
+                profile = self.created_by.profile
+                if profile.power_level > 0: # Non-Global (Tier 1/2)
+                    source_standalone = self.from_location.get_parent_standalone() if self.from_location else None
+                    if not source_standalone:
+                        raise ValidationError("Source store must belong to a Department for departmental allocations.")
+                        
+                    if self.issued_to:
+                        # Check person department matches standalone name
+                        if self.issued_to.department and self.issued_to.department != source_standalone.name:
+                            raise ValidationError(f"Cannot allocate to {self.issued_to.name}. They belong to {self.issued_to.department}, not {source_standalone.name}.")
+                    
+                    if self.to_location and not self.to_location.is_store:
+                        # Check target location is in same standalone unit
+                        target_standalone = self.to_location.get_parent_standalone()
+                        if target_standalone != source_standalone:
+                            raise ValidationError(f"Target location {self.to_location.name} is not in the same department as the source store.")
 
     def generate_entry_number(self):
         """
@@ -120,12 +152,14 @@ class StockEntry(models.Model):
         """
         prefix = 'SE'
         date_str = timezone.now().strftime('%Y%m%d')
-        
-        # Get the highest ID to ensure uniqueness in the sequence
         last_entry = StockEntry.objects.all().order_by('-id').first()
         next_id = (last_entry.id + 1) if last_entry else 1
-        
         return f"{prefix}-{date_str}-{next_id:04d}"
+
+    class Meta:
+        permissions = [
+            ("acknowledge_stockentry", "Can acknowledge stock receipt entries"),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.entry_number:
@@ -139,10 +173,13 @@ class StockEntryItem(models.Model):
     instances = models.ManyToManyField(ItemInstance, blank=True, related_name='stock_entry_items')
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     
+    # Tracking flags for signals
+    is_in_transit_recorded = models.BooleanField(default=False)
+    is_stock_recorded = models.BooleanField(default=False)
+
     def clean(self):
         super().clean()
         from .stock_record_model import StockRecord
-        
         # Check stock availability for movements out of a location
         if self.stock_entry.entry_type in ['ISSUE', 'TRANSFER', 'RETURN'] and self.stock_entry.from_location:
             try:
@@ -151,19 +188,14 @@ class StockEntryItem(models.Model):
                     location=self.stock_entry.from_location,
                     batch=self.batch
                 )
-                if record.quantity < self.quantity:
+                if record.available_quantity < self.quantity:
                     raise ValidationError(
-                        f"Insufficient stock for {self.item.name}. "
-                        f"Available: {record.quantity}, Requested: {self.quantity}"
+                        f"Insufficient available stock for {self.item.name}. "
+                        f"Physical Total: {record.quantity}, In Transit: {record.in_transit_quantity}, "
+                        f"Available: {record.available_quantity}, Requested: {self.quantity}"
                     )
             except StockRecord.DoesNotExist:
                 raise ValidationError(f"No stock record found for {self.item.name} at the source location.")
 
-        if self.item.tracking_type == 'INDIVIDUAL' and self.instances.count() != self.quantity:
-            # This is still hard to enforce in clean() before M2M is saved
-            pass
-
     def __str__(self):
-
         return f"{self.item.name} x {self.quantity}"
-

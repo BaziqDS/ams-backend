@@ -75,6 +75,9 @@ class UserProfile(models.Model):
         if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
+        if self.user.groups.filter(name='Central Store Manager').exists():
+            return Location.objects.filter(is_active=True)
+
         location_ids = set()
         for loc in self.assigned_locations.all():
             # 1. Include descendants (Managed area)
@@ -96,22 +99,55 @@ class UserProfile(models.Model):
                     Location.objects.filter(is_store=True, hierarchy_level=2).values_list('id', flat=True)
                 )
             
+            # 4. If assigned to a store, include all non-store locations in the same standalone unit (department)
+            if loc.is_store:
+                standalone = loc.get_parent_standalone()
+                if standalone:
+                    location_ids.update(
+                        Location.objects.filter(
+                            hierarchy_path__startswith=standalone.hierarchy_path,
+                            is_store=False
+                        ).values_list('id', flat=True)
+                    )
+            
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
     def get_descendant_locations(self):
         """
         Returns a queryset of locations strictly at or below the user's assigned locations.
         Used for inventory visibility (can't see above me).
+        Exception: Level 1 Stores can see EVERYTHING (University wide).
         """
         from inventory.models import Location
         
         if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
+        # Check for Central Store Manager role (global visibility)
+        if self.user.groups.filter(name='Central Store Manager').exists():
+            return Location.objects.filter(is_active=True)
+
         location_ids = set()
-        for loc in self.assigned_locations.all():
+        assigned_locs = self.assigned_locations.all()
+
+        # Check for Level 1 Store status first (legacy logic, usually part of Central Store Manager now)
+        for loc in assigned_locs:
+            if loc.is_store and loc.hierarchy_level == 1:
+                return Location.objects.filter(is_active=True)
+
+        for loc in assigned_locs:
+            # 1. Include descendants (Managed area)
             descendants = loc.get_descendants(include_self=True)
             location_ids.update(descendants.values_list('id', flat=True))
+
+            # 2. Departmental Context: If in a store, allow seeing everything in that department
+            if loc.is_store:
+                standalone = loc.get_parent_standalone()
+                if standalone:
+                    department_locs = Location.objects.filter(
+                        hierarchy_path__startswith=standalone.hierarchy_path
+                    )
+                    location_ids.update(department_locs.values_list('id', flat=True))
             
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
@@ -122,6 +158,99 @@ class UserProfile(models.Model):
         """Helper to list all dynamic permissions for UI displays."""
         return self.user.get_all_permissions()
 
+    @property
+    def power_level(self):
+        """
+        Calculates the hierarchical power level:
+        0: Global (Central Store Manager / Superuser)
+        1: Standalone Unit (Dept Head / Unit Manager)
+        2: Operational (Specific Room / Sub-Store assigned)
+        3: Personal (No assignment, only sees allocations)
+        """
+        if self.user.is_superuser or self.user.groups.filter(name='Central Store Manager').exists():
+            return 0
+        
+        assigned_locs = self.assigned_locations.all()
+        if not assigned_locs.exists():
+            return 3
+            
+        if any(loc.is_standalone for loc in assigned_locs):
+            return 1
+            
+        return 2
+
+    def get_transferrable_locations(self, from_location):
+        """
+        Enforces strict directional flow based on Store Hierarchy.
+        L1 -> L2 only
+        L2 -> L1 (Return) or L3 (Children)
+        L3 -> L2 (Return) only
+        """
+        from inventory.models import Location
+        
+        if not from_location.is_store:
+            return Location.objects.none()
+
+        level = from_location.hierarchy_level
+        
+        if level == 1: # Central Store
+            # Can issue to any L2 Main Store
+            return Location.objects.filter(is_store=True, hierarchy_level=2, is_main_store=True, is_active=True)
+            
+        if level == 2: # Dept Main Store
+            # 1. Return to L1
+            l1_stores = Location.objects.filter(is_store=True, hierarchy_level=1, is_active=True)
+            # 2. Issue to L3 children in same unit
+            l3_stores = Location.objects.filter(
+                parent_location=from_location, 
+                is_store=True, 
+                hierarchy_level=3, 
+                is_active=True
+            )
+            return (l1_stores | l3_stores).distinct()
+            
+        if level == 3: # Section Store
+            # Can only return to Parent L2
+            if from_location.parent_location:
+                return Location.objects.filter(id=from_location.parent_location_id, is_active=True)
+                
+        return Location.objects.none()
+
+    def get_allocatable_targets(self, source_store):
+        """
+        Defines the scope for issuing items to persons or rooms.
+        L1: Global allocation
+        L2/L3: Departmental allocation
+        """
+        from inventory.models import Location, Person
+        
+        if self.power_level == 0:
+            # Global allocation
+            return {
+                'locations': Location.objects.filter(is_store=False, is_active=True),
+                'persons': Person.objects.filter(is_active=True)
+            }
+            
+        # Departmental allocation
+        standalone = source_store.get_parent_standalone()
+        if not standalone:
+            return {'locations': Location.objects.none(), 'persons': Person.objects.none()}
+            
+        dept_locations = Location.objects.filter(
+            hierarchy_path__startswith=standalone.hierarchy_path,
+            is_store=False,
+            is_active=True
+        )
+        
+        # Filter persons related to department
+        dept_persons = Person.objects.filter(department=standalone.name, is_active=True)
+        if not dept_persons.exists():
+            dept_persons = Person.objects.filter(is_active=True)
+            
+        return {
+            'locations': dept_locations,
+            'persons': dept_persons
+        }
+
     class Meta:
         verbose_name = "User Profile"
-        # No hardcoded roles here! We use standard Django permissions in ViewSets.
