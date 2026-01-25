@@ -25,6 +25,10 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
         if item_id:
             queryset = queryset.filter(item_id=item_id)
             
+        location_id = self.request.query_params.get('location')
+        if location_id:
+            queryset = queryset.filter(location_id=location_id)
+            
         return self.get_scoped_queryset(queryset)
 
     @action(detail=False, methods=['get'])

@@ -14,20 +14,37 @@ logger = logging.getLogger(__name__)
 def auto_create_store_for_standalone(sender, instance, created, **kwargs):
     """
     Automatically create a main store for standalone locations.
+    - Root standalone (ID 1) gets "Central Store" (ID 2).
+    - Child standalones (Departments) get stores parented by themselves to ensure UI visibility.
     """
     if created and instance.is_standalone and not instance.is_store:
-        store_code = f"{instance.code}-MAIN-STORE"
-        store_name = f"{instance.name} - Main Store"
+        is_root = instance.parent_location is None
+        
+        if is_root:
+            store_code = "CENTRAL-STORE"
+            store_name = "Central Store"
+            # Root store's physical parent is the root location (ID 1)
+            store_parent = instance
+        else:
+            store_code = f"{instance.code}-MAIN-STORE"
+            store_name = f"{instance.name} - Main Store"
+            # Every departmental store must have its standalone location as parent for visibility
+            store_parent = instance
 
         # Check if a store already exists with this code to be safe
         if Location.objects.filter(code=store_code).exists():
             logger.warning(f"Store with code {store_code} already exists for {instance.name}")
+            # Try to link existing store if it's the root case
+            if is_root:
+                existing_store = Location.objects.get(code=store_code)
+                instance.auto_created_store = existing_store
+                instance.save(update_fields=['auto_created_store'])
             return
 
         store = Location.objects.create(
             name=store_name,
             code=store_code,
-            parent_location=instance,
+            parent_location=store_parent,
             location_type=LocationType.STORE,
             is_store=True,
             is_auto_created=True,
@@ -44,7 +61,7 @@ def auto_create_store_for_standalone(sender, instance, created, **kwargs):
         instance.auto_created_store = store
         instance.save(update_fields=['auto_created_store'])
         
-        logger.info(f"[SIGNAL] Auto-created main store {store_name} for standalone location {instance.name}")
+        logger.info(f"[SIGNAL] Auto-created hierarchical store {store_name} (parent: {store_parent.name}) for standalone {instance.name}")
 
 @receiver(post_save, sender=StockEntryItem)
 def process_stock_entry_item(sender, instance, created, **kwargs):

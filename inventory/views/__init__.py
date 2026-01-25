@@ -4,5 +4,6 @@ from .item_views import ItemViewSet
 from .distribution_views import StockRecordViewSet
 from .stockentry_views import StockEntryViewSet, PersonViewSet
 from .allocation_views import StockAllocationViewSet
+from .inspection_views import InspectionViewSet
 
 

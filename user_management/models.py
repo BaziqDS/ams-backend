@@ -30,11 +30,10 @@ class UserProfile(models.Model):
         """
         Pure hierarchy check: Is the target location within my assigned nodes?
         """
-        if self.user.is_superuser:
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return True
             
         # Check direct or descendant access
-        # Uses hierarchy_path from the Location model we designed
         for assigned_loc in self.assigned_locations.all():
             if location == assigned_loc or location.hierarchy_path.startswith(f"{assigned_loc.hierarchy_path}/"):
                 return True
@@ -72,10 +71,7 @@ class UserProfile(models.Model):
         if required_perm and not self.user.has_perm(required_perm):
             return Location.objects.none()
 
-        if self.user.is_superuser:
-            return Location.objects.filter(is_active=True)
-
-        if self.user.groups.filter(name='Central Store Manager').exists():
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return Location.objects.filter(is_active=True)
 
         location_ids = set()
@@ -120,11 +116,7 @@ class UserProfile(models.Model):
         """
         from inventory.models import Location
         
-        if self.user.is_superuser:
-            return Location.objects.filter(is_active=True)
-
-        # Check for Central Store Manager role (global visibility)
-        if self.user.groups.filter(name='Central Store Manager').exists():
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return Location.objects.filter(is_active=True)
 
         location_ids = set()
@@ -161,23 +153,20 @@ class UserProfile(models.Model):
     @property
     def power_level(self):
         """
-        Calculates the hierarchical power level:
-        0: Global (Central Store Manager / Superuser)
-        1: Standalone Unit (Dept Head / Unit Manager)
-        2: Operational (Specific Room / Sub-Store assigned)
-        3: Personal (No assignment, only sees allocations)
+        Deprecated in favor of explicit Roles (Groups).
+        Kept for backward-compatibility with UI list displays.
+        0: System Admin
+        1: Operational / Assigned
+        3: Personal / No Assignment
         """
-        if self.user.is_superuser or self.user.groups.filter(name='Central Store Manager').exists():
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return 0
         
         assigned_locs = self.assigned_locations.all()
         if not assigned_locs.exists():
             return 3
             
-        if any(loc.is_standalone for loc in assigned_locs):
-            return 1
-            
-        return 2
+        return 1
 
     def get_transferrable_locations(self, from_location):
         """

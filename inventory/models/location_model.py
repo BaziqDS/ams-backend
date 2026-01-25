@@ -105,19 +105,40 @@ class Location(models.Model):
                 raise ValidationError({'code': f"Location code '{self.code}' is already in use"})
 
         if not self.parent_location:
-            existing_root = Location.objects.filter(parent_location__isnull=True)
-            if self.pk: existing_root = existing_root.exclude(pk=self.pk)
-            if existing_root.exists():
-                raise ValidationError({'parent_location': "Only one root location is allowed."})
-
-        if not self.parent_location and not self.is_standalone:
-            raise ValidationError("Root location must be marked as standalone")
+            # Check if any location exists (to allow the very first root)
+            if Location.objects.exists():
+                # If we are creating/editing and there is no parent, it's only allowed
+                # if the current object IS the root (ID 1)
+                root = Location.objects.order_by('id').first()
+                if self.pk != root.pk:
+                    raise ValidationError({'parent_location': f"All standalone units must have '{root.name}' as their parent."})
+            
+            if not self.is_standalone:
+                raise ValidationError("Only standalone root locations can have no parent.")
+        else:
+            # If a parent is provided and this is a NEW standalone unit, 
+            # it MUST be a child of the root (ID 1)
+            if self.is_standalone and not self.pk:
+                root = Location.objects.order_by('id').first()
+                if self.parent_location.pk != root.pk:
+                    raise ValidationError({'parent_location': f"New standalone units must be directly parented by '{root.name}' (ID: {root.pk})."})
 
         if self.is_store and self.is_standalone:
             raise ValidationError("Store locations cannot be marked as standalone")
 
         if self.is_main_store and not self.is_store:
             raise ValidationError("Only store locations can be marked as main stores")
+
+        # Strict 3-Level Store Hierarchy Enforcement
+        if self.is_store and self.parent_location and self.parent_location.is_store:
+            # If our parent is a store, and that parent ALSO has a parent that is a store,
+            # then we would be the 4th level in a store-to-store chain.
+            # Central(1) -> None
+            # Main(2) -> None (parent is unit)
+            # Sub(3) -> Main(2) (parent is store, but parent's parent is unit)
+            # Sub-Sub(4) -> Sub(3) (parent is store AND parent's parent is store)
+            if self.parent_location.parent_location and self.parent_location.parent_location.is_store:
+                raise ValidationError("Store hierarchy depth cannot exceed 3 levels (Institutional -> Departmental -> Internal).")
 
     def save(self, *args, **kwargs):
         if not self.code:
