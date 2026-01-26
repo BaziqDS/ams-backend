@@ -7,6 +7,8 @@ from .models.location_model import Location, LocationType
 from .models.stockentry_model import StockEntry, StockEntryItem
 from .models.stock_record_model import StockRecord
 from .models.instance_model import ItemInstance
+from .models.inspection_model import InspectionCertificate, InspectionItem
+from .models.batch_model import ItemBatch
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +87,9 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
                 'from_location': stock_entry.from_location,
                 'to_location': stock_entry.to_location,
                 'status': target_status,
-                'remarks': f"Auto-generated receipt for {stock_entry.entry_number}",
+                'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
                 'purpose': stock_entry.purpose,
+                'inspection_certificate': stock_entry.inspection_certificate,
                 'created_by': stock_entry.created_by
             }
         )
@@ -282,8 +285,9 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                         'from_location': instance.from_location,
                         'to_location': instance.to_location,
                         'status': target_status,
-                        'remarks': f"Auto-generated receipt for {instance.entry_number}",
+                        'remarks': f"Auto-generated receipt for {instance.entry_number}. {instance.remarks or ''}",
                         'purpose': instance.purpose,
+                        'inspection_certificate': instance.inspection_certificate,
                         'created_by': instance.created_by
                     }
                 )
@@ -377,3 +381,118 @@ def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
         if to_loc:
             ItemInstance.objects.filter(pk__in=pk_set).update(current_location=to_loc)
             logger.info(f"Updated {len(pk_set)} instances to location {to_loc.name}")
+
+@receiver(post_save, sender=InspectionCertificate)
+def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
+    """
+    Automatically create stock entries when an Inspection Certificate is COMPLETED.
+    """
+    if instance.status != 'COMPLETED':
+        return
+
+    # Guard against double creation
+    if StockEntry.objects.filter(inspection_certificate=instance, entry_type='RECEIPT').exists():
+        return
+
+    with transaction.atomic():
+        # 1. Setup Stores
+        root_location = Location.objects.order_by('id').first()
+        if not root_location or not root_location.auto_created_store:
+            logger.error(f"[SIGNAL] Failed to generate stock entry: Root store not found.")
+            return
+            
+        central_store = root_location.auto_created_store
+        target_store = instance.department.auto_created_store
+        
+        if not target_store:
+            logger.error(f"[SIGNAL] Failed to generate stock entry: Target store for {instance.department.name} not found.")
+            return
+
+        # 2. Create Initial RECEIPT entry in Central Store
+        receipt = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            to_location=central_store,
+            status='COMPLETED',
+            remarks=f"Generated from Inspection Certificate: {instance.contract_no}",
+            purpose=f"Initial stock receipt for Contract/Invoice: {instance.contract_no}",
+            inspection_certificate=instance,
+            created_by=instance.finance_reviewed_by or instance.initiated_by
+        )
+
+        items_to_move = []
+        for i_item in instance.items.filter(accepted_quantity__gt=0):
+            # Find or Create Batch
+            batch = None
+            if i_item.batch_number:
+                batch, _ = ItemBatch.objects.get_or_create(
+                    item=i_item.item,
+                    batch_number=i_item.batch_number,
+                    defaults={
+                        'expiry_date': i_item.expiry_date,
+                        'created_by': receipt.created_by
+                    }
+                )
+            
+            # Create StockEntryItem for Receipt
+            sei = StockEntryItem.objects.create(
+                stock_entry=receipt,
+                item=i_item.item,
+                batch=batch,
+                quantity=i_item.accepted_quantity
+            )
+
+            # 2.1 Handle Individual Tracking (Instance Generation)
+            tracking_type = i_item.item.category.get_tracking_type()
+            if tracking_type == 'INDIVIDUAL':
+                instances = []
+                for idx in range(i_item.accepted_quantity):
+                    # Auto-generate serial if empty
+                    serial = f"SN-{i_item.item.code}-{receipt.id}-{idx+1}"
+                    instance_obj = ItemInstance.objects.create(
+                        item=i_item.item,
+                        batch=batch,
+                        serial_number=serial,
+                        current_location=central_store,
+                        status='AVAILABLE',
+                        created_by=receipt.created_by
+                    )
+                    instances.append(instance_obj)
+                
+                # Link instances to the entry item
+                sei.instances.set(instances)
+
+            items_to_move.append((i_item.item, batch, i_item.accepted_quantity, (instances if tracking_type == 'INDIVIDUAL' else [])))
+
+        logger.info(f"[SIGNAL] Logic: Auto-created RECEIPT {receipt.entry_number} for Inspection {instance.contract_no}")
+
+        # 3. Create ISSUE entry if it's for a Specific Department (Hierarchy Level != 0)
+        if instance.department.hierarchy_level != 0:
+            # Check if target is same as central (redundant check but safe)
+            if target_store.id == central_store.id:
+                return
+
+            issue = StockEntry.objects.create(
+                entry_type='ISSUE',
+                from_location=central_store,
+                to_location=target_store,
+                status='COMPLETED',
+                remarks=f"Inter-store transfer from Central to {instance.department.name} for Contract: {instance.contract_no}",
+                purpose=f"Departmental distribution for Contract: {instance.contract_no}",
+                inspection_certificate=instance,
+                created_by=receipt.created_by
+            )
+
+            for item, batch, qty, instances in items_to_move:
+                issue_item = StockEntryItem.objects.create(
+                    stock_entry=issue,
+                    item=item,
+                    batch=batch,
+                    quantity=qty
+                )
+                if instances:
+                    issue_item.instances.set(instances)
+            
+            logger.info(f"[SIGNAL] Logic: Auto-created ISSUE {issue.entry_number} for distribution to {instance.department.name}")
+            # Note: The linked RECEIPT for the target store will be automatically created
+            # by the post_save signal on StockEntryItem (process_stock_entry_item) 
+            # when the COMPLETED ISSUE items are saved.

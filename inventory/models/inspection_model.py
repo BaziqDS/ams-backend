@@ -84,6 +84,12 @@ class InspectionCertificate(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        permissions = [
+            ("initiate_inspection", "Can initiate inspection"),
+            ("fill_stock_details", "Can fill stock details (Stage 2)"),
+            ("fill_central_register", "Can fill central register (Stage 3)"),
+            ("review_finance", "Can perform finance review (Stage 4)"),
+        ]
 
 class InspectionItem(models.Model):
     inspection_certificate = models.ForeignKey(

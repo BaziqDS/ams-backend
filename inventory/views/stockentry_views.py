@@ -93,10 +93,26 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def get_queryset(self):
+        from django.db.models import Q
+        user = self.request.user
         queryset = super().get_queryset()
-        
-        # Security: Filter by location hierarchy (Sender or Receiver visibility)
-        queryset = self.get_scoped_queryset(queryset, location_field=['from_location', 'to_location'])
+
+        if user.is_superuser or user.groups.filter(name='Central Store Manager').exists():
+            # Global/Central managers see everything
+            pass 
+        elif hasattr(user, 'profile'):
+            accessible_locations = user.profile.get_descendant_locations()
+            
+            # Refined Filtering:
+            # 1. Show if the user's location is the SOURCE (Sender)
+            # 2. Show if the user's location is the TARGET (Receiver) AND it's NOT an 'ISSUE'
+            #    (Level 2 managers should only see the 'RECEIPT' generated for them, not the sender's 'ISSUE')
+            queryset = queryset.filter(
+                Q(from_location__in=accessible_locations) |
+                (Q(to_location__in=accessible_locations) & ~Q(entry_type='ISSUE'))
+            ).distinct()
+        else:
+            return queryset.none()
 
         entry_type = self.request.query_params.get('entry_type')
         if entry_type:

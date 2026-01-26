@@ -107,6 +107,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 "id": alloc.id,
                 "targetName": target_name,
                 "targetType": target_type,
+                "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
                 "sourceStoreName": alloc.source_location.name,
                 "batchNumber": alloc.batch.batch_number if alloc.batch else None,
                 "quantity": alloc.quantity,

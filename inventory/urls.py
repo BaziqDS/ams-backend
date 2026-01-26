@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     LocationViewSet, CategoryViewSet, ItemViewSet, 
     StockRecordViewSet, StockEntryViewSet, PersonViewSet,
-    StockAllocationViewSet, InspectionViewSet
+    StockAllocationViewSet, InspectionViewSet, ItemInstanceViewSet
 )
 
 router = DefaultRouter()
@@ -15,6 +15,7 @@ router.register(r'stock-entries', StockEntryViewSet, basename='stock-entry')
 router.register(r'stock-allocations', StockAllocationViewSet, basename='stock-allocation')
 router.register(r'inspections', InspectionViewSet, basename='inspection')
 router.register(r'persons', PersonViewSet, basename='person')
+router.register(r'item-instances', ItemInstanceViewSet, basename='item-instance')
 
 
 

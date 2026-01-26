@@ -20,6 +20,9 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def initiate(self, request, pk=None):
         instance = self.get_object()
+        if not request.user.has_perm('inventory.initiate_inspection'):
+            return Response({'detail': 'You do not have permission to initiate inspections.'}, status=status.HTTP_403_FORBIDDEN)
+            
         if instance.stage != InspectionStage.DRAFT:
             return Response({'detail': f'Cannot initiate an inspection that is in {instance.stage} stage.'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -37,6 +40,9 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if instance.department.hierarchy_level == 0:
             return Response({'detail': 'Main University inspections skip Stock Details stage.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not request.user.has_perm('inventory.fill_stock_details'):
+            return Response({'detail': 'You do not have permission to fill stock details.'}, status=status.HTTP_403_FORBIDDEN)
+
         if instance.stage != InspectionStage.INITIATED:
             return Response({'detail': f'Cannot transition from {instance.stage} to STOCK_DETAILS.'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -48,6 +54,18 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def submit_to_central_register(self, request, pk=None):
         instance = self.get_object()
         
+        if not request.user.has_perm('inventory.fill_central_register'):
+            return Response({'detail': 'You do not have permission to fill central register.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Restriction: Must be "Stock In-charge" and assigned to a Level 1 Store
+        is_stock_incharge = request.user.groups.filter(name='Stock In-charge').exists()
+        has_l1_store = request.user.profile.assigned_locations.filter(is_store=True, hierarchy_level=1).exists()
+
+        if not (is_stock_incharge and has_l1_store):
+            return Response({
+                'detail': 'Only a "Stock In-charge" assigned to the Central Store (Level 1) can perform this action.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         allowed_stages = [InspectionStage.STOCK_DETAILS]
         if instance.department.hierarchy_level == 0:
             allowed_stages.append(InspectionStage.INITIATED)
@@ -64,6 +82,9 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def submit_to_finance_review(self, request, pk=None):
         instance = self.get_object()
+        if not request.user.has_perm('inventory.review_finance'):
+            return Response({'detail': 'You do not have permission to perform finance review.'}, status=status.HTTP_403_FORBIDDEN)
+
         if instance.stage != InspectionStage.CENTRAL_REGISTER:
             return Response({'detail': f'Cannot transition from {instance.stage} to FINANCE_REVIEW.'}, status=status.HTTP_400_BAD_REQUEST)
         

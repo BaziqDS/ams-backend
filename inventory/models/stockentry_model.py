@@ -62,6 +62,14 @@ class StockEntry(models.Model):
         blank=True, 
         related_name='correction_entries'
     )
+    
+    inspection_certificate = models.ForeignKey(
+        'InspectionCertificate',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='stock_entries'
+    )
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     created_by = models.ForeignKey(
