@@ -6,5 +6,7 @@ from .stockentry_views import StockEntryViewSet, PersonViewSet
 from .allocation_views import StockAllocationViewSet
 from .inspection_views import InspectionViewSet
 from .instance_views import ItemInstanceViewSet
+from .batch_views import ItemBatchViewSet
+from .history_views import MovementHistoryViewSet
 
 

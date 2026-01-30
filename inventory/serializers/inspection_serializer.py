@@ -5,6 +5,7 @@ from ..models.inspection_model import InspectionCertificate, InspectionItem, Ins
 from ..models import Item, ItemBatch
 
 class InspectionItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
     item_name = serializers.CharField(source='item.name', read_only=True)
     item_code = serializers.CharField(source='item.code', read_only=True)
 
@@ -26,6 +27,7 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
     department_hierarchy_level = serializers.IntegerField(source='department.hierarchy_level', read_only=True)
     initiated_by_name = serializers.CharField(source='initiated_by.username', read_only=True)
+    is_initiated = serializers.BooleanField(write_only=True, required=False, default=False)
     
     class Meta:
         model = InspectionCertificate
@@ -37,11 +39,11 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             'date_of_delivery', 'delivery_type', 'remarks',
             'inspected_by', 'date_of_inspection',
             'consignee_name', 'consignee_designation',
-            'stage', 'status', 'items',
+            'stage', 'status', 'items', 'is_initiated',
             'initiated_by', 'initiated_by_name', 'initiated_at',
             'stock_filled_by', 'stock_filled_at',
             'central_store_filled_by', 'central_store_filled_at',
-            'finance_reviewed_at', 'finance_reviewed_by',
+            'finance_reviewed_at', 'finance_reviewed_by', 'finance_check_date',
             'rejected_by', 'rejected_at', 'rejection_reason', 'rejection_stage',
             'created_at', 'updated_at'
         )
@@ -56,10 +58,25 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
+        is_initiated = validated_data.pop('is_initiated', False)
+        
         request = self.context.get('request')
         if request and request.user:
             validated_data['initiated_by'] = request.user
         
+        if is_initiated:
+            validated_data['status'] = 'IN_PROGRESS'
+            validated_data['initiated_at'] = timezone.now()
+            
+            department = validated_data.get('department')
+            if department and department.hierarchy_level == 0:
+                validated_data['stage'] = InspectionStage.CENTRAL_REGISTER
+            else:
+                validated_data['stage'] = InspectionStage.STOCK_DETAILS
+        else:
+            validated_data['status'] = 'DRAFT'
+            validated_data['stage'] = InspectionStage.DRAFT
+
         with transaction.atomic():
             certificate = InspectionCertificate.objects.create(**validated_data)
             for item_data in items_data:
@@ -84,7 +101,7 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             if items_data is not None:
                 # Simple approach for Stage 1/2: rebuild the list
                 # For more complex updates, we'd need to match by ID.
-                if instance.stage in [InspectionStage.INITIATED, InspectionStage.STOCK_DETAILS, InspectionStage.CENTRAL_REGISTER]:
+                if instance.stage in [InspectionStage.DRAFT, InspectionStage.STOCK_DETAILS, InspectionStage.CENTRAL_REGISTER]:
                     # To avoid deleting items that might have IDs we want to keep, let's do a basic sync
                     existing_items = {item.id: item for item in instance.items.all()}
                     

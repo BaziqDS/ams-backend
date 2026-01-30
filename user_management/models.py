@@ -116,31 +116,32 @@ class UserProfile(models.Model):
         """
         from inventory.models import Location
         
-        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+        # 1. Global Visibility (System Admin or users with global distribution perm)
+        if (self.user.is_superuser or 
+            self.user.groups.filter(name='System Admin').exists() or 
+            self.user.has_perm('inventory.view_global_distribution') or
+            self.user.has_perm('inventory.manage_all_locations')):
             return Location.objects.filter(is_active=True)
 
         location_ids = set()
         assigned_locs = self.assigned_locations.all()
 
-        # Check for Level 1 Store status first (legacy logic, usually part of Central Store Manager now)
-        for loc in assigned_locs:
-            if loc.is_store and loc.hierarchy_level == 1:
-                return Location.objects.filter(is_active=True)
-
-        for loc in assigned_locs:
-            # 1. Include descendants (Managed area)
-            descendants = loc.get_descendants(include_self=True)
-            location_ids.update(descendants.values_list('id', flat=True))
-
-            # 2. Departmental Context: If in a store, allow seeing everything in that department
-            if loc.is_store:
-                standalone = loc.get_parent_standalone()
-                if standalone:
-                    department_locs = Location.objects.filter(
-                        hierarchy_path__startswith=standalone.hierarchy_path
-                    )
-                    location_ids.update(department_locs.values_list('id', flat=True))
-            
+        # 2. Scoped Visibility (users with scoped distribution perm)
+        if self.user.has_perm('inventory.view_scoped_distribution'):
+            for loc in assigned_locs:
+                # Include descendants (Managed area)
+                descendants = loc.get_descendants(include_self=True)
+                location_ids.update(descendants.values_list('id', flat=True))
+                
+                # Departmental Context: If in a store, allow seeing everything in that department
+                if loc.is_store:
+                    standalone = loc.get_parent_standalone()
+                    if standalone:
+                        department_locs = Location.objects.filter(
+                            hierarchy_path__startswith=standalone.hierarchy_path
+                        )
+                        location_ids.update(department_locs.values_list('id', flat=True))
+        
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
 

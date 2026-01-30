@@ -9,6 +9,7 @@ from .models.stock_record_model import StockRecord
 from .models.instance_model import ItemInstance
 from .models.inspection_model import InspectionCertificate, InspectionItem
 from .models.batch_model import ItemBatch
+from .models.history_model import MovementHistory, MovementAction
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,62 @@ def auto_create_store_for_standalone(sender, instance, created, **kwargs):
         instance.save(update_fields=['auto_created_store'])
         
         logger.info(f"[SIGNAL] Auto-created hierarchical store {store_name} (parent: {store_parent.name}) for standalone {instance.name}")
+
+def _record_movement_history(instance, entry):
+    """
+    Records a MovementHistory entry for a StockEntryItem.
+    """
+    if entry.status != 'COMPLETED':
+        return
+
+    from .models.history_model import MovementHistory, MovementAction
+    
+    action = MovementAction.RECEIVE if entry.entry_type == 'RECEIPT' else MovementAction.ISSUE
+    
+    # Check if this movement was already recorded for this entry/item to avoid duplicates
+    if MovementHistory.objects.filter(stock_entry=entry, item=instance.item, batch=instance.batch).exists():
+        # If instances exist, check if each instance has a movement for this entry
+        if instance.instances.exists():
+            for inst in instance.instances.all():
+                if not MovementHistory.objects.filter(stock_entry=entry, instance=inst).exists():
+                    MovementHistory.objects.create(
+                        item=instance.item,
+                        instance=inst,
+                        batch=instance.batch,
+                        action=action,
+                        from_location=entry.from_location,
+                        to_location=entry.to_location,
+                        stock_entry=entry,
+                        performed_by=entry.created_by,
+                        remarks=entry.remarks
+                    )
+    else:
+        # Initial recording for this item/batch in this entry
+        if instance.instances.exists():
+            for inst in instance.instances.all():
+                MovementHistory.objects.create(
+                    item=instance.item,
+                    instance=inst,
+                    batch=instance.batch,
+                    action=action,
+                    from_location=entry.from_location,
+                    to_location=entry.to_location,
+                    stock_entry=entry,
+                    performed_by=entry.created_by,
+                    remarks=entry.remarks
+                )
+        else:
+            MovementHistory.objects.create(
+                item=instance.item,
+                batch=instance.batch,
+                action=action,
+                from_location=entry.from_location,
+                to_location=entry.to_location,
+                quantity=instance.quantity,
+                stock_entry=entry,
+                performed_by=entry.created_by,
+                remarks=entry.remarks
+            )
 
 @receiver(post_save, sender=StockEntryItem)
 def process_stock_entry_item(sender, instance, created, **kwargs):
@@ -170,6 +227,32 @@ def process_single_stock_item(instance):
                     if instance.instances.exists():
                         instance.instances.all().update(status='ALLOCATED')
                     
+                    # Record Movement History for Allocation
+                    from .models.history_model import MovementHistory, MovementAction
+                    if instance.instances.exists():
+                        for inst in instance.instances.all():
+                            MovementHistory.objects.create(
+                                item=item,
+                                instance=inst,
+                                batch=batch,
+                                action=MovementAction.ALLOCATE,
+                                from_location=from_loc,
+                                stock_entry=entry,
+                                performed_by=entry.created_by,
+                                remarks=f"Allocated via {entry.entry_number}"
+                            )
+                    else:
+                        MovementHistory.objects.create(
+                            item=item,
+                            batch=batch,
+                            action=MovementAction.ALLOCATE,
+                            from_location=from_loc,
+                            quantity=qty,
+                            stock_entry=entry,
+                            performed_by=entry.created_by,
+                            remarks=f"Allocated via {entry.entry_number}"
+                        )
+
                     logger.info(f"[SIGNAL] ALLOCATED: {qty} {item.name} from {from_loc.name}")
                 else:
                     # NORMAL ISSUE (to another store): Decreases total quantity
@@ -225,6 +308,32 @@ def process_single_stock_item(instance):
                     if instance.instances.exists():
                         instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
                     
+                    # Record Movement History for Return
+                    from .models.history_model import MovementHistory, MovementAction
+                    if instance.instances.exists():
+                        for inst in instance.instances.all():
+                            MovementHistory.objects.create(
+                                item=item,
+                                instance=inst,
+                                batch=batch,
+                                action=MovementAction.RETURN,
+                                to_location=to_loc,
+                                stock_entry=entry,
+                                performed_by=entry.created_by,
+                                remarks=f"Returned via {entry.entry_number}"
+                            )
+                    else:
+                        MovementHistory.objects.create(
+                            item=item,
+                            batch=batch,
+                            action=MovementAction.RETURN,
+                            to_location=to_loc,
+                            quantity=qty,
+                            stock_entry=entry,
+                            performed_by=entry.created_by,
+                            remarks=f"Returned via {entry.entry_number}"
+                        )
+
                     logger.info(f"[SIGNAL] RETURNED: {qty} {item.name} back to {to_loc.name} from {'person' if entry.issued_to else 'non-store'}")
                 else:
                     # NORMAL RECEIPT (from another store): Increments total quantity
@@ -255,6 +364,9 @@ def process_single_stock_item(instance):
                 instance.is_stock_recorded = False
                 instance.save(update_fields=['is_stock_recorded'])
                 logger.info(f"[SIGNAL] CANCELLED ISSUE: Reversed stock/allocation for {item.name}")
+
+    # Helper function to record history (Called OUTSIDE atomic block for persistence or after)
+    _record_movement_history(instance, entry)
 
 @receiver(post_save, sender=StockEntry)
 def process_stock_on_status_change(sender, instance, created, **kwargs):

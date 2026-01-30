@@ -168,3 +168,9 @@ DJOSER = {
     },
 }
 
+# Media files (Images, QR Codes, etc.)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# Frontend URL for QR Code links
+FRONTEND_URL = 'http://localhost:5173'

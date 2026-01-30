@@ -7,7 +7,6 @@ from decimal import Decimal
 
 class InspectionStage(models.TextChoices):
     DRAFT = 'DRAFT', 'Draft'
-    INITIATED = 'INITIATED', 'Initiated (Stage 1)'
     STOCK_DETAILS = 'STOCK_DETAILS', 'Stock Details (Stage 2)'
     CENTRAL_REGISTER = 'CENTRAL_REGISTER', 'Central Register (Stage 3)'
     FINANCE_REVIEW = 'FINANCE_REVIEW', 'Finance Review (Stage 4)'
@@ -70,6 +69,7 @@ class InspectionCertificate(models.Model):
     
     finance_reviewed_at = models.DateTimeField(null=True, blank=True)
     finance_reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='finance_reviewed_inspections')
+    finance_check_date = models.DateField(null=True, blank=True)
 
     rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_inspections')
     rejected_at = models.DateTimeField(null=True, blank=True)

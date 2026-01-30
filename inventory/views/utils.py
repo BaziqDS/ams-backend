@@ -12,7 +12,11 @@ class ScopedViewSetMixin:
         if not hasattr(user, 'profile'):
             return queryset.none()
             
-        if user.is_superuser or user.groups.filter(name='Central Store Manager').exists():
+        # Bypass scoping for central roles and workflow administrators
+        if (user.is_superuser or 
+            user.groups.filter(name='Central Store Manager').exists() or
+            user.has_perm('inventory.fill_central_register') or
+            user.has_perm('inventory.review_finance')):
             return queryset
 
         accessible_locations = user.profile.get_descendant_locations()

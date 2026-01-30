@@ -15,12 +15,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().select_related('profile').prefetch_related('user_permissions', 'groups')
     serializer_class = UserManagementSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
 class GroupViewSet(viewsets.ModelViewSet):
     queryset = Group.objects.all().prefetch_related('permissions')
     serializer_class = GroupSerializer
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
 class AvailablePermissionsView(APIView):
     permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]

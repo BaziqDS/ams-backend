@@ -12,6 +12,15 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = InspectionCertificateSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.stage != InspectionStage.DRAFT:
+            return Response(
+                {'detail': f'Cannot delete an inspection that has progressed beyond Draft stage (Current: {instance.stage}).'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
     def get_queryset(self):
         queryset = super().get_queryset()
         # Filter based on user department/power level
@@ -26,7 +35,12 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if instance.stage != InspectionStage.DRAFT:
             return Response({'detail': f'Cannot initiate an inspection that is in {instance.stage} stage.'}, status=status.HTTP_400_BAD_REQUEST)
         
-        instance.stage = InspectionStage.INITIATED
+        # When initiating, go directly to STOCK_DETAILS or CENTRAL_REGISTER
+        if instance.department.hierarchy_level == 0:
+            instance.stage = InspectionStage.CENTRAL_REGISTER
+        else:
+            instance.stage = InspectionStage.STOCK_DETAILS
+            
         instance.status = 'IN_PROGRESS'
         instance.initiated_by = request.user
         instance.save()
@@ -43,32 +57,26 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if not request.user.has_perm('inventory.fill_stock_details'):
             return Response({'detail': 'You do not have permission to fill stock details.'}, status=status.HTTP_403_FORBIDDEN)
 
-        if instance.stage != InspectionStage.INITIATED:
-            return Response({'detail': f'Cannot transition from {instance.stage} to STOCK_DETAILS.'}, status=status.HTTP_400_BAD_REQUEST)
+        # This action is now redundant if we initiate directly to STOCK_DETAILS,
+        # but kept for compatibility or manual transitions.
+        if instance.stage != InspectionStage.DRAFT:
+            return Response({'detail': f'Cannot transition from {instance.stage} to STOCK_DETAILS (Must be in Draft).'}, status=status.HTTP_400_BAD_REQUEST)
         
         instance.stage = InspectionStage.STOCK_DETAILS
+        instance.status = 'IN_PROGRESS'
         instance.save()
         return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
     def submit_to_central_register(self, request, pk=None):
         instance = self.get_object()
-        
-        if not request.user.has_perm('inventory.fill_central_register'):
-            return Response({'detail': 'You do not have permission to fill central register.'}, status=status.HTTP_403_FORBIDDEN)
-
-        # Restriction: Must be "Stock In-charge" and assigned to a Level 1 Store
-        is_stock_incharge = request.user.groups.filter(name='Stock In-charge').exists()
-        has_l1_store = request.user.profile.assigned_locations.filter(is_store=True, hierarchy_level=1).exists()
-
-        if not (is_stock_incharge and has_l1_store):
-            return Response({
-                'detail': 'Only a "Stock In-charge" assigned to the Central Store (Level 1) can perform this action.'
-            }, status=status.HTTP_403_FORBIDDEN)
+        if (not request.user.has_perm('inventory.fill_stock_details') and 
+            not (instance.department.hierarchy_level == 0 and request.user.has_perm('inventory.initiate_inspection'))):
+            return Response({'detail': 'You do not have permission to submit to central register (requires fill_stock_details).'}, status=status.HTTP_403_FORBIDDEN)
 
         allowed_stages = [InspectionStage.STOCK_DETAILS]
         if instance.department.hierarchy_level == 0:
-            allowed_stages.append(InspectionStage.INITIATED)
+            allowed_stages.append(InspectionStage.DRAFT)
 
         if instance.stage not in allowed_stages:
             return Response({'detail': f'Cannot transition from {instance.stage} to CENTRAL_REGISTER.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -82,8 +90,9 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def submit_to_finance_review(self, request, pk=None):
         instance = self.get_object()
-        if not request.user.has_perm('inventory.review_finance'):
-            return Response({'detail': 'You do not have permission to perform finance review.'}, status=status.HTTP_403_FORBIDDEN)
+        # Stage 3 submission is performed by the person filling the register
+        if not request.user.has_perm('inventory.fill_central_register'):
+            return Response({'detail': 'You do not have permission to submit inspections to finance (requires fill_central_register).'}, status=status.HTTP_403_FORBIDDEN)
 
         if instance.stage != InspectionStage.CENTRAL_REGISTER:
             return Response({'detail': f'Cannot transition from {instance.stage} to FINANCE_REVIEW.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -130,3 +139,21 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         instance.rejected_at = timezone.now()
         instance.save()
         return Response(self.get_serializer(instance).data)
+    @action(detail=True, methods=['get'])
+    def view_pdf(self, request, pk=None):
+        instance = self.get_object()
+        from io import BytesIO
+        from django.http import HttpResponse
+        from ..utils.pdf_generator import InspectionPDFGenerator
+        
+        buffer = BytesIO()
+        generator = InspectionPDFGenerator(instance)
+        generator.generate(buffer)
+        
+        buffer.seek(0)
+        filename = f"Inspection_Certificate_{instance.contract_no}.pdf"
+        
+        # Use inline Content-Disposition so it opens in the browser's PDF viewer
+        response = HttpResponse(buffer, content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="{filename}"'
+        return response

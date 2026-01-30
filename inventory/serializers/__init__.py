@@ -3,5 +3,10 @@ from .category_serializer import CategorySerializer, RateHistorySerializer
 from .item_serializer import ItemSerializer
 from .distribution_serializer import StockRecordSerializer
 from .instance_serializer import ItemInstanceSerializer
+from .batch_serializer import ItemBatchSerializer
+from .history_serializer import MovementHistorySerializer
+from .stockentry_serializer import StockEntrySerializer
+from .inspection_serializer import InspectionCertificateSerializer
+from .allocation_serializer import StockAllocationSerializer
 
 

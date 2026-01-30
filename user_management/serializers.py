@@ -62,6 +62,13 @@ class UserManagementSerializer(serializers.ModelSerializer):
             'user_permissions_list', 'groups', 'groups_display'
         )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user and hasattr(request.user, 'profile'):
+            # Filter assigned_locations to only those the requester has access to
+            self.fields['assigned_locations'].queryset = request.user.profile.get_descendant_locations()
+
     def create(self, validated_data):
         profile_data = validated_data.pop('profile', {})
         user_permissions = validated_data.pop('user_permissions', [])

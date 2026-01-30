@@ -87,6 +87,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 "locationName": record.location.name,
                 "isStore": record.location.is_store,
                 "batchNumber": record.batch.batch_number if record.batch else None,
+                "batchId": record.batch.id if record.batch else None,
                 "quantity": record.quantity,
                 "availableQuantity": record.available_quantity,
                 "inTransitQuantity": record.in_transit_quantity,
@@ -110,6 +111,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
                 "sourceStoreName": alloc.source_location.name,
                 "batchNumber": alloc.batch.batch_number if alloc.batch else None,
+                "batchId": alloc.batch.id if alloc.batch else None,
                 "quantity": alloc.quantity,
                 "allocatedAt": alloc.allocated_at
             })

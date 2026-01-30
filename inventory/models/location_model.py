@@ -76,6 +76,8 @@ class Location(models.Model):
             ("manage_all_locations", "Can access all locations regardless of hierarchy"),
             ("create_standalone_location", "Can create standalone locations"),
             ("create_store_location", "Can create store locations"),
+            ("view_global_distribution", "Can view item distribution university-wide"),
+            ("view_scoped_distribution", "Can view item distribution within assigned scope"),
         ]
         indexes = [
             models.Index(fields=['code']),
