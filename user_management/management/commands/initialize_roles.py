@@ -71,6 +71,7 @@ class Command(BaseCommand):
             ('add_user', 'auth'),
             ('change_user', 'auth'),
             ('view_user', 'auth'),
+            ('view_user_accounts_assigned_location', 'user_management'),
             ('view_userprofile', 'user_management'),
             ('change_userprofile', 'user_management'),
         ]

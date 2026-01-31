@@ -72,3 +72,24 @@ class LocationViewSet(viewsets.ModelViewSet):
             'locations': loc_serializer.data,
             'persons': person_serializer.data
         })
+
+    @action(detail=False, methods=['get'])
+    def assignable(self, request):
+        """
+        Returns locations that the user is allowed to assign to other users.
+        - Global managers see all.
+        - Scoped managers see their descendant locations.
+        """
+        user = request.user
+        if user.is_superuser or user.has_perm('user_management.view_all_user_accounts'):
+            queryset = Location.objects.filter(is_active=True)
+        elif user.has_perm('user_management.view_user_accounts_assigned_location'):
+            try:
+                queryset = user.profile.get_descendant_locations()
+            except UserProfile.DoesNotExist:
+                queryset = Location.objects.none()
+        else:
+            queryset = Location.objects.none()
+            
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)

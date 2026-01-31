@@ -10,10 +10,15 @@ class UserSerializer(serializers.ModelSerializer):
         many=True,
         read_only=True
     )
+    groups_display = serializers.StringRelatedField(
+        source='groups',
+        many=True,
+        read_only=True
+    )
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations')
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display')
 
 
     def get_permissions(self, obj):

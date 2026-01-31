@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth.models import User, Permission, Group
+from django.db.models import Q
 from .models import UserProfile
 from .serializers import UserProfileSerializer, UserManagementSerializer, UserSerializer, GroupSerializer
 from ams.permissions import StrictDjangoModelPermissions
@@ -12,10 +13,43 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.has_perm('user_management.view_all_user_accounts'):
+            return UserProfile.objects.all()
+        
+        if user.has_perm('user_management.view_user_accounts_assigned_location'):
+            try:
+                managed_locations = user.profile.get_descendant_locations()
+                return UserProfile.objects.filter(
+                    assigned_locations__in=managed_locations
+                ).distinct()
+            except UserProfile.DoesNotExist:
+                return UserProfile.objects.none()
+        
+        return UserProfile.objects.filter(user=user)
+
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().select_related('profile').prefetch_related('user_permissions', 'groups')
     serializer_class = UserManagementSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+
+    def get_queryset(self):
+        user = self.request.user
+        base_qs = User.objects.all().select_related('profile').prefetch_related('user_permissions', 'groups')
+        
+        if user.is_superuser or user.has_perm('user_management.view_all_user_accounts'):
+            return base_qs
+            
+        if user.has_perm('user_management.view_user_accounts_assigned_location'):
+            try:
+                managed_locations = user.profile.get_descendant_locations()
+                return base_qs.filter(
+                    profile__assigned_locations__in=managed_locations
+                ).distinct()
+            except UserProfile.DoesNotExist:
+                return base_qs.none()
+                
+        return base_qs.filter(id=user.id)
 
 class GroupViewSet(viewsets.ModelViewSet):
     queryset = Group.objects.all().prefetch_related('permissions')

@@ -244,3 +244,7 @@ class UserProfile(models.Model):
 
     class Meta:
         verbose_name = "User Profile"
+        permissions = [
+            ("view_all_user_accounts", "Can view all user accounts university-wide"),
+            ("view_user_accounts_assigned_location", "Can view user accounts assigned to their locations"),
+        ]
