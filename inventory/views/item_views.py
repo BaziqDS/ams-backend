@@ -4,7 +4,7 @@ from ..serializers.item_serializer import ItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
 
 class ItemViewSet(viewsets.ModelViewSet):
-    queryset = Item.objects.all().select_related('category', 'created_by')
+    queryset = Item.objects.all().select_related('category__parent_category', 'created_by')
     serializer_class = ItemSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 

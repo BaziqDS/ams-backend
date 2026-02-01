@@ -26,7 +26,7 @@ class ItemInstance(models.Model):
     qr_code_image = models.ImageField(upload_to='qr_codes/', null=True, blank=True)
     
     current_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name='instances')
-    status = models.CharField(max_length=20, choices=InstanceStatus.choices, default=InstanceStatus.AVAILABLE)
+    status = models.CharField(max_length=20, choices=InstanceStatus.choices, default=InstanceStatus.AVAILABLE, db_index=True)
     
     # Metadata
     is_active = models.BooleanField(default=True)

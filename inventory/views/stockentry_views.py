@@ -39,7 +39,11 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         return queryset.filter(department__in=standalone_names)
 
 class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
-    queryset = StockEntry.objects.all().order_by('-entry_date')
+    queryset = StockEntry.objects.all().select_related(
+        'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by'
+    ).prefetch_related(
+        'items__item', 'items__batch'
+    ).order_by('-entry_date')
     serializer_class = StockEntrySerializer
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
 

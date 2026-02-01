@@ -26,7 +26,7 @@ class StockEntry(models.Model):
         ('CANCELLED', 'Cancelled'),
     ]
     
-    entry_type = models.CharField(max_length=20, choices=ENTRY_TYPE_CHOICES)
+    entry_type = models.CharField(max_length=20, choices=ENTRY_TYPE_CHOICES, db_index=True)
     entry_number = models.CharField(max_length=50, unique=True, blank=True)
     entry_date = models.DateTimeField(default=timezone.now)
     from_location = models.ForeignKey(
@@ -71,7 +71,7 @@ class StockEntry(models.Model):
         related_name='stock_entries'
     )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT', db_index=True)
     created_by = models.ForeignKey(
         User, 
         on_delete=models.SET_NULL, 

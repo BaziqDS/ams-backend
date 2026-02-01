@@ -10,7 +10,11 @@ from ams.permissions import StrictDjangoModelPermissions
 from .utils import ScopedViewSetMixin
 
 class StockAllocationViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
-    queryset = StockAllocation.objects.all().order_by('-allocated_at')
+    queryset = StockAllocation.objects.all().select_related(
+        'item', 'batch', 'source_location', 
+        'allocated_to_person', 'allocated_to_location', 
+        'allocated_by', 'stock_entry'
+    ).order_by('-allocated_at')
     serializer_class = StockAllocationSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 

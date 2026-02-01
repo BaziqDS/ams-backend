@@ -511,14 +511,14 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
         root_location = Location.objects.order_by('id').first()
         if not root_location or not root_location.auto_created_store:
             logger.error(f"[SIGNAL] Failed to generate stock entry: Root store not found.")
-            return
+            raise ValueError("Root store not found. Cannot complete inspection.")
             
         central_store = root_location.auto_created_store
         target_store = instance.department.auto_created_store
         
         if not target_store:
             logger.error(f"[SIGNAL] Failed to generate stock entry: Target store for {instance.department.name} not found.")
-            return
+            raise ValueError(f"Target store for {instance.department.name} not found. Cannot complete inspection.")
 
         # 2. Create Initial RECEIPT entry in Central Store
         receipt = StockEntry.objects.create(
