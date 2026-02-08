@@ -15,13 +15,13 @@ class StockEntry(models.Model):
     ENTRY_TYPE_CHOICES = [
         ('RECEIPT', 'Receipt'),
         ('ISSUE', 'Issue'),
+        ('RETURN', 'Return'),
     ]
 
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
         ('PENDING_ACK', 'Pending Acknowledgment'),
         ('COMPLETED', 'Completed'),
-        ('PARTIALLY_ACCEPTED', 'Partially Accepted'),
         ('REJECTED', 'Rejected'),
         ('CANCELLED', 'Cancelled'),
     ]
@@ -189,6 +189,10 @@ class StockEntryItem(models.Model):
         super().clean()
         from .stock_record_model import StockRecord
         # Check stock availability for movements out of a location
+        # RELAXED per user request: We no longer block if stock is insufficient.
+        # We still log the attempt or check for existence if necessary, 
+        # but we don't raise ValidationError that blocks saving.
+        
         if self.stock_entry.entry_type in ['ISSUE', 'TRANSFER', 'RETURN'] and self.stock_entry.from_location:
             try:
                 record = StockRecord.objects.get(
@@ -196,14 +200,11 @@ class StockEntryItem(models.Model):
                     location=self.stock_entry.from_location,
                     batch=self.batch
                 )
-                if record.available_quantity < self.quantity:
-                    raise ValidationError(
-                        f"Insufficient available stock for {self.item.name}. "
-                        f"Physical Total: {record.quantity}, In Transit: {record.in_transit_quantity}, "
-                        f"Available: {record.available_quantity}, Requested: {self.quantity}"
-                    )
+                # We could warn here, but per requirements we just "handle this properly" and "remove check"
+                pass
             except StockRecord.DoesNotExist:
-                raise ValidationError(f"No stock record found for {self.item.name} at the source location.")
+                # If no record exists, StockRecord.update_balance will create one.
+                pass
 
     def __str__(self):
         return f"{self.item.name} x {self.quantity}"

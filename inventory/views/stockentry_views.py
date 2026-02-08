@@ -1,5 +1,8 @@
 from django.utils import timezone
+import logging
 from rest_framework import viewsets, permissions
+
+logger = logging.getLogger(__name__)
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.person_model import Person
@@ -49,11 +52,14 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def acknowledge(self, request, pk=None):
+        from django.db import transaction
+        from ..models.stockentry_model import StockEntryItem
+        
         instance = self.get_object()
         user = request.user
         
         # 1. Basic type/status check
-        if instance.status != 'PENDING_ACK' or instance.entry_type != 'RECEIPT':
+        if instance.status != 'PENDING_ACK' or instance.entry_type not in ['RECEIPT', 'RETURN']:
             return Response({'detail': 'This entry cannot be acknowledged.'}, status=400)
         
         # 2. Permission check
@@ -65,10 +71,80 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             if not hasattr(user, 'profile') or not user.profile.has_location_access(instance.to_location):
                 return Response({'detail': 'You do not have access to the destination location.'}, status=403)
 
-        instance.status = 'COMPLETED'
-        instance.acknowledged_by = user
-        instance.acknowledged_at = timezone.now()
-        instance.save()
+        accepted_items_data = request.data.get('items', [])
+        rejected_items = []
+        is_partial = False
+        
+        with transaction.atomic():
+            if accepted_items_data:
+                # Map accepted items by ID for comparison
+                accepted_map = {str(item['id']): item for item in accepted_items_data}
+                
+                for entry_item in instance.items.all():
+                    accepted_info = accepted_map.get(str(entry_item.id))
+                    
+                    if not accepted_info:
+                        # Fully rejected item
+                        rejected_items.append({
+                            'item': entry_item.item,
+                            'batch': entry_item.batch,
+                            'quantity': entry_item.quantity,
+                            'instances': list(entry_item.instances.all())
+                        })
+                        is_partial = True
+                    else:
+                        # Check for partial quantity or instance rejection
+                        acc_qty = accepted_info.get('quantity', entry_item.quantity)
+                        acc_instances_ids = accepted_info.get('instances', []) # List of PKs (strings or ints)
+                        
+                        if acc_qty < entry_item.quantity:
+                            rej_qty = entry_item.quantity - acc_qty
+                            rej_instances = []
+                            
+                            if entry_item.instances.exists():
+                                current_insts_ids = set(entry_item.instances.values_list('id', flat=True))
+                                # Convert incoming IDs to ints for comparison if needed
+                                acc_insts_ids_set = set(map(int, acc_instances_ids)) if acc_instances_ids else current_insts_ids
+                                rej_instances_ids = list(current_insts_ids - acc_insts_ids_set)
+                                rej_instances = list(entry_item.instances.filter(id__in=rej_instances_ids))
+                            
+                            rejected_items.append({
+                                'item': entry_item.item,
+                                'batch': entry_item.batch,
+                                'quantity': rej_qty,
+                                'instances': rej_instances
+                            })
+                            is_partial = True
+
+            # 3. Create automatic RETURN if there are discrepancies
+            # CRITICAL: Do NOT create a return for a RETURN entry (prevent infinite loops)
+            if rejected_items and instance.entry_type != 'RETURN':
+                return_entry = StockEntry.objects.create(
+                    entry_type='RETURN',
+                    from_location=instance.to_location,
+                    to_location=instance.from_location,
+                    status='PENDING_ACK',
+                    remarks=f"Automatic return for items rejected in {instance.entry_number}.",
+                    reference_entry=instance,
+                    created_by=user
+                )
+                for rej in rejected_items:
+                    sei = StockEntryItem.objects.create(
+                        stock_entry=return_entry,
+                        item=rej['item'],
+                        batch=rej['batch'],
+                        quantity=rej['quantity']
+                    )
+                    if rej['instances']:
+                        sei.instances.set(rej['instances'])
+                
+                logger.info(f"[VIEW] Created automatic RETURN {return_entry.entry_number} for discrepancy.")
+
+            # 4. Mark original entry as COMPLETED
+            instance.status = 'COMPLETED'
+            instance.acknowledged_by = user
+            instance.acknowledged_at = timezone.now()
+            instance.save()
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)

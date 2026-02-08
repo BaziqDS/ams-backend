@@ -67,14 +67,9 @@ class StockEntrySerializer(serializers.ModelSerializer):
                         location=from_location,
                         batch=batch
                     )
-                    if record.quantity < quantity:
-                        raise serializers.ValidationError({
-                            "items": f"Insufficient stock for {item.name}. Available: {record.quantity}, Requested: {quantity}"
-                        })
                 except StockRecord.DoesNotExist:
-                    raise serializers.ValidationError({
-                        "items": f"No stock found for {item.name} at the source location."
-                    })
+                    # If record doesn't exist, we'll let the model signals handle it (StockRecord creation)
+                    pass
 
         from django.db import transaction
         with transaction.atomic():
@@ -121,10 +116,10 @@ class StockEntrySerializer(serializers.ModelSerializer):
         
         user = request.user
         if user.is_superuser:
-            return True if obj.status == 'PENDING_ACK' and obj.entry_type == 'RECEIPT' else False
+            return True if obj.status == 'PENDING_ACK' and obj.entry_type in ['RECEIPT', 'RETURN'] else False
 
-        # Must be PENDING_ACK RECEIPT
-        if obj.status != 'PENDING_ACK' or obj.entry_type != 'RECEIPT':
+        # Must be PENDING_ACK (RECEIPT or RETURN)
+        if obj.status != 'PENDING_ACK' or obj.entry_type not in ['RECEIPT', 'RETURN']:
             return False
 
         # Must have permission

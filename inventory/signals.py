@@ -133,7 +133,8 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
     # 1. Linked RECEIPT creation (ISSUE -> RECEIPT bridge)
     # CRITICAL: Do NOT create receipts for DRAFT entries. Wait until finalized.
     if stock_entry.entry_type == 'ISSUE' and stock_entry.to_location and not stock_entry.reference_entry and stock_entry.status != 'DRAFT':
-        target_status = stock_entry.status if stock_entry.status == 'PENDING_ACK' else 'COMPLETED'
+        # INTER-STORE: Force PENDING_ACK regardless of Issue status
+        # This ensures the Handshake is mandatory.
         
         linked_receipt, r_created = StockEntry.objects.get_or_create(
             reference_entry=stock_entry,
@@ -143,7 +144,7 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
                 'entry_date': stock_entry.entry_date,
                 'from_location': stock_entry.from_location,
                 'to_location': stock_entry.to_location,
-                'status': target_status,
+                'status': 'PENDING_ACK',
                 'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
                 'purpose': stock_entry.purpose,
                 'inspection_certificate': stock_entry.inspection_certificate,
@@ -189,16 +190,22 @@ def process_single_stock_item(instance):
             # If entry is PENDING_ACK: We need it in-transit
             if entry.status == 'PENDING_ACK' and not instance.is_in_transit_recorded:
                 StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=qty)
+                # Mark instances as IN_TRANSIT
+                if instance.instances.exists():
+                    instance.instances.all().update(status='IN_TRANSIT')
                 instance.is_in_transit_recorded = True
                 instance.save(update_fields=['is_in_transit_recorded'])
-                logger.info(f"[SIGNAL] Recorded In-Transit: {item.name} at {from_loc.name}")
+                logger.info(f"[SIGNAL] Recorded In-Transit: {item.name} at {from_loc.name} (Instances marked IN_TRANSIT)")
             
             # If entry is CANCELLED/REJECTED: We reverse in-transit if it was recorded
             elif entry.status in ['CANCELLED', 'REJECTED'] and instance.is_in_transit_recorded:
                 StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-qty)
+                # Revert instances to AVAILABLE
+                if instance.instances.exists():
+                    instance.instances.all().update(status='AVAILABLE')
                 instance.is_in_transit_recorded = False
                 instance.save(update_fields=['is_in_transit_recorded'])
-                logger.info(f"[SIGNAL] Reversed In-Transit: {item.name} at {from_loc.name}")
+                logger.info(f"[SIGNAL] Reversed In-Transit: {item.name} at {from_loc.name} (Instances reverted to AVAILABLE)")
 
         # B. Handle "Physical Completion" (Store or Allocation)
         if entry.status == 'COMPLETED' and not instance.is_stock_recorded:
@@ -338,6 +345,11 @@ def process_single_stock_item(instance):
                 else:
                     # NORMAL RECEIPT (from another store): Increments total quantity
                     StockRecord.update_balance(item, to_loc, quantity_change=qty, batch=batch)
+                    
+                    # Update instances location and set to AVAILABLE
+                    if instance.instances.exists():
+                        instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                    
                     logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {qty} {item.name} in {to_loc.name}")
             
             instance.is_stock_recorded = True
@@ -396,7 +408,7 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                         'entry_date': instance.entry_date,
                         'from_location': instance.from_location,
                         'to_location': instance.to_location,
-                        'status': target_status,
+                        'status': 'PENDING_ACK',
                         'remarks': f"Auto-generated receipt for {instance.entry_number}. {instance.remarks or ''}",
                         'purpose': instance.purpose,
                         'inspection_certificate': instance.inspection_certificate,
@@ -418,8 +430,8 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                 if entry_item.instances.exists():
                     receipt_item.instances.set(entry_item.instances.all())
         
-        # Sync bridge status (RECEIPT completion marks Parent ISSUE completion)
-        if instance.status == 'COMPLETED' and instance.entry_type == 'RECEIPT' and instance.reference_entry:
+        # Sync bridge status (RECEIPT or RETURN completion marks Parent ISSUE completion)
+        if instance.status == 'COMPLETED' and instance.entry_type in ['RECEIPT', 'RETURN'] and instance.reference_entry:
             parent = instance.reference_entry
             if parent.status != 'COMPLETED':
                 parent.status = 'COMPLETED'
@@ -486,7 +498,7 @@ def reverse_stock_on_item_delete(sender, instance, **kwargs):
 @receiver(m2m_changed, sender=StockEntryItem.instances.through)
 def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
     """
-    Updates ItemInstance locations when they are added to a COMPLETED StockEntryItem.
+    Updates ItemInstance locations when they are added to a COMPLETED or PARTIALLY_ACCEPTED StockEntryItem.
     """
     if action == "post_add" and instance.stock_entry.status == 'COMPLETED':
         to_loc = instance.stock_entry.to_location

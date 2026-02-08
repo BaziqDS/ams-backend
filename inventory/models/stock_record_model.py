@@ -37,7 +37,26 @@ class StockRecord(models.Model):
     def update_balance(cls, item, location, quantity_change=0, batch=None, in_transit_change=0, allocated_change=0):
         """
         Helper method to increment/decrement quantities.
+        If batch is None and quantity_change is negative, it will attempt to 
+        deduct from existing batches (FIFO/Draining) before falling back to the null-batch record.
         """
+        # A. Handle batch-agnostic deductions (DRAIN logic)
+        if batch is None and quantity_change < 0:
+            remaining_to_deduct = abs(quantity_change)
+            # Find all records with stock (batches first)
+            stock_records = cls.objects.filter(item=item, location=location).exclude(batch=None).order_by('-quantity')
+            
+            for record in stock_records:
+                if remaining_to_deduct <= 0: break
+                can_take = min(remaining_to_deduct, record.quantity)
+                if can_take > 0:
+                    record.quantity -= can_take
+                    record.save()
+                    remaining_to_deduct -= can_take
+            
+            # If still remaining, apply to the null-batch record
+            quantity_change = -remaining_to_deduct
+
         record, created = cls.objects.get_or_create(
             item=item,
             location=location,
