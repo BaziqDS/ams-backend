@@ -14,10 +14,16 @@ class PersonSerializer(serializers.ModelSerializer):
 class StockEntryItemSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source='item.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
+    stock_register_name = serializers.CharField(source='stock_register.register_number', read_only=True)
+    ack_stock_register_name = serializers.CharField(source='ack_stock_register.register_number', read_only=True, allow_null=True)
     
     class Meta:
         model = StockEntryItem
-        fields = ('id', 'item', 'item_name', 'batch', 'batch_number', 'quantity', 'instances')
+        fields = (
+            'id', 'item', 'item_name', 'batch', 'batch_number', 'quantity', 'instances',
+            'stock_register', 'stock_register_name', 'page_number',
+            'ack_stock_register', 'ack_stock_register_name', 'ack_page_number'
+        )
 
 class StockEntrySerializer(serializers.ModelSerializer):
     items = StockEntryItemSerializer(many=True)

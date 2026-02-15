@@ -4,7 +4,7 @@ from .views import (
     LocationViewSet, CategoryViewSet, ItemViewSet, 
     StockRecordViewSet, StockEntryViewSet, PersonViewSet,
     StockAllocationViewSet, InspectionViewSet, ItemInstanceViewSet,
-    ItemBatchViewSet, MovementHistoryViewSet
+    ItemBatchViewSet, MovementHistoryViewSet, StockRegisterViewSet
 )
 
 router = DefaultRouter()
@@ -19,6 +19,7 @@ router.register(r'persons', PersonViewSet, basename='person')
 router.register(r'item-instances', ItemInstanceViewSet, basename='item-instance')
 router.register(r'item-batches', ItemBatchViewSet, basename='item-batch')
 router.register(r'movement-history', MovementHistoryViewSet, basename='movement-history')
+router.register(r'stock-registers', StockRegisterViewSet, basename='stock-register')
 
 
 

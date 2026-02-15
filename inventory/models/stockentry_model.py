@@ -181,6 +181,26 @@ class StockEntryItem(models.Model):
     instances = models.ManyToManyField(ItemInstance, blank=True, related_name='stock_entry_items')
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     
+    # Stock register reference fields
+    stock_register = models.ForeignKey(
+        'StockRegister', on_delete=models.PROTECT,
+        related_name='source_items',
+        help_text="The register this entry was recorded in (source/sender side)."
+    )
+    page_number = models.PositiveIntegerField(
+        help_text="Page number in the source stock register."
+    )
+    ack_stock_register = models.ForeignKey(
+        'StockRegister', on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name='dest_items',
+        help_text="The register this entry was recorded in (destination/receiver side, filled at acknowledgment)."
+    )
+    ack_page_number = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Page number in the destination stock register (filled at acknowledgment)."
+    )
+
     # Tracking flags for signals
     is_in_transit_recorded = models.BooleanField(default=False)
     is_stock_recorded = models.BooleanField(default=False)

@@ -21,13 +21,22 @@ def assign_initial_stock():
                 purpose="Initial Setup"
             )
             
+            from inventory.models.stock_register_model import StockRegister
+            register, _ = StockRegister.objects.get_or_create(
+                location=store,
+                register_number=f"SR-{store.code}-INIT",
+                defaults={'register_type': 'CSR' if store.code == 'CENTRAL-STORE' else 'DSR', 'created_by': entry.created_by}
+            )
+
             for item_id in item_ids:
                 item = Item.objects.get(id=item_id)
                 StockEntryItem.objects.create(
                     stock_entry=entry,
                     item=item,
-                    quantity=quantity
+                    quantity=quantity,
+                    stock_register=register,
+                    page_number=1
                 )
-                print(f"  Added 5 units of {item.name}")
+                print(f"  Added 5 units of {item.name} to {register.register_number}")
 
 assign_initial_stock()

@@ -40,6 +40,8 @@ class Command(BaseCommand):
             ('change_inspectionitem', 'inventory'),
             ('fill_stock_details', 'inventory'),
             ('view_scoped_distribution', 'inventory'),
+            ('manage_stock_register', 'inventory'),
+            ('view_stockregister', 'inventory'),
         ]
         self._assign_perms(stock_incharge_group, stock_perms)
         
@@ -74,6 +76,7 @@ class Command(BaseCommand):
             ('view_user_accounts_assigned_location', 'user_management'),
             ('view_userprofile', 'user_management'),
             ('change_userprofile', 'user_management'),
+            ('view_stockregister', 'inventory'),
         ]
         self._assign_perms(location_head_group, location_head_perms)
 
@@ -104,6 +107,8 @@ class Command(BaseCommand):
             ('view_global_distribution', 'inventory'),
             ('view_itembatch', 'inventory'),
             ('view_iteminstance', 'inventory'),
+            ('manage_stock_register', 'inventory'),
+            ('view_stockregister', 'inventory'),
         ]
         self._assign_perms(central_manager_group, central_manager_perms)
 
@@ -128,14 +133,34 @@ class Command(BaseCommand):
             ('view_global_distribution', 'inventory'), # AD Finance needs to see everything
             ('view_itembatch', 'inventory'),
             ('view_iteminstance', 'inventory'),
+            ('view_stockregister', 'inventory'),
         ]
         self._assign_perms(ad_finance_group, ad_finance_perms)
+
+        # 6. Auditor (Global View Access)
+        auditor_group, _ = Group.objects.get_or_create(name='Auditor')
+        
+        # Dynamically fetch all "view" permissions from relevant apps
+        all_view_perms = Permission.objects.filter(
+            codename__startswith='view_',
+            content_type__app_label__in=['inventory', 'user_management', 'auth']
+        )
+        
+        # Also include any special view permissions that might not start with view_ (if any)
+        # For now, codename__startswith='view_' covers everything requested including global distributions
+        
+        auditor_group.permissions.set(all_view_perms)
+
+        # 7. Cleanup: Remove Inspector role if it exists
+        Group.objects.filter(name='Inspector').delete()
+
 
         self.stdout.write(self.style.SUCCESS("AMS Business Roles initialized successfully."))
         self.stdout.write(" - Created/Updated: 'Stock In-charge'")
         self.stdout.write(" - Created/Updated: 'Location Head'")
         self.stdout.write(" - Created/Updated: 'Central Store Manager'")
         self.stdout.write(" - Created/Updated: 'AD Finance'")
+        self.stdout.write(" - Created/Updated: 'Auditor' (Dynamic Global View)")
         self.stdout.write(" - Created/Updated: 'System Admin'")
 
     def _assign_perms(self, group, perms):

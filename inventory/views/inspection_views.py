@@ -2,7 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, models
 from .utils import ScopedViewSetMixin
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
@@ -105,9 +105,41 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 return Response({'detail': f'Cannot transition from {instance.stage} to FINANCE_REVIEW.'}, status=status.HTTP_400_BAD_REQUEST)
             
             # Validation: All items with accepted quantity must be linked to a system item
+            # AND have central register info recorded.
             unlinked = instance.items.filter(accepted_quantity__gt=0, item__isnull=True)
             if unlinked.exists():
                 return Response({'detail': 'All items with accepted quantity must be linked to a system item before finance review.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            missing_register = instance.items.filter(
+                accepted_quantity__gt=0, 
+                central_register__isnull=True
+            )
+            if missing_register.exists():
+                return Response({'detail': 'All accepted items must have a Central Register assigned.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            missing_page = instance.items.filter(
+                accepted_quantity__gt=0, 
+                central_register_page_no__isnull=True
+            ).exclude(central_register_page_no__gt='') # check if empty string or null
+            
+            # Validation: Ensure Central Register info is recorded (all workflows reach here)
+            if instance.items.filter(accepted_quantity__gt=0).filter(
+                models.Q(central_register__isnull=True) | 
+                models.Q(central_register_page_no__isnull=True) | 
+                models.Q(central_register_page_no='')
+            ).exists():
+                 return Response({'detail': 'All accepted items must have Central Register and Page Number recorded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Validation: Ensure Stage 2 (Departmental) info is recorded if department is not Main University
+            # Check if department code is 'NED-UET' or name contains 'university'
+            is_main_uw = instance.department.code == 'NED-UET' or 'university' in instance.department.name.lower()
+            if not is_main_uw:
+                if instance.items.filter(accepted_quantity__gt=0).filter(
+                    models.Q(stock_register__isnull=True) | 
+                    models.Q(stock_register_page_no__isnull=True) | 
+                    models.Q(stock_register_page_no='')
+                ).exists():
+                    return Response({'detail': 'All accepted items must have Departmental Stock Register and Page Number recorded.'}, status=status.HTTP_400_BAD_REQUEST)
 
             instance.stage = InspectionStage.FINANCE_REVIEW
             instance.central_store_filled_by = request.user
@@ -121,6 +153,24 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance = self.get_object()
             if instance.stage != InspectionStage.FINANCE_REVIEW:
                 return Response({'detail': f'Cannot transition from {instance.stage} to COMPLETED.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Final Validation: Ensure Central Register info is present
+            if instance.items.filter(accepted_quantity__gt=0).filter(
+                models.Q(central_register__isnull=True) | 
+                models.Q(central_register_page_no__isnull=True) | 
+                models.Q(central_register_page_no='')
+            ).exists():
+                 return Response({'detail': 'All accepted items must have Central Register and Page Number recorded before completion.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Final Validation: Ensure Stage 2 info is present if not Main University
+            is_main_uw = instance.department.code == 'NED-UET' or 'university' in instance.department.name.lower()
+            if not is_main_uw:
+                if instance.items.filter(accepted_quantity__gt=0).filter(
+                    models.Q(stock_register__isnull=True) | 
+                    models.Q(stock_register_page_no__isnull=True) | 
+                    models.Q(stock_register_page_no='')
+                ).exists():
+                    return Response({'detail': 'All accepted items must have Departmental Stock Register and Page Number recorded before completion.'}, status=status.HTTP_400_BAD_REQUEST)
             
             instance.stage = InspectionStage.COMPLETED
             instance.status = 'COMPLETED'

@@ -45,7 +45,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = StockEntry.objects.all().select_related(
         'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by'
     ).prefetch_related(
-        'items__item', 'items__batch'
+        'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register'
     ).order_by('-entry_date')
     serializer_class = StockEntrySerializer
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
@@ -74,6 +74,16 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         accepted_items_data = request.data.get('items', [])
         rejected_items = []
         is_partial = False
+
+        # Validate that all accepted items have ack_stock_register and ack_page_number
+        for item_data in accepted_items_data:
+            if not item_data.get('ack_stock_register') or not item_data.get('ack_page_number'):
+                return Response(
+                    {'detail': 'Each item must include ack_stock_register and ack_page_number.'},
+                    status=400
+                )
+
+        from ..models.stock_register_model import StockRegister
         
         with transaction.atomic():
             if accepted_items_data:
@@ -83,13 +93,27 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 for entry_item in instance.items.all():
                     accepted_info = accepted_map.get(str(entry_item.id))
                     
+                    if accepted_info:
+                        try:
+                            ack_register = StockRegister.objects.get(id=accepted_info['ack_stock_register'])
+                            entry_item.ack_stock_register = ack_register
+                            entry_item.ack_page_number = int(accepted_info['ack_page_number'])
+                            entry_item.save(update_fields=['ack_stock_register', 'ack_page_number'])
+                        except (StockRegister.DoesNotExist, ValueError, KeyError):
+                            return Response(
+                                {'detail': f'Invalid ack_stock_register or ack_page_number for item {entry_item.id}.'},
+                                status=400
+                            )
+
                     if not accepted_info:
-                        # Fully rejected item
+                        # Fully rejected item — use original entry's register for the return
                         rejected_items.append({
                             'item': entry_item.item,
                             'batch': entry_item.batch,
                             'quantity': entry_item.quantity,
-                            'instances': list(entry_item.instances.all())
+                            'instances': list(entry_item.instances.all()),
+                            'stock_register': entry_item.stock_register,
+                            'page_number': entry_item.page_number,
                         })
                         is_partial = True
                     else:
@@ -112,7 +136,9 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                                 'item': entry_item.item,
                                 'batch': entry_item.batch,
                                 'quantity': rej_qty,
-                                'instances': rej_instances
+                                'instances': rej_instances,
+                                'stock_register': entry_item.stock_register,
+                                'page_number': entry_item.page_number,
                             })
                             is_partial = True
 
@@ -133,7 +159,9 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                         stock_entry=return_entry,
                         item=rej['item'],
                         batch=rej['batch'],
-                        quantity=rej['quantity']
+                        quantity=rej['quantity'],
+                        stock_register=rej['stock_register'],
+                        page_number=rej['page_number'],
                     )
                     if rej['instances']:
                         sei.instances.set(rej['instances'])

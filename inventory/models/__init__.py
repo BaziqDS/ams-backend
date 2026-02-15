@@ -9,4 +9,5 @@ from .person_model import *
 from .allocation_model import *
 from .inspection_model import *
 from .history_model import *
+from .stock_register_model import *
 

@@ -118,11 +118,25 @@ class InspectionItem(models.Model):
     remarks = models.TextField(blank=True, null=True)
 
     # Stage 2: Stock Register Details
+    stock_register = models.ForeignKey(
+        'StockRegister',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='inspection_items_source'
+    )
     stock_register_no = models.CharField(max_length=100, blank=True, null=True)
     stock_register_page_no = models.CharField(max_length=50, blank=True, null=True)
     stock_entry_date = models.DateField(null=True, blank=True)
 
     # Stage 3: Central Register Details
+    central_register = models.ForeignKey(
+        'StockRegister',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='inspection_items_central'
+    )
     central_register_no = models.CharField(max_length=100, blank=True, null=True)
     central_register_page_no = models.CharField(max_length=50, blank=True, null=True)
 

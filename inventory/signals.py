@@ -152,12 +152,15 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
             }
         )
         
-        # Create/Update linked item in the receipt
         receipt_item, i_created = StockEntryItem.objects.get_or_create(
             stock_entry=linked_receipt,
             item=instance.item,
             batch=instance.batch,
-            defaults={'quantity': instance.quantity}
+            defaults={
+                'quantity': instance.quantity,
+                'stock_register': instance.stock_register,
+                'page_number': instance.page_number
+            }
         )
         if not i_created:
             receipt_item.quantity = instance.quantity
@@ -557,12 +560,20 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                     }
                 )
             
+            # Prepare page number
+            try:
+                page_no = int(i_item.central_register_page_no) if i_item.central_register_page_no and i_item.central_register_page_no.isdigit() else 0
+            except (ValueError, TypeError):
+                page_no = 0
+
             # Create StockEntryItem for Receipt
             sei = StockEntryItem.objects.create(
                 stock_entry=receipt,
                 item=i_item.item,
                 batch=batch,
-                quantity=i_item.accepted_quantity
+                quantity=i_item.accepted_quantity,
+                stock_register=i_item.central_register,
+                page_number=page_no
             )
 
             # 2.1 Handle Individual Tracking (Instance Generation)
@@ -585,7 +596,14 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                 # Link instances to the entry item
                 sei.instances.set(instances)
 
-            items_to_move.append((i_item.item, batch, i_item.accepted_quantity, (instances if tracking_type == 'INDIVIDUAL' else [])))
+            items_to_move.append((
+                i_item.item, 
+                batch, 
+                i_item.accepted_quantity, 
+                (instances if tracking_type == 'INDIVIDUAL' else []),
+                i_item.central_register,
+                page_no
+            ))
 
         logger.info(f"[SIGNAL] Logic: Auto-created RECEIPT {receipt.entry_number} for Inspection {instance.contract_no}")
 
@@ -606,12 +624,14 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                 created_by=receipt.created_by
             )
 
-            for item, batch, qty, instances in items_to_move:
+            for item, batch, qty, instances, item_central_reg, item_page_no in items_to_move:
                 issue_item = StockEntryItem.objects.create(
                     stock_entry=issue,
                     item=item,
                     batch=batch,
-                    quantity=qty
+                    quantity=qty,
+                    stock_register=item_central_reg,
+                    page_number=item_page_no
                 )
                 if instances:
                     issue_item.instances.set(instances)

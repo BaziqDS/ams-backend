@@ -46,10 +46,18 @@ class InspectionPDFGenerator:
         # Populate register info from items if available
         first_item = self.inspection.items.first()
         if first_item:
-            if first_item.stock_register_no: self.data['stock_register_no'] = first_item.stock_register_no
+            if first_item.stock_register:
+                self.data['stock_register_no'] = first_item.stock_register.register_number
+            elif first_item.stock_register_no:
+                self.data['stock_register_no'] = first_item.stock_register_no
+            
             if first_item.stock_register_page_no: self.data['stock_page_nos'] = first_item.stock_register_page_no
             if first_item.stock_entry_date: self.data['stock_date_of_entry'] = first_item.stock_entry_date.strftime('%d/%m/%Y')
-            if first_item.central_register_no: self.data['dead_stock_register_no'] = first_item.central_register_no
+            
+            if first_item.central_register:
+                self.data['dead_stock_register_no'] = first_item.central_register.register_number
+            elif first_item.central_register_no:
+                self.data['dead_stock_register_no'] = first_item.central_register_no
             if first_item.central_register_page_no: self.data['dead_stock_page_nos'] = first_item.central_register_page_no
         
         if self.inspection.central_store_filled_at:

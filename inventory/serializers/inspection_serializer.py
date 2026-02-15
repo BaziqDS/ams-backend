@@ -8,6 +8,8 @@ class InspectionItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     item_name = serializers.CharField(source='item.name', read_only=True)
     item_code = serializers.CharField(source='item.code', read_only=True)
+    central_register_name = serializers.CharField(source='central_register.register_number', read_only=True)
+    stock_register_name = serializers.CharField(source='stock_register.register_number', read_only=True)
 
     class Meta:
         model = InspectionItem
@@ -16,9 +18,10 @@ class InspectionItemSerializer(serializers.ModelSerializer):
             'item_description', 'item_specifications',
             'tendered_quantity', 'accepted_quantity', 'rejected_quantity',
             'unit_price', 'remarks',
-            'stock_register_no', 'stock_register_page_no', 'stock_entry_date',
-            'central_register_no', 'central_register_page_no',
-            'batch_number', 'expiry_date'
+            'stock_register', 'stock_register_name', 'stock_register_no', 
+            'stock_register_page_no', 'stock_entry_date',
+            'central_register', 'central_register_name', 'central_register_no', 
+            'central_register_page_no', 'batch_number', 'expiry_date'
         )
         read_only_fields = ('inspection_certificate',)
 
