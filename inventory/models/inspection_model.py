@@ -150,3 +150,16 @@ class InspectionItem(models.Model):
 
     def __str__(self):
         return f"{self.item_description[:50]} ({self.inspection_certificate.contract_no})"
+
+class InspectionDocument(models.Model):
+    inspection_certificate = models.ForeignKey(
+        'InspectionCertificate',
+        on_delete=models.CASCADE,
+        related_name='documents'
+    )
+    file = models.FileField(upload_to='inspection_docs/')
+    label = models.CharField(max_length=255, blank=True, null=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Document for {self.inspection_certificate.contract_no}"
