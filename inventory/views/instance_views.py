@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, filters
 from ..models.instance_model import ItemInstance
 from ..serializers.instance_serializer import ItemInstanceSerializer
 from .utils import ScopedViewSetMixin
@@ -11,6 +11,8 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     queryset = ItemInstance.objects.all().order_by('-created_at')
     serializer_class = ItemInstanceSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['serial_number', 'batch_number']
 
     def get_queryset(self):
         queryset = super().get_queryset()

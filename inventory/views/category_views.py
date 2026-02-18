@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.category_model import Category
@@ -9,6 +9,8 @@ class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['name', 'code']
 
     def get_queryset(self):
         return Category.objects.all()

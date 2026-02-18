@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,6 +12,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     queryset = UserProfile.objects.all()
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['user__username', 'employee_id']
 
     def get_queryset(self):
         user = self.request.user
@@ -32,6 +34,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserManagementSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['username', 'email', 'first_name', 'last_name']
 
     def get_queryset(self):
         user = self.request.user
@@ -55,6 +59,8 @@ class GroupViewSet(viewsets.ModelViewSet):
     queryset = Group.objects.all().prefetch_related('permissions')
     serializer_class = GroupSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['name']
 
 class AvailablePermissionsView(APIView):
     permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]

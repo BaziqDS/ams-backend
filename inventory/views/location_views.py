@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.location_model import Location
@@ -9,6 +9,8 @@ from user_management.models import UserProfile
 class LocationViewSet(viewsets.ModelViewSet):
     serializer_class = LocationSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['name', 'code']
 
     def get_queryset(self):
         user = self.request.user

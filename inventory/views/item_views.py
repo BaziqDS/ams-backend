@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, filters
 from ..models.item_model import Item
 from ..serializers.item_serializer import ItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
@@ -7,6 +7,8 @@ class ItemViewSet(viewsets.ModelViewSet):
     queryset = Item.objects.all().select_related('category__parent_category', 'created_by')
     serializer_class = ItemSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['name', 'code']
 
     def get_queryset(self):
         queryset = super().get_queryset()

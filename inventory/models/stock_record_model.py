@@ -9,9 +9,9 @@ class StockRecord(models.Model):
     Current balance of an Item (and optionally Batch) at a specific Location.
     Summary table for quick inventory lookups.
     """
-    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='stock_records')
-    batch = models.ForeignKey(ItemBatch, on_delete=models.CASCADE, null=True, blank=True, related_name='stock_records')
-    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='stock_records')
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='stock_records', db_index=True)
+    batch = models.ForeignKey(ItemBatch, on_delete=models.CASCADE, null=True, blank=True, related_name='stock_records', db_index=True)
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='stock_records', db_index=True)
     
     quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)], help_text="Total physical stock held at this location")
     in_transit_quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)], help_text="Stock in-transit from here to another store")

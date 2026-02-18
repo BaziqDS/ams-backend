@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
@@ -15,6 +15,8 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     ).prefetch_related('items__item')
     serializer_class = InspectionCertificateSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['contract_no', 'contractor_name', 'indenter']
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

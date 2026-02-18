@@ -176,8 +176,8 @@ class StockEntry(models.Model):
 
 class StockEntryItem(models.Model):
     stock_entry = models.ForeignKey(StockEntry, on_delete=models.CASCADE, related_name='items')
-    item = models.ForeignKey(Item, on_delete=models.PROTECT)
-    batch = models.ForeignKey(ItemBatch, on_delete=models.PROTECT, null=True, blank=True)
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, db_index=True)
+    batch = models.ForeignKey(ItemBatch, on_delete=models.PROTECT, null=True, blank=True, db_index=True)
     instances = models.ManyToManyField(ItemInstance, blank=True, related_name='stock_entry_items')
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     

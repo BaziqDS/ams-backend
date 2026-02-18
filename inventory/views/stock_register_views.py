@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, filters
 from rest_framework.response import Response
 from ..models.stock_register_model import StockRegister
 from ..serializers.stock_register_serializer import StockRegisterSerializer
@@ -11,6 +11,8 @@ class StockRegisterViewSet(viewsets.ModelViewSet):
     """
     serializer_class = StockRegisterSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['register_number', 'store__name']
 
     def get_queryset(self):
         user = self.request.user

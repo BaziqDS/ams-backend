@@ -1,6 +1,6 @@
 from django.utils import timezone
 import logging
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, filters
 
 logger = logging.getLogger(__name__)
 from rest_framework.decorators import action
@@ -45,10 +45,12 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = StockEntry.objects.all().select_related(
         'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by'
     ).prefetch_related(
-        'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register'
+        'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register', 'items__instances'
     ).order_by('-entry_date')
     serializer_class = StockEntrySerializer
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['entry_number', 'remarks']
 
     @action(detail=True, methods=['post'])
     def acknowledge(self, request, pk=None):
