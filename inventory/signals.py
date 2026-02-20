@@ -21,50 +21,51 @@ def auto_create_store_for_standalone(sender, instance, created, **kwargs):
     - Child standalones (Departments) get stores parented by themselves to ensure UI visibility.
     """
     if created and instance.is_standalone and not instance.is_store:
-        is_root = instance.parent_location is None
-        
-        if is_root:
-            store_code = "CENTRAL-STORE"
-            store_name = "Central Store"
-            # Root store's physical parent is the root location (ID 1)
-            store_parent = instance
-        else:
-            store_code = f"{instance.code}-MAIN-STORE"
-            store_name = f"{instance.name} - Main Store"
-            # Every departmental store must have its standalone location as parent for visibility
-            store_parent = instance
-
-        # Check if a store already exists with this code to be safe
-        if Location.objects.filter(code=store_code).exists():
-            logger.warning(f"Store with code {store_code} already exists for {instance.name}")
-            # Try to link existing store if it's the root case
+        with transaction.atomic():
+            is_root = instance.parent_location is None
+            
             if is_root:
-                existing_store = Location.objects.get(code=store_code)
-                instance.auto_created_store = existing_store
-                instance.save(update_fields=['auto_created_store'])
-            return
+                store_code = "CENTRAL-STORE"
+                store_name = "Central Store"
+                # Root store's physical parent is the root location (ID 1)
+                store_parent = instance
+            else:
+                store_code = f"{instance.code}-MAIN-STORE"
+                store_name = f"{instance.name} - Main Store"
+                # Every departmental store must have its standalone location as parent for visibility
+                store_parent = instance
 
-        store = Location.objects.create(
-            name=store_name,
-            code=store_code,
-            parent_location=store_parent,
-            location_type=LocationType.STORE,
-            is_store=True,
-            is_auto_created=True,
-            is_main_store=True,
-            is_standalone=False,
-            description=f"Auto-created main store for {instance.name}",
-            address=instance.address,
-            in_charge=instance.in_charge,
-            contact_number=instance.contact_number,
-            is_active=True,
-            created_by=instance.created_by
-        )
+            # Check if a store already exists with this code to be safe
+            if Location.objects.filter(code=store_code).exists():
+                logger.warning(f"Store with code {store_code} already exists for {instance.name}")
+                # Try to link existing store if it's the root case
+                if is_root:
+                    existing_store = Location.objects.get(code=store_code)
+                    instance.auto_created_store = existing_store
+                    instance.save(update_fields=['auto_created_store'])
+                return
 
-        instance.auto_created_store = store
-        instance.save(update_fields=['auto_created_store'])
-        
-        logger.info(f"[SIGNAL] Auto-created hierarchical store {store_name} (parent: {store_parent.name}) for standalone {instance.name}")
+            store = Location.objects.create(
+                name=store_name,
+                code=store_code,
+                parent_location=store_parent,
+                location_type=LocationType.STORE,
+                is_store=True,
+                is_auto_created=True,
+                is_main_store=True,
+                is_standalone=False,
+                description=f"Auto-created main store for {instance.name}",
+                address=instance.address,
+                in_charge=instance.in_charge,
+                contact_number=instance.contact_number,
+                is_active=True,
+                created_by=instance.created_by
+            )
+
+            instance.auto_created_store = store
+            instance.save(update_fields=['auto_created_store'])
+            
+            logger.info(f"[SIGNAL] Auto-created hierarchical store {store_name} (parent: {store_parent.name}) for standalone {instance.name}")
 
 def _record_movement_history(instance, entry):
     """
@@ -77,12 +78,28 @@ def _record_movement_history(instance, entry):
     
     action = MovementAction.RECEIVE if entry.entry_type == 'RECEIPT' else MovementAction.ISSUE
     
-    # Check if this movement was already recorded for this entry/item to avoid duplicates
-    if MovementHistory.objects.filter(stock_entry=entry, item=instance.item, batch=instance.batch).exists():
-        # If instances exist, check if each instance has a movement for this entry
-        if instance.instances.exists():
-            for inst in instance.instances.all():
-                if not MovementHistory.objects.filter(stock_entry=entry, instance=inst).exists():
+    with transaction.atomic():
+        # Check if this movement was already recorded for this entry/item to avoid duplicates
+        if MovementHistory.objects.filter(stock_entry=entry, item=instance.item, batch=instance.batch).exists():
+            # If instances exist, check if each instance has a movement for this entry
+            if instance.instances.exists():
+                for inst in instance.instances.all():
+                    if not MovementHistory.objects.filter(stock_entry=entry, instance=inst).exists():
+                        MovementHistory.objects.create(
+                            item=instance.item,
+                            instance=inst,
+                            batch=instance.batch,
+                            action=action,
+                            from_location=entry.from_location,
+                            to_location=entry.to_location,
+                            stock_entry=entry,
+                            performed_by=entry.created_by,
+                            remarks=entry.remarks
+                        )
+        else:
+            # Initial recording for this item/batch in this entry
+            if instance.instances.exists():
+                for inst in instance.instances.all():
                     MovementHistory.objects.create(
                         item=instance.item,
                         instance=inst,
@@ -94,33 +111,18 @@ def _record_movement_history(instance, entry):
                         performed_by=entry.created_by,
                         remarks=entry.remarks
                     )
-    else:
-        # Initial recording for this item/batch in this entry
-        if instance.instances.exists():
-            for inst in instance.instances.all():
+            else:
                 MovementHistory.objects.create(
                     item=instance.item,
-                    instance=inst,
                     batch=instance.batch,
                     action=action,
                     from_location=entry.from_location,
                     to_location=entry.to_location,
+                    quantity=instance.quantity,
                     stock_entry=entry,
                     performed_by=entry.created_by,
                     remarks=entry.remarks
                 )
-        else:
-            MovementHistory.objects.create(
-                item=instance.item,
-                batch=instance.batch,
-                action=action,
-                from_location=entry.from_location,
-                to_location=entry.to_location,
-                quantity=instance.quantity,
-                stock_entry=entry,
-                performed_by=entry.created_by,
-                remarks=entry.remarks
-            )
 
 @receiver(post_save, sender=StockEntryItem)
 def process_stock_entry_item(sender, instance, created, **kwargs):
@@ -133,42 +135,43 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
     # 1. Linked RECEIPT creation (ISSUE -> RECEIPT bridge)
     # CRITICAL: Do NOT create receipts for DRAFT entries. Wait until finalized.
     if stock_entry.entry_type == 'ISSUE' and stock_entry.to_location and not stock_entry.reference_entry and stock_entry.status != 'DRAFT':
-        # INTER-STORE: Force PENDING_ACK regardless of Issue status
-        # This ensures the Handshake is mandatory.
-        
-        linked_receipt, r_created = StockEntry.objects.get_or_create(
-            reference_entry=stock_entry,
-            entry_type='RECEIPT',
-            defaults={
-                'entry_number': f"R-{stock_entry.entry_number}",
-                'entry_date': stock_entry.entry_date,
-                'from_location': stock_entry.from_location,
-                'to_location': stock_entry.to_location,
-                'status': 'PENDING_ACK',
-                'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
-                'purpose': stock_entry.purpose,
-                'inspection_certificate': stock_entry.inspection_certificate,
-                'created_by': stock_entry.created_by
-            }
-        )
-        
-        receipt_item, i_created = StockEntryItem.objects.get_or_create(
-            stock_entry=linked_receipt,
-            item=instance.item,
-            batch=instance.batch,
-            defaults={
-                'quantity': instance.quantity
-            }
-        )
-        if not i_created:
-            receipt_item.quantity = instance.quantity
-            receipt_item.save()
+        with transaction.atomic():
+            # INTER-STORE: Force PENDING_ACK regardless of Issue status
+            # This ensures the Handshake is mandatory.
+            
+            linked_receipt, r_created = StockEntry.objects.get_or_create(
+                reference_entry=stock_entry,
+                entry_type='RECEIPT',
+                defaults={
+                    'entry_number': f"R-{stock_entry.entry_number}",
+                    'entry_date': stock_entry.entry_date,
+                    'from_location': stock_entry.from_location,
+                    'to_location': stock_entry.to_location,
+                    'status': 'PENDING_ACK',
+                    'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
+                    'purpose': stock_entry.purpose,
+                    'inspection_certificate': stock_entry.inspection_certificate,
+                    'created_by': stock_entry.created_by
+                }
+            )
+            
+            receipt_item, i_created = StockEntryItem.objects.get_or_create(
+                stock_entry=linked_receipt,
+                item=instance.item,
+                batch=instance.batch,
+                defaults={
+                    'quantity': instance.quantity
+                }
+            )
+            if not i_created:
+                receipt_item.quantity = instance.quantity
+                receipt_item.save()
 
-        # Sync instances if they were already added (e.g. bulk create or retrospective save)
-        if instance.instances.exists():
-            receipt_item.instances.set(instance.instances.all())
-        
-        logger.info(f"[SIGNAL] Linked RECEIPT item synced for {stock_entry.entry_number}")
+            # Sync instances if they were already added (e.g. bulk create or retrospective save)
+            if instance.instances.exists():
+                receipt_item.instances.set(instance.instances.all())
+            
+            logger.info(f"[SIGNAL] Linked RECEIPT item synced for {stock_entry.entry_number}")
 
     # 2. Trigger individual item processing (In-Transit / Stock Completion)
     process_single_stock_item(instance)

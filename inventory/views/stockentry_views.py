@@ -181,6 +181,8 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
+        from django.db import transaction
+        
         instance = self.get_object()
         reason = request.data.get('reason')
         
@@ -193,11 +195,12 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if instance.status == 'CANCELLED':
             return Response({'detail': 'Entry is already cancelled.'}, status=400)
 
-        instance.status = 'CANCELLED'
-        instance.cancellation_reason = reason
-        instance.cancelled_by = request.user
-        instance.cancelled_at = timezone.now()
-        instance.save()
+        with transaction.atomic():
+            instance.status = 'CANCELLED'
+            instance.cancellation_reason = reason
+            instance.cancelled_by = request.user
+            instance.cancelled_at = timezone.now()
+            instance.save()
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)

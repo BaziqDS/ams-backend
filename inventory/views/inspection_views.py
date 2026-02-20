@@ -25,7 +25,8 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 {'detail': f'Cannot delete an inspection that has progressed beyond Draft stage (Current: {instance.stage}).'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        return super().destroy(request, *args, **kwargs)
+        with transaction.atomic():
+            return super().destroy(request, *args, **kwargs)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -55,24 +56,25 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def submit_to_stock_details(self, request, pk=None):
-        instance = self.get_object()
-        
-        # Level 0 locations skip STOCK_DETAILS
-        if instance.department.hierarchy_level == 0:
-            return Response({'detail': 'Main University inspections skip Stock Details stage.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            instance = self.get_object()
+            
+            # Level 0 locations skip STOCK_DETAILS
+            if instance.department.hierarchy_level == 0:
+                return Response({'detail': 'Main University inspections skip Stock Details stage.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not request.user.has_perm('inventory.fill_stock_details'):
-            return Response({'detail': 'You do not have permission to fill stock details.'}, status=status.HTTP_403_FORBIDDEN)
+            if not request.user.has_perm('inventory.fill_stock_details'):
+                return Response({'detail': 'You do not have permission to fill stock details.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # This action is now redundant if we initiate directly to STOCK_DETAILS,
-        # but kept for compatibility or manual transitions.
-        if instance.stage != InspectionStage.DRAFT:
-            return Response({'detail': f'Cannot transition from {instance.stage} to STOCK_DETAILS (Must be in Draft).'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        instance.stage = InspectionStage.STOCK_DETAILS
-        instance.status = 'IN_PROGRESS'
-        instance.save()
-        return Response(self.get_serializer(instance).data)
+            # This action is now redundant if we initiate directly to STOCK_DETAILS,
+            # but kept for compatibility or manual transitions.
+            if instance.stage != InspectionStage.DRAFT:
+                return Response({'detail': f'Cannot transition from {instance.stage} to STOCK_DETAILS (Must be in Draft).'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            instance.stage = InspectionStage.STOCK_DETAILS
+            instance.status = 'IN_PROGRESS'
+            instance.save()
+            return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
     def submit_to_central_register(self, request, pk=None):

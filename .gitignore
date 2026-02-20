@@ -14,8 +14,8 @@ local_settings.py
 /media/
 
 # Environment
-.env
-.env.local
+.env*
+local_settings.py
 
 # IDE
 .vscode/
