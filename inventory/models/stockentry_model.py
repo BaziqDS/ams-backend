@@ -184,10 +184,12 @@ class StockEntryItem(models.Model):
     # Stock register reference fields
     stock_register = models.ForeignKey(
         'StockRegister', on_delete=models.PROTECT,
+        null=True, blank=True,
         related_name='source_items',
         help_text="The register this entry was recorded in (source/sender side)."
     )
     page_number = models.PositiveIntegerField(
+        null=True, blank=True,
         help_text="Page number in the source stock register."
     )
     ack_stock_register = models.ForeignKey(

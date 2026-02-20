@@ -157,9 +157,7 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
             item=instance.item,
             batch=instance.batch,
             defaults={
-                'quantity': instance.quantity,
-                'stock_register': instance.stock_register,
-                'page_number': instance.page_number
+                'quantity': instance.quantity
             }
         )
         if not i_created:
@@ -424,7 +422,9 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                     stock_entry=linked_receipt,
                     item=entry_item.item,
                     batch=entry_item.batch,
-                    defaults={'quantity': entry_item.quantity}
+                    defaults={
+                        'quantity': entry_item.quantity
+                    }
                 )
                 if not i_created:
                     receipt_item.quantity = entry_item.quantity
