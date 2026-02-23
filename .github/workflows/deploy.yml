@@ -9,6 +9,9 @@ jobs:
   deploy:
     runs-on: self-hosted
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout code
