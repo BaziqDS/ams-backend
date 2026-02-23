@@ -15,8 +15,8 @@ jobs:
     steps:
       - name: Stop backend service before checkout
         run: |
-          nssm stop AMSBackend -ErrorAction SilentlyContinue
-          taskkill /F /IM python.exe /T -ErrorAction SilentlyContinue
+          nssm stop AMSBackend 2>$null
+          taskkill /F /IM python.exe /T 2>$null
           Start-Sleep -Seconds 3
 
       - name: Checkout code
@@ -64,7 +64,7 @@ jobs:
 
       - name: Stop backend service
         run: |
-          nssm stop AMSBackend -ErrorAction SilentlyContinue
+          nssm stop AMSBackend
           Start-Sleep -Seconds 5
 
       - name: Deploy backend service
