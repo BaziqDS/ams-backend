@@ -15,9 +15,13 @@ jobs:
     steps:
       - name: Stop backend service before checkout
         run: |
-          nssm stop AMSBackend 2>$null
+          $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
+          if ($service) {
+            nssm stop AMSBackend
+            Start-Sleep -Seconds 2
+          }
           taskkill /F /IM python.exe /T 2>$null
-          Start-Sleep -Seconds 3
+          Start-Sleep -Seconds 2
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,8 +68,11 @@ jobs:
 
       - name: Stop backend service
         run: |
-          nssm stop AMSBackend
-          Start-Sleep -Seconds 5
+          $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
+          if ($service) {
+            nssm stop AMSBackend
+            Start-Sleep -Seconds 5
+          }
 
       - name: Deploy backend service
         run: |
