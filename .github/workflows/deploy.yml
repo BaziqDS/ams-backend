@@ -14,7 +14,6 @@ jobs:
 
     steps:
       - name: Stop backend service before checkout
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
           nssm stop AMSBackend 2>$null
@@ -66,7 +65,6 @@ jobs:
           & .\venv\Scripts\python.exe manage.py collectstatic --noinput
 
       - name: Stop backend service
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
           nssm stop AMSBackend 2>$null
