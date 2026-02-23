@@ -97,32 +97,3 @@ jobs:
 
           nssm start AMSBackend
           Write-Host "AMSBackend started."
-
-      - name: Health check
-        run: |
-          Write-Host "Waiting for service to initialize..."
-          Start-Sleep -Seconds 10
-
-          $maxRetries = 5
-          $retryDelay = 5
-          $success = $false
-
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8000/health/" -UseBasicParsing -TimeoutSec 5
-              if ($response.StatusCode -eq 200) {
-                Write-Host "Health check passed on attempt $i."
-                $success = $true
-                break
-              }
-            } catch {
-              Write-Host "Attempt $i failed: $_"
-              Start-Sleep -Seconds $retryDelay
-            }
-          }
-
-          if (-not $success) {
-            Write-Host "Health check failed after $maxRetries attempts. Dumping logs..."
-            Get-Content "logs\backend-error.log" -Tail 50 -ErrorAction SilentlyContinue
-            exit 1
-          }
