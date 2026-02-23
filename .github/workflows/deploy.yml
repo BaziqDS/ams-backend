@@ -14,14 +14,13 @@ jobs:
 
     steps:
       - name: Stop backend service before checkout
+        shell: pwsh
         run: |
-          $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
-          if ($service) {
-            nssm stop AMSBackend
-            Start-Sleep -Seconds 2
-          }
+          $ErrorActionPreference = 'SilentlyContinue'
+          nssm stop AMSBackend 2>$null
           taskkill /F /IM python.exe /T 2>$null
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 3
+          exit 0
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -67,12 +66,13 @@ jobs:
           & .\venv\Scripts\python.exe manage.py collectstatic --noinput
 
       - name: Stop backend service
+        shell: pwsh
         run: |
-          $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
-          if ($service) {
-            nssm stop AMSBackend
-            Start-Sleep -Seconds 5
-          }
+          $ErrorActionPreference = 'SilentlyContinue'
+          nssm stop AMSBackend 2>$null
+          taskkill /F /IM python.exe /T 2>$null
+          Start-Sleep -Seconds 3
+          exit 0
 
       - name: Deploy backend service
         run: |
