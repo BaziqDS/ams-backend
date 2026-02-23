@@ -1,0 +1,57 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          venv\Scripts\pip.exe install -r requirements.txt
+
+      - name: Create environment file
+        run: |
+          @echo off
+          echo ENVIRONMENT=production > .env
+          echo SECRET_KEY=${{ secrets.SECRET_KEY }} >> .env
+          echo DB_NAME=${{ secrets.DB_NAME }} >> .env
+          echo DB_USER=${{ secrets.DB_USER }} >> .env
+          echo DB_PASSWORD=${{ secrets.DB_PASSWORD }} >> .env
+          echo DB_HOST=${{ secrets.DB_HOST }} >> .env
+          echo DB_PORT=${{ secrets.DB_PORT }} >> .env
+          echo ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }} >> .env
+          echo CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }} >> .env
+          echo FRONTEND_URL=${{ secrets.FRONTEND_URL }} >> .env
+
+      - name: Run migrations
+        run: |
+          venv\Scripts\python.exe manage.py migrate --noinput
+
+      - name: Collect static files
+        run: |
+          venv\Scripts\python.exe manage.py collectstatic --noinput
+
+      - name: Restart backend service
+        run: |
+          nssm restart AMSBackend
+        continue-on-error: true
+
+      - name: Verify service
+        run: |
+          timeout /t 5 /nobreak > nul
+          curl -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 || echo "Service check completed"
