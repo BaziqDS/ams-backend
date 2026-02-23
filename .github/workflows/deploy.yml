@@ -29,7 +29,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv venv
-          venv\Scripts\pip.exe install -r requirements.txt
+          .\venv\Scripts\pip.exe install --upgrade pip
+          .\venv\Scripts\pip.exe install -r requirements.txt
 
       - name: Create environment file
         run: |
@@ -46,11 +47,11 @@ jobs:
 
       - name: Run migrations
         run: |
-          venv\Scripts\python.exe manage.py migrate --noinput
+          & .\venv\Scripts\python.exe manage.py migrate --noinput
 
       - name: Collect static files
         run: |
-          venv\Scripts\python.exe manage.py collectstatic --noinput
+          & .\venv\Scripts\python.exe manage.py collectstatic --noinput
 
       - name: Restart backend service
         run: |
@@ -69,4 +70,4 @@ jobs:
       - name: Verify service
         run: |
           Start-Sleep -Seconds 5
-          curl -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 -ErrorAction SilentlyContinue
+          curl.exe -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 -ErrorAction SilentlyContinue
