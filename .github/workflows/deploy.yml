@@ -69,7 +69,6 @@ jobs:
           }
           nssm start AMSBackend
         continue-on-error: true
-        continue-on-error: true
 
       - name: Verify service
         run: |
