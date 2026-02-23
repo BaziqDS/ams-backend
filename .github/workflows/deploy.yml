@@ -22,6 +22,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Create logs directory
+        run: |
+          if (-not (Test-Path "logs")) { New-Item -ItemType Directory -Path "logs" }
+
       - name: Install dependencies
         run: |
           python -m venv venv
@@ -50,6 +54,15 @@ jobs:
 
       - name: Restart backend service
         run: |
+          $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
+          if (-not $service) {
+            Write-Host "Creating AMSBackend service..."
+            nssm install AMSBackend "$PWD\venv\Scripts\python.exe" "$PWD\manage.py runserver 0.0.0.0:8000"
+            nssm set AMSBackend AppDirectory "$PWD"
+            nssm set AMSBackend AppStdout "$PWD\logs\backend.log"
+            nssm set AMSBackend AppStderr "$PWD\logs\backend-error.log"
+            nssm set AMSBackend Start SERVICE_AUTO_START
+          }
           nssm restart AMSBackend
         continue-on-error: true
 
