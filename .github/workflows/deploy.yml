@@ -80,7 +80,7 @@ jobs:
           $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
           if (-not $service) {
             Write-Host "Creating AMSBackend service..."
-            nssm install AMSBackend $pythonExe "-m waitress --port=8000 --threads=4 yourproject.wsgi:application"
+            nssm install AMSBackend $pythonExe "-m waitress --port=8000 --threads=4 ams.wsgi:application"
             nssm set AMSBackend AppDirectory $appDir
             nssm set AMSBackend AppEnvironmentExtra "PATH=$appDir\venv\Scripts;$env:PATH"
             nssm set AMSBackend AppStdout "$appDir\logs\backend.log"
@@ -91,7 +91,7 @@ jobs:
           } else {
             Write-Host "Updating existing AMSBackend service..."
             nssm set AMSBackend Application $pythonExe
-            nssm set AMSBackend AppParameters "-m waitress --port=8000 --threads=4 yourproject.wsgi:application"
+            nssm set AMSBackend AppParameters "-m waitress --port=8000 --threads=4 ams.wsgi:application"
             nssm set AMSBackend AppDirectory $appDir
           }
 
