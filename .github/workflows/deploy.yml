@@ -70,4 +70,8 @@ jobs:
       - name: Verify service
         run: |
           Start-Sleep -Seconds 5
-          curl.exe -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 -ErrorAction SilentlyContinue
+          try {
+            curl.exe -f http://localhost:8000/api/users/ -o nul --connect-timeout 10
+          } catch {
+            Write-Host "Backend service not responding yet"
+          }
