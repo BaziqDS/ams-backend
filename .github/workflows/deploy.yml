@@ -65,11 +65,10 @@ jobs:
             nssm set AMSBackend Start SERVICE_AUTO_START
           } else {
             nssm stop AMSBackend
-            Start-Sleep -Seconds 2
+            Start-Sleep -Seconds 3
           }
-          Remove-Item -Path "$PWD\logs\backend.log" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "$PWD\logs\backend-error.log" -Force -ErrorAction SilentlyContinue
           nssm start AMSBackend
+        continue-on-error: true
         continue-on-error: true
 
       - name: Verify service
