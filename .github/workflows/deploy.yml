@@ -63,8 +63,13 @@ jobs:
             nssm set AMSBackend AppStdout "$PWD\logs\backend.log"
             nssm set AMSBackend AppStderr "$PWD\logs\backend-error.log"
             nssm set AMSBackend Start SERVICE_AUTO_START
+          } else {
+            nssm stop AMSBackend
+            Start-Sleep -Seconds 2
           }
-          nssm restart AMSBackend
+          Remove-Item -Path "$PWD\logs\backend.log" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$PWD\logs\backend-error.log" -Force -ErrorAction SilentlyContinue
+          nssm start AMSBackend
         continue-on-error: true
 
       - name: Verify service
