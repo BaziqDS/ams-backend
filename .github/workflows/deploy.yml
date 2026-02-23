@@ -75,13 +75,3 @@ jobs:
           }
           nssm start AMSBackend
         continue-on-error: true
-
-      - name: Verify service
-        run: |
-          Start-Sleep -Seconds 5
-          $response = curl.exe -s -o nul -w "%{http_code}" http://localhost:8000/admin/login/ -ErrorAction SilentlyContinue
-          if ($response -eq "200" -or $response -eq "302" -or $response -eq "401") {
-            Write-Host "Backend is running!"
-          } else {
-            Write-Host "Backend may not be ready yet"
-          }
