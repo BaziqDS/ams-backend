@@ -7,9 +7,15 @@ from ..models.batch_model import ItemBatch
 from ..models.instance_model import ItemInstance
 
 class PersonSerializer(serializers.ModelSerializer):
+    standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
+
     class Meta:
         model = Person
-        fields = '__all__'
+        fields = [
+            'id', 'name', 'designation', 'department', 
+            'standalone_locations', 'standalone_locations_display',
+            'is_active', 'created_at', 'updated_at'
+        ]
 
 class StockEntryItemSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source='item.name', read_only=True)

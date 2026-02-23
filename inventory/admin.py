@@ -63,9 +63,9 @@ class ItemInstanceAdmin(admin.ModelAdmin):
 
 @admin.register(Person)
 class PersonAdmin(admin.ModelAdmin):
-    list_display = ('name', 'employee_id', 'department', 'is_active')
+    list_display = ('name', 'designation', 'department', 'is_active')
     list_filter = ('is_active',)
-    search_fields = ('name', 'employee_id')
+    search_fields = ('name', 'department')
 
 class StockEntryItemInline(admin.TabularInline):
     model = StockEntryItem

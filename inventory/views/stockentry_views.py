@@ -14,13 +14,16 @@ from ..permissions import StockEntryPermission
 from .utils import ScopedViewSetMixin
 
 class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
-    queryset = Person.objects.filter(is_active=True)
+    queryset = Person.objects.filter(is_active=True).prefetch_related('standalone_locations')
     serializer_class = PersonSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
+        if user.is_superuser:
+            return queryset
+            
         if not hasattr(user, 'profile'):
             return queryset.none()
             
@@ -28,18 +31,17 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if profile.power_level == 0:
             return queryset
             
-        # Filter by department standalone name
-        # (This is a simplified departmental check based on the current model)
+        # Filter persons linked to standalone locations accessible by the user
         accessible_locs = profile.get_descendant_locations()
-        standalone_names = set()
+        standalone_ids = set()
         for loc in accessible_locs:
             sa = loc.get_parent_standalone()
-            if sa: standalone_names.add(sa.name)
+            if sa: standalone_ids.add(sa.id)
             
-        if not standalone_names:
+        if not standalone_ids:
             return queryset.none()
             
-        return queryset.filter(department__in=standalone_names)
+        return queryset.filter(standalone_locations__id__in=standalone_ids).distinct()
 
 class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = StockEntry.objects.all().select_related(

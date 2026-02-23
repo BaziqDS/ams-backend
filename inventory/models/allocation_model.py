@@ -32,7 +32,7 @@ class StockAllocation(models.Model):
     # Allocation Targets
     allocated_to_person = models.ForeignKey(
         Person, 
-        on_delete=models.PROTECT, 
+        on_delete=models.SET_NULL, 
         null=True, 
         blank=True,
         related_name='allocations'

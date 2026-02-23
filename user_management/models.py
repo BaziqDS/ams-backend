@@ -214,33 +214,49 @@ class UserProfile(models.Model):
         """
         from inventory.models import Location, Person
         
-        if self.power_level == 0:
-            # Global allocation
+        # Determine the management unit (standalone parent)
+        standalone = source_store.get_parent_standalone()
+        
+        # If the store belongs to a unit (Department/Section), always restrict to that unit
+        if standalone:
+            dept_locations = Location.objects.filter(
+                hierarchy_path__startswith=standalone.hierarchy_path,
+                is_store=False,
+                is_standalone=False,
+                is_active=True
+            )
+            
+            # EXCLUSION LOGIC: Exclude any locations that are managed by a child standalone unit.
+            child_standalones = Location.objects.filter(
+                is_standalone=True,
+                hierarchy_path__startswith=f"{standalone.hierarchy_path}/"
+            ).values_list('hierarchy_path', flat=True)
+            
+            if child_standalones:
+                q_exclude = Q()
+                for child_path in child_standalones:
+                    q_exclude |= Q(hierarchy_path__startswith=child_path)
+                dept_locations = dept_locations.exclude(q_exclude)
+                
+            # Filter persons linked to the same standalone unit
+            if self.user.is_superuser or self.user.has_perm('inventory.can_issue_to_any_person') or self.user.groups.filter(name='System Admin').exists():
+                dept_persons = Person.objects.filter(is_active=True)
+            else:
+                dept_persons = Person.objects.filter(standalone_locations=standalone, is_active=True).distinct()
+                
+            return {
+                'locations': dept_locations,
+                'persons': dept_persons
+            }
+            
+        # If no standalone parent (Global Store) and user is Admin, allow global
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return {
                 'locations': Location.objects.filter(is_store=False, is_active=True),
                 'persons': Person.objects.filter(is_active=True)
             }
             
-        # Departmental allocation
-        standalone = source_store.get_parent_standalone()
-        if not standalone:
-            return {'locations': Location.objects.none(), 'persons': Person.objects.none()}
-            
-        dept_locations = Location.objects.filter(
-            hierarchy_path__startswith=standalone.hierarchy_path,
-            is_store=False,
-            is_active=True
-        )
-        
-        # Filter persons related to department
-        dept_persons = Person.objects.filter(department=standalone.name, is_active=True)
-        if not dept_persons.exists():
-            dept_persons = Person.objects.filter(is_active=True)
-            
-        return {
-            'locations': dept_locations,
-            'persons': dept_persons
-        }
+        return {'locations': Location.objects.none(), 'persons': Person.objects.none()}
 
     class Meta:
         verbose_name = "User Profile"
