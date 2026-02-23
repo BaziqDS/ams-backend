@@ -13,6 +13,12 @@ jobs:
         shell: powershell
 
     steps:
+      - name: Stop backend service before checkout
+        run: |
+          nssm stop AMSBackend -ErrorAction SilentlyContinue
+          taskkill /F /IM python.exe /T -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
       - name: Checkout code
         uses: actions/checkout@v4
 
