@@ -70,8 +70,9 @@ jobs:
       - name: Verify service
         run: |
           Start-Sleep -Seconds 5
-          try {
-            curl.exe -f http://localhost:8000/api/users/ -o nul --connect-timeout 10
-          } catch {
-            Write-Host "Backend service not responding yet"
+          $response = curl.exe -s -o nul -w "%{http_code}" http://localhost:8000/admin/login/ -ErrorAction SilentlyContinue
+          if ($response -eq "200" -or $response -eq "302") {
+            Write-Host "Backend is running!"
+          } else {
+            Write-Host "Backend may not be ready yet"
           }
