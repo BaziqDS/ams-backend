@@ -26,17 +26,16 @@ jobs:
 
       - name: Create environment file
         run: |
-          @echo off
-          echo ENVIRONMENT=production > .env
-          echo SECRET_KEY=${{ secrets.SECRET_KEY }} >> .env
-          echo DB_NAME=${{ secrets.DB_NAME }} >> .env
-          echo DB_USER=${{ secrets.DB_USER }} >> .env
-          echo DB_PASSWORD=${{ secrets.DB_PASSWORD }} >> .env
-          echo DB_HOST=${{ secrets.DB_HOST }} >> .env
-          echo DB_PORT=${{ secrets.DB_PORT }} >> .env
-          echo ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }} >> .env
-          echo CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }} >> .env
-          echo FRONTEND_URL=${{ secrets.FRONTEND_URL }} >> .env
+          Set-Content -Path .env -Value "ENVIRONMENT=production"
+          Add-Content -Path .env -Value "SECRET_KEY=${{ secrets.SECRET_KEY }}"
+          Add-Content -Path .env -Value "DB_NAME=${{ secrets.DB_NAME }}"
+          Add-Content -Path .env -Value "DB_USER=${{ secrets.DB_USER }}"
+          Add-Content -Path .env -Value "DB_PASSWORD=${{ secrets.DB_PASSWORD }}"
+          Add-Content -Path .env -Value "DB_HOST=${{ secrets.DB_HOST }}"
+          Add-Content -Path .env -Value "DB_PORT=${{ secrets.DB_PORT }}"
+          Add-Content -Path .env -Value "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}"
+          Add-Content -Path .env -Value "CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}"
+          Add-Content -Path .env -Value "FRONTEND_URL=${{ secrets.FRONTEND_URL }}"
 
       - name: Run migrations
         run: |
@@ -53,5 +52,5 @@ jobs:
 
       - name: Verify service
         run: |
-          timeout /t 5 /nobreak > nul
-          curl -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 || echo "Service check completed"
+          Start-Sleep -Seconds 5
+          curl -f http://localhost:8000/api/users/ -o nul --connect-timeout 10 -ErrorAction SilentlyContinue
