@@ -95,25 +95,60 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 "lastUpdated": record.last_updated
             })
 
+        allocations_grouped = {}
         for alloc in allocations:
             standalone = alloc.source_location.get_parent_standalone()
             if not standalone: continue
             
-            unit = get_or_create_unit(standalone)
-            
+            target_id = alloc.allocated_to_person.id if alloc.allocated_to_person else alloc.allocated_to_location.id
             target_name = alloc.allocated_to_person.name if alloc.allocated_to_person else alloc.allocated_to_location.name
             target_type = "PERSON" if alloc.allocated_to_person else "LOCATION"
+            batch_id = alloc.batch.id if alloc.batch else None
+            batch_number = alloc.batch.batch_number if alloc.batch else None
+            source_store_id = alloc.source_location.id
+            source_store_name = alloc.source_location.name
+            
+            group_key = (standalone.id, target_type, target_id, batch_id, source_store_id)
+            
+            if group_key not in allocations_grouped:
+                allocations_grouped[group_key] = {
+                    "standalone": standalone,
+                    "id": alloc.id, # We'll just use the first allocation's ID for React keys
+                    "targetName": target_name,
+                    "targetType": target_type,
+                    "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
+                    "sourceStoreId": source_store_id,
+                    "sourceStoreName": source_store_name,
+                    "batchNumber": batch_number,
+                    "batchId": batch_id,
+                    "quantity": 0,
+                    "allocatedAt": alloc.allocated_at,
+                    "stockEntryIds": []
+                }
+
+            grp = allocations_grouped[group_key]
+            grp["quantity"] += alloc.quantity
+            # Keep the most recent allocation date
+            if alloc.allocated_at > grp["allocatedAt"]:
+                grp["allocatedAt"] = alloc.allocated_at
+            if alloc.stock_entry_id and alloc.stock_entry_id not in grp["stockEntryIds"]:
+                grp["stockEntryIds"].append(alloc.stock_entry_id)
+
+        for grp in allocations_grouped.values():
+            unit = get_or_create_unit(grp["standalone"])
             
             unit["allocations"].append({
-                "id": alloc.id,
-                "targetName": target_name,
-                "targetType": target_type,
-                "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
-                "sourceStoreName": alloc.source_location.name,
-                "batchNumber": alloc.batch.batch_number if alloc.batch else None,
-                "batchId": alloc.batch.id if alloc.batch else None,
-                "quantity": alloc.quantity,
-                "allocatedAt": alloc.allocated_at
+                "id": grp["id"],
+                "targetName": grp["targetName"],
+                "targetType": grp["targetType"],
+                "targetLocationId": grp["targetLocationId"],
+                "sourceStoreId": grp["sourceStoreId"],
+                "sourceStoreName": grp["sourceStoreName"],
+                "batchNumber": grp["batchNumber"],
+                "batchId": grp["batchId"],
+                "quantity": grp["quantity"],
+                "allocatedAt": grp["allocatedAt"],
+                "stockEntryIds": grp["stockEntryIds"]
             })
 
         return Response(list(hierarchy.values()))

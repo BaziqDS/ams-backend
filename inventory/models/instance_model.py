@@ -22,6 +22,17 @@ class ItemInstance(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='instances')
     batch = models.ForeignKey(ItemBatch, on_delete=models.SET_NULL, null=True, blank=True, related_name='instances')
     
+    # Link to inspection certificate - tracks which IC this instance came from
+    inspection_certificate = models.ForeignKey(
+        'InspectionCertificate',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='item_instances'
+    )
+    
+    # Serial number - NULL by default, should be assigned later by store manager
+    
     serial_number = models.CharField(max_length=100, unique=True, null=True, blank=True)
     qr_code = models.CharField(max_length=255, unique=True, null=True, blank=True)
     qr_code_image = models.ImageField(upload_to='qr_codes/', null=True, blank=True)
@@ -34,6 +45,11 @@ class ItemInstance(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        permissions = [
+            ("change_item_instance", "Can change item instance details"),
+        ]
 
     def __str__(self):
         return f"{self.item.name} ({self.serial_number or self.id})"
@@ -49,7 +65,7 @@ class ItemInstance(models.Model):
         
         # Construct the URL
         # Format: /items/:id/instances/:locationId/:instanceId
-        base_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
+        base_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
         url = f"{base_url}/items/{self.item.id}/instances/{self.current_location.id}/{self.id}"
         
         # Generate QR

@@ -239,10 +239,9 @@ class UserProfile(models.Model):
                 dept_locations = dept_locations.exclude(q_exclude)
                 
             # Filter persons linked to the same standalone unit
-            if self.user.is_superuser or self.user.has_perm('inventory.can_issue_to_any_person') or self.user.groups.filter(name='System Admin').exists():
-                dept_persons = Person.objects.filter(is_active=True)
-            else:
-                dept_persons = Person.objects.filter(standalone_locations=standalone, is_active=True).distinct()
+            # STRICT FILTERING: Persons must belong to the source store's standalone unit.
+            # No bypass for superusers - physical items must flow properly.
+            dept_persons = Person.objects.filter(standalone_locations=standalone, is_active=True).distinct()
                 
             return {
                 'locations': dept_locations,

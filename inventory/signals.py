@@ -504,13 +504,24 @@ def reverse_stock_on_item_delete(sender, instance, **kwargs):
 @receiver(m2m_changed, sender=StockEntryItem.instances.through)
 def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
     """
-    Updates ItemInstance locations when they are added to a COMPLETED or PARTIALLY_ACCEPTED StockEntryItem.
+    Updates ItemInstance locations/status when they are added to a COMPLETED StockEntryItem.
+    This fires after the serializer calls instances.set(), which happens after is_stock_recorded
+    is already True, so process_single_stock_item won't re-run the COMPLETED block.
     """
     if action == "post_add" and instance.stock_entry.status == 'COMPLETED':
-        to_loc = instance.stock_entry.to_location
+        entry = instance.stock_entry
+        to_loc = entry.to_location
+
         if to_loc:
+            # Store transfer: update physical location
             ItemInstance.objects.filter(pk__in=pk_set).update(current_location=to_loc)
             logger.info(f"Updated {len(pk_set)} instances to location {to_loc.name}")
+        elif entry.entry_type == 'ISSUE':
+            # Person/non-store allocation: mark instances as ALLOCATED
+            is_allocation = entry.issued_to or (entry.to_location and not entry.to_location.is_store)
+            if is_allocation:
+                ItemInstance.objects.filter(pk__in=pk_set).update(status='ALLOCATED')
+                logger.info(f"Marked {len(pk_set)} instances as ALLOCATED for {entry.entry_number}")
 
 @receiver(post_save, sender=InspectionCertificate)
 def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
@@ -584,12 +595,12 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
             if tracking_type == 'INDIVIDUAL':
                 instances = []
                 for idx in range(i_item.accepted_quantity):
-                    # Auto-generate serial if empty
-                    serial = f"SN-{i_item.item.code}-{receipt.id}-{idx+1}"
+                    # DO NOT auto-generate serial number - leave as NULL for store manager to assign later
                     instance_obj = ItemInstance.objects.create(
                         item=i_item.item,
                         batch=batch,
-                        serial_number=serial,
+                        serial_number=None,  # Will be assigned manually by store manager
+                        inspection_certificate=receipt.inspection_certificate,  # Link to IC
                         current_location=central_store,
                         status='AVAILABLE',
                         created_by=receipt.created_by

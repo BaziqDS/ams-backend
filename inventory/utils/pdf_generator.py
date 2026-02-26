@@ -81,7 +81,7 @@ class InspectionPDFGenerator:
         for idx, item in enumerate(items):
             if item.rejected_quantity > 0:
                 self.rejected_item_data['item_no'].append(idx + 1)
-                self.rejected_item_data['reasons'].append(item.remarks or "N/A")
+                self.rejected_item_data['reasons'].append(item.remarks or "No Reason Provided")
 
     def generate(self, buffer):
         """Main entry point for Django ViewSet"""

@@ -223,4 +223,4 @@ if IS_PRODUCTION:
 # =============================================================================
 # FRONTEND URL (QR codes, links)
 # =============================================================================
-FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
