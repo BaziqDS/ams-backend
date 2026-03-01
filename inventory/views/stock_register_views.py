@@ -1,5 +1,6 @@
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.response import Response
+from ams.permissions import StrictDjangoModelPermissions
 from ..models.stock_register_model import StockRegister
 from ..serializers.stock_register_serializer import StockRegisterSerializer
 
@@ -10,7 +11,7 @@ class StockRegisterViewSet(viewsets.ModelViewSet):
     Scoped to the user's accessible store locations.
     """
     serializer_class = StockRegisterSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
     filter_backends = [filters.SearchFilter]
     search_fields = ['register_number', 'store__name']
 

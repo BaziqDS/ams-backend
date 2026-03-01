@@ -18,10 +18,15 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from ams.auth_views import CookieLoginView, CookieRefreshView, CookieLogoutView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # Djoser endpoints
+    # Cookie-based JWT auth (httpOnly — XSS-safe)
+    path('auth/cookie/login/', CookieLoginView.as_view(), name='cookie-login'),
+    path('auth/cookie/refresh/', CookieRefreshView.as_view(), name='cookie-refresh'),
+    path('auth/cookie/logout/', CookieLogoutView.as_view(), name='cookie-logout'),
+    # Djoser endpoints (user management, /auth/users/me/, etc.)
     path('auth/', include('djoser.urls')),
     path('auth/', include('djoser.urls.jwt')),
     

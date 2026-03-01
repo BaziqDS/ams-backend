@@ -1,4 +1,5 @@
 from rest_framework import viewsets, permissions
+from ams.permissions import StrictDjangoModelPermissions
 from ..models.batch_model import ItemBatch
 from ..serializers.batch_serializer import ItemBatchSerializer
 
@@ -8,7 +9,7 @@ class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = ItemBatch.objects.all().order_by('-created_at')
     serializer_class = ItemBatchSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
     def get_queryset(self):
         queryset = super().get_queryset()

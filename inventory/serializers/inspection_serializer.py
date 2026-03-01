@@ -4,10 +4,51 @@ from django.utils import timezone
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage, InspectionDocument
 from ..models import Item, ItemBatch
 
+ALLOWED_MIME_TYPES = {
+    'application/pdf',
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+}
+
+ALLOWED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.docx'}
+
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+def validate_uploaded_file(file):
+    """
+    Validate that an uploaded file is an allowed type (PDF, image, or DOCX)
+    and does not exceed the maximum size.
+    Raises serializers.ValidationError on failure.
+    """
+    import os
+    ext = os.path.splitext(file.name)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise serializers.ValidationError(
+            f"Unsupported file type '{ext}'. Allowed: PDF, JPEG, PNG, GIF, WEBP, DOCX."
+        )
+    content_type = getattr(file, 'content_type', None)
+    if content_type and content_type not in ALLOWED_MIME_TYPES:
+        raise serializers.ValidationError(
+            f"Unsupported content type '{content_type}'."
+        )
+    if file.size > MAX_FILE_SIZE_BYTES:
+        raise serializers.ValidationError(
+            f"File '{file.name}' exceeds the 20 MB size limit."
+        )
+
+
 class InspectionDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = InspectionDocument
         fields = ('id', 'file', 'label', 'uploaded_at')
+
+    def validate_file(self, value):
+        validate_uploaded_file(value)
+        return value
 
 class InspectionItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
@@ -111,16 +152,9 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             # Handle document uploads from request.FILES
             if request and request.FILES:
                 for file_key in request.FILES:
-                    if file_key.startswith('documents['):
+                    if file_key.startswith('documents[') or file_key == 'file':
                         file = request.FILES[file_key]
-                        InspectionDocument.objects.create(
-                            inspection_certificate=certificate,
-                            file=file,
-                            label=file.name
-                        )
-                    # Support single file upload or differently named fields
-                    elif file_key == 'file':
-                        file = request.FILES[file_key]
+                        validate_uploaded_file(file)
                         InspectionDocument.objects.create(
                             inspection_certificate=certificate,
                             file=file,
@@ -155,15 +189,9 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             # Handle document uploads
             if request and request.FILES:
                 for file_key in request.FILES:
-                    if file_key.startswith('documents['):
+                    if file_key.startswith('documents[') or file_key == 'file':
                         file = request.FILES[file_key]
-                        InspectionDocument.objects.create(
-                            inspection_certificate=instance,
-                            file=file,
-                            label=file.name
-                        )
-                    elif file_key == 'file':
-                        file = request.FILES[file_key]
+                        validate_uploaded_file(file)
                         InspectionDocument.objects.create(
                             inspection_certificate=instance,
                             file=file,

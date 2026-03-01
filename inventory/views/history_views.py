@@ -1,4 +1,5 @@
 from rest_framework import viewsets, permissions
+from ams.permissions import StrictDjangoModelPermissions
 from ..models.history_model import MovementHistory
 from ..serializers.history_serializer import MovementHistorySerializer
 
@@ -8,7 +9,7 @@ class MovementHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = MovementHistory.objects.all().order_by('-timestamp')
     serializer_class = MovementHistorySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
     def get_queryset(self):
         queryset = super().get_queryset()
