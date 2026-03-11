@@ -6,13 +6,24 @@ from ..serializers.history_serializer import MovementHistorySerializer
 class MovementHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ReadOnly ViewSet for Movement History.
+    Optimized with select_related to avoid N+1 queries.
     """
-    queryset = MovementHistory.objects.all().order_by('-timestamp')
     serializer_class = MovementHistorySerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # Optimize with select_related to avoid N+1 queries
+        queryset = MovementHistory.objects.select_related(
+            'performed_by',
+            'from_location',
+            'to_location',
+            'item',
+            'item__category',
+            'instance',
+            'batch',
+            'stock_entry',
+            'allocation'
+        ).order_by('-timestamp')
         
         item_id = self.request.query_params.get('item')
         if item_id:

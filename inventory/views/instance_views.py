@@ -1,8 +1,9 @@
 from rest_framework import viewsets, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from ..models.instance_model import ItemInstance
+from ..models.allocation_model import StockAllocation, AllocationStatus
 from ..serializers.instance_serializer import ItemInstanceSerializer
 from .utils import ScopedViewSetMixin
 
@@ -23,24 +24,35 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     ViewSet for Item Instances.
     Supports read and update operations.
     """
-    queryset = ItemInstance.objects.all().order_by('-created_at')
     serializer_class = ItemInstanceSerializer
     permission_classes = [permissions.IsAuthenticated, HasChangeItemInstancePermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['serial_number', 'batch_number']
-class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
-    """
-    ReadOnly ViewSet for Item Instances.
-    Filtered by hierarchical scope and query params.
-    """
-    queryset = ItemInstance.objects.all().order_by('-created_at')
-    serializer_class = ItemInstanceSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['serial_number', 'batch_number']
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # Base queryset with select_related for foreign keys (avoids N+1)
+        queryset = ItemInstance.objects.select_related(
+            'item',
+            'item__category',
+            'current_location',
+            'current_location__parent_location',
+            'batch',
+            'created_by',
+            'inspection_certificate'
+        ).prefetch_related(
+            # Prefetch active allocations for serializer optimization (avoids triple query)
+            Prefetch(
+                'stockallocation_set',
+                queryset=StockAllocation.objects.filter(
+                    status=AllocationStatus.ALLOCATED
+                ).select_related(
+                    'allocated_to_person',
+                    'allocated_to_location',
+                    'source_location'
+                ),
+                to_attr='_prefetched_allocations'
+            )
+        ).order_by('-created_at')
         
         item_id = self.request.query_params.get('item')
         if item_id:

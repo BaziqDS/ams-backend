@@ -36,17 +36,38 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
-    def get_in_charge(self, obj):
-        if obj.status == 'ALLOCATED':
-            # Find the latest active allocation for this instance
+    def _get_latest_allocation(self, obj):
+        """
+        Get the latest active allocation using prefetched data (avoids N+1 queries).
+        Falls back to DB query if not prefetched.
+        """
+        # Use prefetched allocations if available (from optimized viewset)
+        if hasattr(obj, '_prefetched_allocations'):
+            allocations = obj._prefetched_allocations
+            if allocations:
+                return allocations[0]  # Already ordered by -allocated_at in prefetch
+        
+        # Fallback: Use the same allocation across all three methods
+        # Cache on the object to avoid repeated queries in same serialization
+        if not hasattr(obj, '_cached_allocation'):
             from ..models.allocation_model import StockAllocation, AllocationStatus
-            latest_alloc = StockAllocation.objects.filter(
+            obj._cached_allocation = StockAllocation.objects.filter(
                 item=obj.item,
                 batch=obj.batch,
                 status=AllocationStatus.ALLOCATED
             ).filter(
                 models.Q(allocated_to_person__isnull=False) | models.Q(allocated_to_location__isnull=False)
+            ).select_related(
+                'allocated_to_person',
+                'allocated_to_location',
+                'source_location'
             ).order_by('-allocated_at').first()
+        
+        return obj._cached_allocation
+
+    def get_in_charge(self, obj):
+        if obj.status == 'ALLOCATED':
+            latest_alloc = self._get_latest_allocation(obj)
             
             if latest_alloc:
                 if latest_alloc.allocated_to_person:
@@ -59,14 +80,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     def get_allocated_to(self, obj):
         """Get the person or location this instance is allocated to."""
         if obj.status == 'ALLOCATED':
-            from ..models.allocation_model import StockAllocation, AllocationStatus
-            latest_alloc = StockAllocation.objects.filter(
-                item=obj.item,
-                batch=obj.batch,
-                status=AllocationStatus.ALLOCATED
-            ).filter(
-                models.Q(allocated_to_person__isnull=False) | models.Q(allocated_to_location__isnull=False)
-            ).order_by('-allocated_at').first()
+            latest_alloc = self._get_latest_allocation(obj)
             
             if latest_alloc:
                 if latest_alloc.allocated_to_person:
@@ -78,14 +92,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     def get_allocated_to_type(self, obj):
         """Get the type of allocation: PERSON or LOCATION."""
         if obj.status == 'ALLOCATED':
-            from ..models.allocation_model import StockAllocation, AllocationStatus
-            latest_alloc = StockAllocation.objects.filter(
-                item=obj.item,
-                batch=obj.batch,
-                status=AllocationStatus.ALLOCATED
-            ).filter(
-                models.Q(allocated_to_person__isnull=False) | models.Q(allocated_to_location__isnull=False)
-            ).order_by('-allocated_at').first()
+            latest_alloc = self._get_latest_allocation(obj)
             
             if latest_alloc:
                 if latest_alloc.allocated_to_person:
@@ -95,9 +102,17 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
         return None
 
     def get_authority_store_name(self, obj):
-        main_store = obj.current_location.get_main_store()
-        return main_store.name if main_store else "N/A"
+        # Use prefetched parent_location relationship instead of method call
+        if obj.current_location and obj.current_location.parent_location:
+            main_store = obj.current_location.parent_location
+            if main_store.is_store:
+                return main_store.name
+        return "N/A"
 
     def get_authority_store_code(self, obj):
-        main_store = obj.current_location.get_main_store()
-        return main_store.code if main_store else "N/A"
+        # Use prefetched parent_location relationship instead of method call
+        if obj.current_location and obj.current_location.parent_location:
+            main_store = obj.current_location.parent_location
+            if main_store.is_store:
+                return main_store.code
+        return "N/A"

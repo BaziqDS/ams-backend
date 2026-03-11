@@ -6,13 +6,18 @@ from ..serializers.batch_serializer import ItemBatchSerializer
 class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ReadOnly ViewSet for Item Batches.
+    Optimized with select_related for item relationship.
     """
-    queryset = ItemBatch.objects.all().order_by('-created_at')
     serializer_class = ItemBatchSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # Add select_related to avoid N+1 on item
+        queryset = ItemBatch.objects.select_related(
+            'item',
+            'item__category',
+            'created_by'
+        ).order_by('-created_at')
         
         item_id = self.request.query_params.get('item')
         if item_id:

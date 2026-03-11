@@ -14,13 +14,21 @@ from ..permissions import StockEntryPermission
 from .utils import ScopedViewSetMixin
 
 class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
+    """
+    ViewSet for Persons.
+    Optimized to avoid N+1 in get_parent_standalone loop.
+    """
     queryset = Person.objects.filter(is_active=True).prefetch_related('standalone_locations')
     serializer_class = PersonSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        from django.db.models import Q
+        from ..models.location_model import Location
+        
         queryset = super().get_queryset()
         user = self.request.user
+        
         if user.is_superuser:
             return queryset
             
@@ -30,21 +38,40 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         profile = user.profile
         if profile.power_level == 0:
             return queryset
-            
-        # Filter persons linked to standalone locations accessible by the user
+        
+        # Optimized: Get accessible locations first, then find standalone parents in bulk
         accessible_locs = profile.get_descendant_locations()
-        standalone_ids = set()
-        for loc in accessible_locs:
-            sa = loc.get_parent_standalone()
-            if sa: standalone_ids.add(sa.id)
-            
+        
+        # Get all unique standalone locations in one query
+        # Walk up hierarchy to find standalone parents
+        all_location_ids = set(accessible_locs.values_list('id', flat=True))
+        
+        # Also include parent locations that are standalone
+        parent_standalone_ids = accessible_locs.exclude(
+            parent_location__isnull=True
+        ).filter(
+            parent_location__is_standalone=True
+        ).values_list('parent_location_id', flat=True)
+        
+        standalone_ids = set(parent_standalone_ids)
+        
+        # Also include locations that ARE standalone themselves
+        direct_standalone_ids = accessible_locs.filter(
+            is_standalone=True
+        ).values_list('id', flat=True)
+        standalone_ids.update(direct_standalone_ids)
+        
         if not standalone_ids:
             return queryset.none()
             
         return queryset.filter(standalone_locations__id__in=standalone_ids).distinct()
 
 class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
-    queryset = StockEntry.objects.all().select_related(
+    """
+    ViewSet for Stock Entries.
+    Optimized with select_related and prefetch_related.
+    """
+    queryset = StockEntry.objects.select_related(
         'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by'
     ).prefetch_related(
         'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register', 'items__instances'

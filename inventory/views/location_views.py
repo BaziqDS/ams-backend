@@ -7,15 +7,26 @@ from ams.permissions import StrictDjangoModelPermissions
 from user_management.models import UserProfile
 
 class LocationViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Locations.
+    Optimized with select_related for parent relationships.
+    """
     serializer_class = LocationSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'code']
 
     def get_queryset(self):
+        # Add select_related to avoid N+1 on parent_location
+        queryset = Location.objects.select_related(
+            'parent_location',
+            'created_by',
+            'auto_created_store'
+        ).all()
+        
         user = self.request.user
         if user.is_superuser:
-            return Location.objects.all()
+            return queryset
         
         try:
             profile = user.profile
@@ -38,10 +49,10 @@ class LocationViewSet(viewsets.ModelViewSet):
             return Response({"detail": "from_location_id is required"}, status=400)
             
         try:
-            from_loc = Location.objects.get(id=from_loc_id)
+            from_loc = Location.objects.select_related('parent_location').get(id=from_loc_id)
         except Location.DoesNotExist:
             return Response({"detail": "Source location not found"}, status=404)
-            
+        
         profile = request.user.profile
         queryset = profile.get_transferrable_locations(from_loc)
         
@@ -59,10 +70,10 @@ class LocationViewSet(viewsets.ModelViewSet):
             return Response({"detail": "source_store_id is required"}, status=400)
             
         try:
-            source_store = Location.objects.get(id=source_id)
+            source_store = Location.objects.select_related('parent_location').get(id=source_id)
         except Location.DoesNotExist:
             return Response({"detail": "Source store not found"}, status=404)
-            
+
         profile = request.user.profile
         targets = profile.get_allocatable_targets(source_store)
         

@@ -13,13 +13,19 @@ from .utils import ScopedViewSetMixin
 class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for viewing item distribution (stock records).
+    Optimized with select_related to avoid N+1 queries.
     """
-    queryset = StockRecord.objects.all()
     serializer_class = StockRecordSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # Add select_related to avoid N+1 queries
+        queryset = StockRecord.objects.select_related(
+            'location',
+            'location__parent_location',
+            'item',
+            'batch'
+        )
         
         item_id = self.request.query_params.get('item')
         if item_id:
@@ -43,17 +49,62 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             
         accessible_locs = user.profile.get_descendant_locations()
 
-        # 1. Get all StockRecords for the item
-        records = StockRecord.objects.filter(item_id=item_id, location__in=accessible_locs).select_related('location', 'batch')
+        # 1. Get all StockRecords with location hierarchy prefetched (FIX N+1)
+        records = StockRecord.objects.filter(
+            item_id=item_id, 
+            location__in=accessible_locs
+        ).select_related(
+            'location',
+            'location__parent_location',  # For hierarchy traversal
+            'batch'
+        )
         
-        # 2. Get all Active Allocations for the item
+        # 2. Get all Active Allocations with relationships prefetched
         allocations = StockAllocation.objects.filter(
             item_id=item_id, 
             status=AllocationStatus.ALLOCATED,
             source_location__in=accessible_locs
-        ).select_related('source_location', 'allocated_to_person', 'allocated_to_location', 'batch')
+        ).select_related(
+            'source_location',
+            'source_location__parent_location',  # For hierarchy traversal
+            'allocated_to_person',
+            'allocated_to_location',
+            'batch'
+        )
 
-        # 3. Organize by Standalone Unit
+        # 3. Pre-compute standalone lookup (avoid calling get_parent_standalone() in loop)
+        # Build a mapping of location_id -> standalone location
+        all_location_ids = set()
+        for record in records:
+            all_location_ids.add(record.location_id)
+            if record.location.parent_location_id:
+                all_location_ids.add(record.location.parent_location_id)
+        
+        for alloc in allocations:
+            all_location_ids.add(alloc.source_location_id)
+            if alloc.source_location.parent_location_id:
+                all_location_ids.add(alloc.source_location.parent_location_id)
+        
+        # Get all relevant locations in one query
+        location_map = {loc.id: loc for loc in Location.objects.filter(id__in=all_location_ids)}
+        
+        def get_standalone(location):
+            """Fast standalone lookup using pre-fetched locations"""
+            if not location:
+                return None
+            # Walk up the hierarchy using prefetched data
+            current = location
+            while current.parent_location_id:
+                parent = location_map.get(current.parent_location_id)
+                if not parent:
+                    break
+                if parent.is_standalone:
+                    return parent
+                current = parent
+            # Check if current is itself standalone
+            return location if location.is_standalone else None
+
+        # 4. Organize by Standalone Unit
         hierarchy = {}
 
         def get_or_create_unit(unit_loc):
@@ -71,8 +122,9 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 }
             return hierarchy[unit_loc.id]
 
+        # Process records (now uses fast lookup instead of DB calls)
         for record in records:
-            standalone = record.location.get_parent_standalone()
+            standalone = get_standalone(record.location)
             if not standalone: continue
             
             unit = get_or_create_unit(standalone)
@@ -95,9 +147,10 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 "lastUpdated": record.last_updated
             })
 
+        # Process allocations (now uses fast lookup instead of DB calls)
         allocations_grouped = {}
         for alloc in allocations:
-            standalone = alloc.source_location.get_parent_standalone()
+            standalone = get_standalone(alloc.source_location)
             if not standalone: continue
             
             target_id = alloc.allocated_to_person.id if alloc.allocated_to_person else alloc.allocated_to_location.id
@@ -113,7 +166,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             if group_key not in allocations_grouped:
                 allocations_grouped[group_key] = {
                     "standalone": standalone,
-                    "id": alloc.id, # We'll just use the first allocation's ID for React keys
+                    "id": alloc.id,
                     "targetName": target_name,
                     "targetType": target_type,
                     "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
@@ -128,7 +181,6 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
 
             grp = allocations_grouped[group_key]
             grp["quantity"] += alloc.quantity
-            # Keep the most recent allocation date
             if alloc.allocated_at > grp["allocatedAt"]:
                 grp["allocatedAt"] = alloc.allocated_at
             if alloc.stock_entry_id and alloc.stock_entry_id not in grp["stockEntryIds"]:
