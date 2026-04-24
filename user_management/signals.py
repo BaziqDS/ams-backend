@@ -45,6 +45,10 @@ EXPLICIT_PERMISSION_IMPLICATIONS: dict[str, list[str]] = {
     "create_categories": ["view_categories"],
     "edit_categories": ["view_categories"],
     "delete_categories": ["view_categories"],
+    # Items module
+    "create_items": ["view_items"],
+    "edit_items": ["view_items"],
+    "delete_items": ["view_items"],
 }
 
 

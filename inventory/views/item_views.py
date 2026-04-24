@@ -1,12 +1,13 @@
 from rest_framework import viewsets, permissions, filters
 from ..models.item_model import Item
 from ..serializers.item_serializer import ItemSerializer
-from ams.permissions import StrictDjangoModelPermissions
+from ..permissions import ItemPermission
+from .utils import get_item_scope_locations
 
 class ItemViewSet(viewsets.ModelViewSet):
-    queryset = Item.objects.all().select_related('category__parent_category', 'created_by')
+    queryset = Item.objects.all().select_related('category__parent_category', 'created_by').order_by('name', 'id')
     serializer_class = ItemSerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, ItemPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'code']
 
@@ -30,7 +31,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         # Tiers 0, 1, 2 can see all items for browsing/requesting
 
         # 2. Scoped Stock Annotations
-        accessible_locs = profile.get_descendant_locations()
+        accessible_locs = get_item_scope_locations(user)
         # If level 0 (Central), they see global totals. 
         # But get_descendant_locations for level 0 already returns all active locations.
         

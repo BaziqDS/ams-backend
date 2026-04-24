@@ -1,7 +1,7 @@
 from rest_framework import viewsets, permissions
-from ams.permissions import StrictDjangoModelPermissions
 from ..models.batch_model import ItemBatch
 from ..serializers.batch_serializer import ItemBatchSerializer
+from ..permissions import ItemReadPermission
 
 class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -9,7 +9,7 @@ class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
     Optimized with select_related for item relationship.
     """
     serializer_class = ItemBatchSerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, ItemReadPermission]
 
     def get_queryset(self):
         # Add select_related to avoid N+1 on item

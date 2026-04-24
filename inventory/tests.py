@@ -3,7 +3,17 @@ from django.contrib.auth.models import Group, Permission, User
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from inventory.models import Category, CategoryType, Location, LocationType, TrackingType
+from inventory.models import (
+    Category,
+    CategoryType,
+    Item,
+    ItemBatch,
+    ItemInstance,
+    Location,
+    LocationType,
+    StockRecord,
+    TrackingType,
+)
 
 
 class CategoryDomainPermissionBootstrapTests(TestCase):
@@ -18,6 +28,22 @@ class CategoryDomainPermissionBootstrapTests(TestCase):
                 'create_categories',
                 'edit_categories',
                 'delete_categories',
+            }.issubset(perms)
+        )
+
+
+class ItemDomainPermissionBootstrapTests(TestCase):
+    def test_item_domain_permissions_exist(self):
+        perms = set(
+            Permission.objects.filter(content_type__app_label='inventory').values_list('codename', flat=True)
+        )
+
+        self.assertTrue(
+            {
+                'view_items',
+                'create_items',
+                'edit_items',
+                'delete_items',
             }.issubset(perms)
         )
 
@@ -557,3 +583,158 @@ class CategoryApiDomainPermissionTests(TestCase):
         self.assertIn('tracking_type', resp.data)
         child.refresh_from_db()
         self.assertEqual(child.tracking_type, TrackingType.INDIVIDUAL)
+
+
+class ItemApiDomainPermissionTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='University Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.store = Location.objects.create(
+            name='CSIT Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.csit,
+            is_store=True,
+        )
+        cls.parent_category = Category.objects.create(
+            name='Computing Hardware',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        cls.subcategory = Category.objects.create(
+            name='Processors',
+            parent_category=cls.parent_category,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        cls.item = Item.objects.create(
+            name='Core i5 Processor',
+            category=cls.subcategory,
+            acct_unit='unit',
+            specifications='Intel Core i5',
+        )
+        cls.batch = ItemBatch.objects.create(
+            item=cls.item,
+            batch_number='B-001',
+        )
+        cls.instance = ItemInstance.objects.create(
+            item=cls.item,
+            batch=cls.batch,
+            current_location=cls.store,
+            serial_number='CPU-001',
+        )
+        StockRecord.objects.create(
+            item=cls.item,
+            batch=cls.batch,
+            location=cls.store,
+            quantity=5,
+            allocated_quantity=2,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(self.root)
+        return user
+
+    def test_list_requires_domain_view_items_perm(self):
+        user = self._make_user('item_legacy_view')
+        user.user_permissions.add(self._perm('view_item'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_list_allows_domain_view_items_perm(self):
+        user = self._make_user('item_domain_view')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_create_requires_domain_create_items_perm(self):
+        user = self._make_user('item_legacy_add')
+        user.user_permissions.add(self._perm('add_item'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/items/',
+            {
+                'name': 'Blocked Item',
+                'category': self.subcategory.id,
+                'acct_unit': 'unit',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_allows_domain_create_items_perm(self):
+        user = self._make_user('item_domain_create')
+        user.user_permissions.add(self._perm('create_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/items/',
+            {
+                'name': 'Domain Created Item',
+                'category': self.subcategory.id,
+                'acct_unit': 'unit',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+
+    def test_distribution_hierarchical_allows_domain_view_items_perm(self):
+        user = self._make_user('item_distribution_view')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/distribution/hierarchical/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in resp.data}
+        self.assertIn(self.csit.id, returned_ids)
+
+    def test_batches_allow_domain_view_items_perm(self):
+        user = self._make_user('item_batch_view')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/item-batches/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_instances_require_domain_view_items_perm(self):
+        user = self._make_user('item_instance_no_view')
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/item-instances/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_instances_allow_domain_view_items_perm(self):
+        user = self._make_user('item_instance_view')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/item-instances/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 200)

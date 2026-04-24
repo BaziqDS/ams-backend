@@ -44,6 +44,15 @@ class Item(models.Model):
         blank=True,
         related_name='created_items'
     )
+
+    class Meta:
+        permissions = [
+            ("view_items", "Can view items module"),
+            ("create_items", "Can create items module records"),
+            ("edit_items", "Can edit items module records"),
+            ("delete_items", "Can delete items module records"),
+        ]
+
     def __str__(self):
         return f"{self.name} ({self.code})"
 

@@ -6,9 +6,9 @@ from ..models.stock_record_model import StockRecord
 from ..models.allocation_model import StockAllocation, AllocationStatus
 from ..models.location_model import Location
 from ..serializers.distribution_serializer import StockRecordSerializer
-from ams.permissions import StrictDjangoModelPermissions
+from ..permissions import ItemReadPermission
 
-from .utils import ScopedViewSetMixin
+from .utils import ScopedViewSetMixin, get_item_scope_locations
 
 class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     """
@@ -16,7 +16,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     Optimized with select_related to avoid N+1 queries.
     """
     serializer_class = StockRecordSerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, ItemReadPermission]
 
     def get_queryset(self):
         # Add select_related to avoid N+1 queries
@@ -35,7 +35,8 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
         if location_id:
             queryset = queryset.filter(location_id=location_id)
             
-        return self.get_scoped_queryset(queryset)
+        user = self.request.user
+        return queryset.filter(location__in=get_item_scope_locations(user)).distinct()
 
     @action(detail=False, methods=['get'])
     def hierarchical(self, request):
@@ -47,7 +48,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
         if not hasattr(user, 'profile'):
             return Response([])
             
-        accessible_locs = user.profile.get_descendant_locations()
+        accessible_locs = get_item_scope_locations(user)
 
         # 1. Get all StockRecords with location hierarchy prefetched (FIX N+1)
         records = StockRecord.objects.filter(

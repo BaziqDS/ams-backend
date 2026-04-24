@@ -124,6 +124,29 @@ MODULES: dict[str, ModuleSpec] = {
             "reads": [],
         },
     },
+    "items": {
+        "view": {
+            "perms": ["inventory.view_items"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_items",
+                "inventory.create_items",
+                "inventory.edit_items",
+            ],
+            "reads": ["categories"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_items",
+                "inventory.create_items",
+                "inventory.edit_items",
+                "inventory.delete_items",
+            ],
+            "reads": ["categories"],
+        },
+    },
 }
 
 
@@ -137,6 +160,7 @@ READ_PERMS: dict[str, list[str]] = {
     # domain module read so dependency grants round-trip as Locations: View.
     "locations": ["inventory.view_locations", "inventory.view_location"],
     "categories": ["inventory.view_categories"],
+    "items": ["inventory.view_items"],
 }
 
 

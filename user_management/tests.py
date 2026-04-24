@@ -159,6 +159,75 @@ class CapabilityManifestCategoriesImplicationTests(TestCase):
         self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
 
 
+class CapabilityManifestItemsTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_resolve_items_manage_includes_domain_perms_and_category_read(self):
+        resolved = resolve_selections_to_codenames({'items': 'manage'})
+        self.assertIn('inventory.view_items', resolved)
+        self.assertIn('inventory.create_items', resolved)
+        self.assertIn('inventory.edit_items', resolved)
+        self.assertIn('inventory.view_categories', resolved)
+        self.assertNotIn('inventory.delete_items', resolved)
+
+    def test_items_module_declared_with_view_manage_full(self):
+        self.assertIn('items', MODULES)
+        self.assertIn('view', MODULES['items'])
+        self.assertIn('manage', MODULES['items'])
+        self.assertIn('full', MODULES['items'])
+
+    def test_items_read_perm_declared(self):
+        self.assertEqual(
+            READ_PERMS.get('items'),
+            ['inventory.view_items'],
+        )
+
+    def test_compute_capabilities_reports_items_level(self):
+        user = User.objects.create_user(username='cap_items', password='x')
+        group = Group.objects.create(name='Items Full')
+        for dotted in MODULES['items']['full']['perms']:
+            group.permissions.add(self._perm(dotted))
+        user.groups.add(group)
+
+        caps = compute_capabilities_for_user(user)
+        self.assertEqual(caps['items'], 'full')
+
+
+class CapabilityManifestItemsImplicationTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_create_items_implies_view_items(self):
+        group = Group.objects.create(name='Items Managers Create')
+        create_perm = self._perm('inventory.create_items')
+        view_perm = self._perm('inventory.view_items')
+
+        group.permissions.add(create_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
+    def test_edit_items_implies_view_items(self):
+        group = Group.objects.create(name='Items Managers Edit')
+        edit_perm = self._perm('inventory.edit_items')
+        view_perm = self._perm('inventory.view_items')
+
+        group.permissions.add(edit_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
+    def test_delete_items_implies_view_items(self):
+        group = Group.objects.create(name='Items Managers Delete')
+        delete_perm = self._perm('inventory.delete_items')
+        view_perm = self._perm('inventory.view_items')
+
+        group.permissions.add(delete_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
+
 class UserManagementLocationAssignmentScopeTests(TestCase):
     @classmethod
     def setUpTestData(cls):

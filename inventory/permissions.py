@@ -82,3 +82,62 @@ class CategoryPermission(permissions.BasePermission):
         if request.method == "DELETE":
             return _has_perm(user, "inventory.delete_categories")
         return False
+
+
+class ItemPermission(permissions.BasePermission):
+    """Domain-permission gate for /api/inventory/items/."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_items")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_items")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_items")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_items")
+        return False
+
+
+class ItemReadPermission(permissions.BasePermission):
+    """Read-only companion gate for item-owned support endpoints."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_items")
+        return False
+
+
+class ItemInstancePermission(permissions.BasePermission):
+    """Item module gate for instance reads plus controlled instance edits."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_items")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_items")
+        if request.method in {"PUT", "PATCH"}:
+            return (
+                _has_perm(user, "inventory.edit_items")
+                or _has_perm(user, "inventory.change_item_instance")
+            )
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_items")
+        return False
