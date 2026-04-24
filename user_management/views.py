@@ -22,17 +22,23 @@ def _visible_users_queryset(request_user):
         User.objects.all()
         .select_related("profile")
         .prefetch_related("user_permissions", "groups")
+        .order_by("id")
     )
-    if request_user.is_superuser or request_user.has_perm(
-        "user_management.view_all_user_accounts"
-    ):
+    if request_user.is_superuser:
         return base_qs
-    if not request_user.has_perm("user_management.view_user_accounts"):
+    has_user_view = (
+        request_user.has_perm("user_management.view_user_accounts")
+        or request_user.has_perm("user_management.view_all_user_accounts")
+    )
+    if not has_user_view:
         return base_qs.filter(id=request_user.id)
     try:
-        managed_locations = request_user.profile.get_user_management_locations()
+        profile = request_user.profile
     except UserProfile.DoesNotExist:
         return base_qs.filter(id=request_user.id)
+    if profile.has_root_user_management_scope():
+        return base_qs
+    managed_locations = profile.get_user_management_locations()
     if managed_locations.exists():
         return base_qs.filter(
             profile__assigned_locations__in=managed_locations
@@ -41,7 +47,7 @@ def _visible_users_queryset(request_user):
 
 
 class UserProfileViewSet(viewsets.ModelViewSet):
-    queryset = UserProfile.objects.all()
+    queryset = UserProfile.objects.all().select_related("user").prefetch_related("assigned_locations")
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated, UserAccountPermission]
     filter_backends = [filters.SearchFilter]
@@ -49,21 +55,32 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         request_user = self.request.user
-        if request_user.is_superuser or request_user.has_perm(
-            "user_management.view_all_user_accounts"
-        ):
-            return UserProfile.objects.all()
-        if not request_user.has_perm("user_management.view_user_accounts"):
-            return UserProfile.objects.filter(user=request_user)
+        base_qs = (
+            UserProfile.objects.all()
+            .select_related("user")
+            .prefetch_related("assigned_locations")
+            .order_by("id")
+        )
+        if request_user.is_superuser:
+            return base_qs
+        has_user_view = (
+            request_user.has_perm("user_management.view_user_accounts")
+            or request_user.has_perm("user_management.view_all_user_accounts")
+        )
+        if not has_user_view:
+            return base_qs.filter(user=request_user)
         try:
-            managed_locations = request_user.profile.get_user_management_locations()
+            profile = request_user.profile
         except UserProfile.DoesNotExist:
-            return UserProfile.objects.filter(user=request_user)
+            return base_qs.filter(user=request_user)
+        if profile.has_root_user_management_scope():
+            return base_qs
+        managed_locations = profile.get_user_management_locations()
         if managed_locations.exists():
-            return UserProfile.objects.filter(
+            return base_qs.filter(
                 assigned_locations__in=managed_locations
             ).distinct()
-        return UserProfile.objects.filter(user=request_user)
+        return base_qs.filter(user=request_user)
 
 
 class UserViewSet(viewsets.ModelViewSet):

@@ -1,9 +1,9 @@
 # pyright: reportAttributeAccessIssue=false
-from django.contrib.auth.models import Permission, User
+from django.contrib.auth.models import Group, Permission, User
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from inventory.models import Category, CategoryType, Location, LocationType
+from inventory.models import Category, CategoryType, Location, LocationType, TrackingType
 
 
 class CategoryDomainPermissionBootstrapTests(TestCase):
@@ -42,6 +42,12 @@ class LocationApiPermissionAndScopeTests(TestCase):
             parent_location=cls.dept_a,
             is_standalone=False,
         )
+        cls.dept_a_lab = Location.objects.create(
+            name='Dept A Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.dept_a_room,
+            is_standalone=False,
+        )
         cls.dept_b = Location.objects.create(
             name='Dept B',
             location_type=LocationType.DEPARTMENT,
@@ -54,6 +60,9 @@ class LocationApiPermissionAndScopeTests(TestCase):
 
     def _perm(self, codename):
         return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _user_mgmt_perm(self, codename):
+        return Permission.objects.get(content_type__app_label='user_management', codename=codename)
 
     def _make_user(self, username):
         return User.objects.create_user(username=username, password='pw')
@@ -109,7 +118,7 @@ class LocationApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
-    def test_assignable_preserves_existing_delegation_behavior(self):
+    def test_assignable_returns_assigned_location_descendants_only_for_scoped_user(self):
         user = self._make_user('assignable_scoped')
         user.user_permissions.add(self._perm('view_locations'))
         user.user_permissions.add(self._perm('view_location'))
@@ -122,7 +131,60 @@ class LocationApiPermissionAndScopeTests(TestCase):
         returned_ids = {row['id'] for row in self._rows(resp)}
         self.assertIn(self.dept_a.id, returned_ids)
         self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertIn(self.dept_a_lab.id, returned_ids)
         self.assertNotIn(self.dept_b.id, returned_ids)
+
+    def test_assignable_ignores_view_all_user_accounts_for_non_root_assigned_user(self):
+        user = self._make_user('assignable_view_all_scoped')
+        user.user_permissions.add(self._perm('view_locations'))
+        user.user_permissions.add(self._perm('view_location'))
+        user.user_permissions.add(self._user_mgmt_perm('view_all_user_accounts'))
+        user.profile.assigned_locations.add(self.dept_a)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/locations/assignable/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.dept_a.id, returned_ids)
+        self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertIn(self.dept_a_lab.id, returned_ids)
+        self.assertNotIn(self.dept_b.id, returned_ids)
+
+    def test_assignable_ignores_system_admin_role_for_non_root_assigned_user(self):
+        user = self._make_user('assignable_system_admin_scoped')
+        group = Group.objects.create(name='System Admin')
+        user.groups.add(group)
+        user.user_permissions.add(self._perm('view_locations'))
+        user.user_permissions.add(self._perm('view_location'))
+        user.profile.assigned_locations.add(self.dept_a)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/locations/assignable/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.dept_a.id, returned_ids)
+        self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertIn(self.dept_a_lab.id, returned_ids)
+        self.assertNotIn(self.dept_b.id, returned_ids)
+
+    def test_assignable_root_assigned_user_can_assign_all_active_locations(self):
+        user = self._make_user('assignable_root')
+        user.user_permissions.add(self._perm('view_locations'))
+        user.user_permissions.add(self._perm('view_location'))
+        user.profile.assigned_locations.add(self.root)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/locations/assignable/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.root.id, returned_ids)
+        self.assertIn(self.dept_a.id, returned_ids)
+        self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertIn(self.dept_a_lab.id, returned_ids)
+        self.assertIn(self.dept_b.id, returned_ids)
 
     def test_serializer_enforces_model_clean_invariant_for_root_creation(self):
         user = self._make_user('loc_creator')
@@ -145,6 +207,173 @@ class LocationApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn('parent_location', resp.data)
+
+
+class LocationStandaloneWorkflowTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_superuser(
+            username='location_admin',
+            email='location_admin@example.com',
+            password='pw',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and 'results' in data:
+            return data['results']
+        return data
+
+    def test_standalone_create_endpoint_creates_first_root_and_central_store(self):
+        resp = self.client.post(
+            '/api/inventory/locations/standalone/',
+            {
+                'name': 'NED University',
+                'location_type': LocationType.DEPARTMENT,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        root = Location.objects.get(pk=resp.data['id'])
+        self.assertIsNone(root.parent_location)
+        self.assertTrue(root.is_standalone)
+        self.assertEqual(root.hierarchy_level, 0)
+        self.assertIsNotNone(root.auto_created_store)
+        self.assertEqual(root.auto_created_store.name, 'Central Store')
+        self.assertTrue(root.auto_created_store.is_main_store)
+        self.assertEqual(root.auto_created_store.parent_location, root)
+
+    def test_standalone_create_endpoint_locks_child_to_root_and_uses_main_store_name(self):
+        root = Location.objects.create(
+            name='NED University',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+
+        resp = self.client.post(
+            '/api/inventory/locations/standalone/',
+            {
+                'name': 'CSIT',
+                'location_type': LocationType.DEPARTMENT,
+                'parent_location': None,
+                'is_standalone': False,
+                'main_store_name': 'CSIT Main Inventory',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        csit = Location.objects.get(pk=resp.data['id'])
+        self.assertEqual(csit.parent_location, root)
+        self.assertTrue(csit.is_standalone)
+        self.assertEqual(csit.auto_created_store.name, 'CSIT Main Inventory')
+        self.assertEqual(csit.auto_created_store.parent_location, csit)
+
+    def test_standalone_list_endpoint_returns_only_standalone_locations(self):
+        root = Location.objects.create(
+            name='NED University',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+        room = Location.objects.create(
+            name='CSIT Room 101',
+            location_type=LocationType.ROOM,
+            parent_location=csit,
+            is_standalone=False,
+        )
+
+        resp = self.client.get('/api/inventory/locations/standalone/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(root.id, returned_ids)
+        self.assertIn(csit.id, returned_ids)
+        self.assertNotIn(root.auto_created_store.id, returned_ids)
+        self.assertNotIn(csit.auto_created_store.id, returned_ids)
+        self.assertNotIn(room.id, returned_ids)
+
+    def test_children_endpoint_returns_immediate_children_and_root_excludes_standalones(self):
+        root = Location.objects.create(
+            name='NED University',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+        root_lab = Location.objects.create(
+            name='Root Lab',
+            location_type=LocationType.LAB,
+            parent_location=root,
+            is_standalone=False,
+        )
+        csit_room = Location.objects.create(
+            name='CSIT Room 101',
+            location_type=LocationType.ROOM,
+            parent_location=csit,
+            is_standalone=False,
+        )
+        nested_room = Location.objects.create(
+            name='Nested Room',
+            location_type=LocationType.ROOM,
+            parent_location=csit_room,
+            is_standalone=False,
+        )
+
+        root_resp = self.client.get(f'/api/inventory/locations/{root.id}/children/')
+        csit_resp = self.client.get(f'/api/inventory/locations/{csit.id}/children/')
+
+        self.assertEqual(root_resp.status_code, 200)
+        root_ids = {row['id'] for row in self._rows(root_resp)}
+        self.assertIn(root_lab.id, root_ids)
+        self.assertIn(root.auto_created_store.id, root_ids)
+        self.assertNotIn(csit.id, root_ids)
+
+        self.assertEqual(csit_resp.status_code, 200)
+        csit_ids = {row['id'] for row in self._rows(csit_resp)}
+        self.assertIn(csit_room.id, csit_ids)
+        self.assertIn(csit.auto_created_store.id, csit_ids)
+        self.assertNotIn(nested_room.id, csit_ids)
+
+    def test_children_create_endpoint_locks_parent_and_marks_child_non_standalone(self):
+        root = Location.objects.create(
+            name='NED University',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+
+        resp = self.client.post(
+            f'/api/inventory/locations/{csit.id}/children/',
+            {
+                'name': 'CSIT Lab 1',
+                'location_type': LocationType.LAB,
+                'parent_location': root.id,
+                'is_standalone': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        child = Location.objects.get(pk=resp.data['id'])
+        self.assertEqual(child.parent_location, csit)
+        self.assertFalse(child.is_standalone)
 
 
 class CategoryApiDomainPermissionTests(TestCase):
@@ -300,3 +529,31 @@ class CategoryApiDomainPermissionTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.category.refresh_from_db()
         self.assertEqual(self.category.name, 'Existing Category (Updated With Notes)')
+
+    def test_patch_rejects_subcategory_tracking_type_change(self):
+        user = self._make_user('category_tracking_patch')
+        user.user_permissions.add(self._perm('edit_categories'))
+        parent = Category.objects.create(
+            name='Fixed Asset Parent',
+            category_type=CategoryType.FIXED_ASSET,
+            default_depreciation_rate=12,
+        )
+        child = Category.objects.create(
+            name='Fixed Asset Child',
+            parent_category=parent,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+            default_depreciation_rate=12,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/categories/{child.id}/',
+            {'tracking_type': TrackingType.BATCH},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('tracking_type', resp.data)
+        child.refresh_from_db()
+        self.assertEqual(child.tracking_type, TrackingType.INDIVIDUAL)

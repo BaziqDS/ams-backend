@@ -77,20 +77,92 @@ class UserManagementSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         request = self.context.get('request')
-        if request and request.user and hasattr(request.user, 'profile'):
-            # Scope the assignable-locations dropdown to the admin's own
-            # locations plus their direct children (one-level delegation). The
-            # broader subtree from get_user_management_locations() is used for
-            # *viewing* users, not for *assigning* locations to them.
-            self.fields['assigned_locations'].queryset = (
-                request.user.profile.get_assignable_locations_for_user_management()
+        if request and request.user:
+            # Scope assignable locations to the admin's own spatial boundary.
+            # DRF uses this queryset for both dropdown data and payload
+            # validation, so out-of-scope location IDs are rejected server-side.
+            self.fields['assigned_locations'].queryset = self._assignable_locations_for_request_user()
+
+    def _assignable_locations_for_request_user(self):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return Location.objects.none()
+        if request.user.is_superuser:
+            return Location.objects.filter(is_active=True)
+
+        try:
+            return request.user.profile.get_assignable_locations_for_user_management()
+        except UserProfile.DoesNotExist:
+            return Location.objects.none()
+
+    def _request_user_has_global_location_scope(self):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        try:
+            return request.user.profile.has_root_user_management_scope()
+        except UserProfile.DoesNotExist:
+            return False
+
+    def _request_user_has_permission(self, codename):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        permission_name = codename if "." in codename else f"user_management.{codename}"
+        return request.user.has_perm(permission_name)
+
+    def validate_assigned_locations(self, locations):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return locations
+        if request.user.is_superuser:
+            return locations
+
+        allowed_ids = set(
+            self._assignable_locations_for_request_user().values_list('id', flat=True)
+        )
+
+        invalid = [location for location in locations if location.id not in allowed_ids]
+        if invalid:
+            raise serializers.ValidationError(
+                "You can only assign users to your assigned locations and their sub-locations."
             )
+        return locations
 
     def create(self, validated_data):
         profile_data = validated_data.pop('profile', {})
         user_permissions = validated_data.pop('user_permissions', [])
         groups = validated_data.pop('groups', [])
         password = validated_data.pop('password', None)
+
+        if 'assigned_locations' in profile_data and not self._request_user_has_permission('assign_user_locations'):
+            raise serializers.ValidationError({
+                'assigned_locations': "You do not have permission to assign locations to users.",
+            })
+
+        if groups and not self._request_user_has_permission('assign_user_roles'):
+            raise serializers.ValidationError({
+                'groups': "You do not have permission to assign roles to users.",
+            })
+
+        if user_permissions and not self._request_user_has_permission('assign_user_roles'):
+            raise serializers.ValidationError({
+                'user_permissions_list': "You do not have permission to assign direct permissions to users.",
+            })
+
+        if (
+            not self._request_user_has_global_location_scope()
+            and not profile_data.get('assigned_locations')
+        ):
+            raise serializers.ValidationError({
+                'assigned_locations': (
+                    "Select at least one location within your assigned scope."
+                ),
+            })
         
         # Create user using create_user to hash password
         user = User.objects.create_user(
@@ -123,33 +195,76 @@ class UserManagementSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop('profile', {})
+        request = self.context.get('request')
+        editing_self = (
+            request is not None
+            and request.user is not None
+            and request.user.is_authenticated
+            and instance.pk == request.user.pk
+            and not request.user.is_superuser
+        )
 
-        # Self-edit guard: a user editing their own profile cannot remove any
-        # location that was granted to them by an upstream admin. Additions are
-        # still allowed (and further constrained to the delegation scope by the
-        # assigned_locations queryset in __init__).
-        if 'assigned_locations' in profile_data:
-            request = self.context.get('request')
-            editing_self = (
-                request is not None
-                and request.user is not None
-                and request.user.is_authenticated
-                and instance.pk == request.user.pk
-                and not request.user.is_superuser
+        if editing_self and 'assigned_locations' in profile_data:
+            incoming_ids = {loc.pk for loc in profile_data['assigned_locations']}
+            current_ids = set(
+                instance.profile.assigned_locations.values_list('pk', flat=True)
             )
-            if editing_self:
-                incoming_ids = {loc.pk for loc in profile_data['assigned_locations']}
-                current_ids = set(
-                    instance.profile.assigned_locations.values_list('pk', flat=True)
-                )
-                removed = current_ids - incoming_ids
-                if removed:
-                    raise serializers.ValidationError({
-                        'assigned_locations': (
-                            "You cannot remove locations from your own profile. "
-                            "Ask an admin with broader scope to revoke them."
-                        ),
-                    })
+            if incoming_ids != current_ids:
+                raise serializers.ValidationError({
+                    'assigned_locations': (
+                        "You cannot change locations on your own profile. "
+                        "Ask an admin with broader scope to update them."
+                    ),
+                })
+
+        if editing_self and 'groups' in validated_data:
+            incoming_ids = {group.pk for group in validated_data['groups']}
+            current_ids = set(instance.groups.values_list('pk', flat=True))
+            if incoming_ids != current_ids:
+                raise serializers.ValidationError({
+                    'groups': (
+                        "You cannot change roles on your own profile. "
+                        "Ask an admin with broader scope to update them."
+                    ),
+                })
+
+        if editing_self and 'user_permissions_list' in validated_data:
+            incoming_ids = {perm.pk for perm in validated_data['user_permissions_list']}
+            current_ids = set(instance.user_permissions.values_list('pk', flat=True))
+            if incoming_ids != current_ids:
+                raise serializers.ValidationError({
+                    'user_permissions_list': (
+                        "You cannot change permissions on your own profile. "
+                        "Ask an admin with broader scope to update them."
+                    ),
+                })
+
+        if (
+            not editing_self
+            and not self._request_user_has_global_location_scope()
+            and 'assigned_locations' in profile_data
+            and not profile_data['assigned_locations']
+        ):
+            raise serializers.ValidationError({
+                'assigned_locations': (
+                    "Select at least one location within your assigned scope."
+                ),
+            })
+
+        if 'assigned_locations' in profile_data and not self._request_user_has_permission('assign_user_locations'):
+            raise serializers.ValidationError({
+                'assigned_locations': "You do not have permission to assign locations to users.",
+            })
+
+        if 'groups' in validated_data and not self._request_user_has_permission('assign_user_roles'):
+            raise serializers.ValidationError({
+                'groups': "You do not have permission to assign roles to users.",
+            })
+
+        if 'user_permissions_list' in validated_data and not self._request_user_has_permission('assign_user_roles'):
+            raise serializers.ValidationError({
+                'user_permissions_list': "You do not have permission to assign direct permissions to users.",
+            })
 
         # Update User fields
         instance.username = validated_data.get('username', instance.username)

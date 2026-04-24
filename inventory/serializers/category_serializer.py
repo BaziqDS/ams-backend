@@ -38,6 +38,16 @@ class CategorySerializer(serializers.ModelSerializer):
         request_user = validated_data.pop('request_user', None)
         audit_notes = validated_data.pop('audit_notes', None)
         validated_data.pop('notes', None)
+
+        if (
+            'tracking_type' in validated_data
+            and instance.parent_category_id
+            and validated_data['tracking_type'] != instance.tracking_type
+        ):
+            raise serializers.ValidationError({
+                'tracking_type': "Tracking type cannot be changed after subcategory creation.",
+            })
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save(request_user=request_user, audit_notes=audit_notes)

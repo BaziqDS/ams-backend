@@ -31,7 +31,8 @@ def auto_create_store_for_standalone(sender, instance, created, **kwargs):
                 store_parent = instance
             else:
                 store_code = f"{instance.code}-MAIN-STORE"
-                store_name = f"{instance.name} - Main Store"
+                requested_store_name = getattr(instance, '_main_store_name', '')
+                store_name = requested_store_name.strip() or f"{instance.name} - Main Store"
                 # Every departmental store must have its standalone location as parent for visibility
                 store_parent = instance
 

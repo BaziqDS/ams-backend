@@ -1,5 +1,5 @@
 # pyright: reportAttributeAccessIssue=false
-from rest_framework import viewsets, permissions, filters
+from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.location_model import Location
@@ -38,6 +38,65 @@ class LocationViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    @action(detail=False, methods=['get', 'post'])
+    def standalone(self, request):
+        """
+        GET: list standalone, non-store locations for the main Locations page.
+        POST: create a root location if none exists, otherwise create a standalone
+        child under the root. Client-supplied parent/is_standalone flags are ignored.
+        """
+        if request.method == 'GET':
+            queryset = self.filter_queryset(
+                self.get_queryset().filter(is_standalone=True, is_store=False)
+            )
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        root = Location.objects.filter(parent_location__isnull=True).order_by('id').first()
+        data = request.data.copy()
+        data['parent_location'] = root.id if root else None
+        data['is_standalone'] = True
+        data['is_store'] = False
+        data['is_main_store'] = False
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=['get', 'post'])
+    def children(self, request, pk=None):
+        """
+        GET: list immediate children for a standalone/root location. The root view
+        excludes standalone children because those are managed as their own units.
+        POST: create a non-standalone immediate child under this location.
+        """
+        parent = self.get_object()
+
+        if request.method == 'GET':
+            queryset = self.get_queryset().filter(parent_location=parent)
+            if parent.hierarchy_level == 0:
+                queryset = queryset.filter(is_standalone=False)
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        if not parent.is_standalone:
+            return Response(
+                {'detail': 'Sub-locations can only be created under standalone locations.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = request.data.copy()
+        data['parent_location'] = parent.id
+        data['is_standalone'] = False
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=False, methods=['get'])
     def transferrable(self, request):
@@ -92,14 +151,13 @@ class LocationViewSet(viewsets.ModelViewSet):
         """
         Returns locations that this user may assign to other users they manage.
 
-        - Global user-managers (is_superuser or `view_all_user_accounts`) see all
-          active locations.
-        - Scoped user-managers see their own assigned locations plus one level
-          of direct descendants — matching the single-step delegation rule
-          enforced by UserManagementSerializer.
+        - Superusers see all active locations.
+        - Scoped user-managers see their own assigned locations and descendants.
+          A level-0 root assignment therefore allows assigning any active
+          location, while a department assignment stays inside that department.
         """
         user = request.user
-        if user.is_superuser or user.has_perm('user_management.view_all_user_accounts'):
+        if user.is_superuser:
             queryset = Location.objects.filter(is_active=True)
         else:
             try:

@@ -71,7 +71,7 @@ class UserProfile(models.Model):
         if required_perm and not self.user.has_perm(required_perm):
             return Location.objects.none()
 
-        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+        if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
         location_ids = set()
@@ -154,7 +154,7 @@ class UserProfile(models.Model):
         """
         from inventory.models import Location
 
-        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+        if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
         if not self.assigned_locations.exists():
@@ -176,30 +176,28 @@ class UserProfile(models.Model):
 
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
+    def has_root_user_management_scope(self):
+        """Whether this profile's assigned location scope covers the whole system."""
+        if self.user.is_superuser:
+            return True
+        return self.assigned_locations.filter(
+            parent_location__isnull=True,
+            is_active=True,
+        ).exists()
+
     def get_assignable_locations_for_user_management(self):
         """Locations this user may assign to other users they manage.
 
-        Narrower than get_user_management_locations() (which spans the full
-        subtree for visibility purposes). Returns only the user's own assigned
-        locations plus their direct children — the explicit rule is that an
-        admin can delegate at most one level down from where they sit.
+        Uses the same spatial boundary as user-management visibility:
+        assigned locations and their descendants. If the user is assigned to
+        the level-0 root, this naturally expands to every active location.
         """
         from inventory.models import Location
 
-        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+        if self.user.is_superuser:
             return Location.objects.filter(is_active=True)
 
-        assigned = self.assigned_locations.all()
-        if not assigned.exists():
-            return Location.objects.none()
-
-        ids = set(assigned.values_list('id', flat=True))
-        child_ids = Location.objects.filter(
-            parent_location__in=assigned,
-            is_active=True,
-        ).values_list('id', flat=True)
-        ids.update(child_ids)
-        return Location.objects.filter(id__in=ids, is_active=True).distinct()
+        return self.get_user_management_locations()
 
     def get_assigned_permissions(self):
         """Helper to list all dynamic permissions for UI displays."""
