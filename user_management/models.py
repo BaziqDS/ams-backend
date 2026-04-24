@@ -144,8 +144,62 @@ class UserProfile(models.Model):
         
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
+    def get_user_management_locations(self):
+        """
+        Locations that define which user accounts this user can manage/view.
+        Does NOT include the L1->L2 global-visibility shortcut used by
+        get_descendant_locations() — user management is scoped by the user's own
+        assigned locations and their descendants, plus (if the user is assigned
+        to a store) the departmental context of that store.
+        """
+        from inventory.models import Location
 
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+            return Location.objects.filter(is_active=True)
 
+        if not self.assigned_locations.exists():
+            return Location.objects.none()
+
+        location_ids = set()
+        for loc in self.assigned_locations.all():
+            descendants = loc.get_descendants(include_self=True)
+            location_ids.update(descendants.values_list('id', flat=True))
+
+            if loc.is_store:
+                standalone = loc.get_parent_standalone()
+                if standalone:
+                    department_locs = Location.objects.filter(
+                        hierarchy_path__startswith=standalone.hierarchy_path,
+                        is_active=True,
+                    )
+                    location_ids.update(department_locs.values_list('id', flat=True))
+
+        return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
+
+    def get_assignable_locations_for_user_management(self):
+        """Locations this user may assign to other users they manage.
+
+        Narrower than get_user_management_locations() (which spans the full
+        subtree for visibility purposes). Returns only the user's own assigned
+        locations plus their direct children — the explicit rule is that an
+        admin can delegate at most one level down from where they sit.
+        """
+        from inventory.models import Location
+
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
+            return Location.objects.filter(is_active=True)
+
+        assigned = self.assigned_locations.all()
+        if not assigned.exists():
+            return Location.objects.none()
+
+        ids = set(assigned.values_list('id', flat=True))
+        child_ids = Location.objects.filter(
+            parent_location__in=assigned,
+            is_active=True,
+        ).values_list('id', flat=True)
+        ids.update(child_ids)
+        return Location.objects.filter(id__in=ids, is_active=True).distinct()
 
     def get_assigned_permissions(self):
         """Helper to list all dynamic permissions for UI displays."""
@@ -260,6 +314,18 @@ class UserProfile(models.Model):
     class Meta:
         verbose_name = "User Profile"
         permissions = [
+            # User accounts module
+            ("view_user_accounts", "Can view user accounts in assigned locations"),
             ("view_all_user_accounts", "Can view all user accounts university-wide"),
-            ("view_user_accounts_assigned_location", "Can view user accounts assigned to their locations"),
+            ("create_user_accounts", "Can create user accounts"),
+            ("edit_user_accounts", "Can edit user accounts"),
+            ("delete_user_accounts", "Can delete user accounts"),
+            ("assign_user_locations", "Can assign locations to user accounts"),
+            ("assign_user_roles", "Can assign roles to user accounts"),
+            # Roles module
+            ("view_roles", "Can view roles"),
+            ("create_roles", "Can create roles"),
+            ("edit_roles", "Can edit roles"),
+            ("delete_roles", "Can delete roles"),
+            ("assign_permissions_to_roles", "Can assign permissions to roles"),
         ]

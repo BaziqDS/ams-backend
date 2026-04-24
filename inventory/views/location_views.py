@@ -1,9 +1,10 @@
+# pyright: reportAttributeAccessIssue=false
 from rest_framework import viewsets, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.location_model import Location
 from ..serializers.location_serializer import LocationSerializer
-from ams.permissions import StrictDjangoModelPermissions
+from ..permissions import LocationPermission
 from user_management.models import UserProfile
 
 class LocationViewSet(viewsets.ModelViewSet):
@@ -12,7 +13,7 @@ class LocationViewSet(viewsets.ModelViewSet):
     Optimized with select_related for parent relationships.
     """
     serializer_class = LocationSerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, LocationPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'code']
 
@@ -89,20 +90,22 @@ class LocationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def assignable(self, request):
         """
-        Returns locations that the user is allowed to assign to other users.
-        - Global managers see all.
-        - Scoped managers see their descendant locations.
+        Returns locations that this user may assign to other users they manage.
+
+        - Global user-managers (is_superuser or `view_all_user_accounts`) see all
+          active locations.
+        - Scoped user-managers see their own assigned locations plus one level
+          of direct descendants — matching the single-step delegation rule
+          enforced by UserManagementSerializer.
         """
         user = request.user
         if user.is_superuser or user.has_perm('user_management.view_all_user_accounts'):
             queryset = Location.objects.filter(is_active=True)
-        elif user.has_perm('user_management.view_user_accounts_assigned_location'):
+        else:
             try:
-                queryset = user.profile.get_descendant_locations()
+                queryset = user.profile.get_assignable_locations_for_user_management()
             except UserProfile.DoesNotExist:
                 queryset = Location.objects.none()
-        else:
-            queryset = Location.objects.none()
-            
+
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)

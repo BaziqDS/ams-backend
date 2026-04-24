@@ -1,10 +1,11 @@
+# pyright: reportAttributeAccessIssue=false
 from rest_framework import viewsets, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db.models import Prefetch
 from ..models.category_model import Category, CategoryRateHistory
 from ..serializers.category_serializer import CategorySerializer
-from ams.permissions import StrictDjangoModelPermissions
+from ..permissions import CategoryPermission
 
 class CategoryViewSet(viewsets.ModelViewSet):
     """
@@ -12,7 +13,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
     Optimized with select_related for parent relationships.
     """
     serializer_class = CategorySerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, CategoryPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'code']
 

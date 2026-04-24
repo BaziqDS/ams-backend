@@ -19,6 +19,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from ams.auth_views import CookieLoginView, CookieRefreshView, CookieLogoutView
+from ams.capabilities_view import capabilities as capabilities_view
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -26,6 +27,7 @@ urlpatterns = [
     path('auth/cookie/login/', CookieLoginView.as_view(), name='cookie-login'),
     path('auth/cookie/refresh/', CookieRefreshView.as_view(), name='cookie-refresh'),
     path('auth/cookie/logout/', CookieLogoutView.as_view(), name='cookie-logout'),
+    path('auth/capabilities/', capabilities_view, name='auth-capabilities'),
     # Djoser endpoints (user management, /auth/users/me/, etc.)
     path('auth/', include('djoser.urls')),
     path('auth/', include('djoser.urls.jwt')),

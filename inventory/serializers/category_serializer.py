@@ -29,6 +29,7 @@ class CategorySerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request_user = validated_data.pop('request_user', None)
         audit_notes = validated_data.pop('audit_notes', None)
+        validated_data.pop('notes', None)
         instance = Category(**validated_data)
         instance.save(request_user=request_user, audit_notes=audit_notes)
         return instance
@@ -36,6 +37,7 @@ class CategorySerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         request_user = validated_data.pop('request_user', None)
         audit_notes = validated_data.pop('audit_notes', None)
+        validated_data.pop('notes', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save(request_user=request_user, audit_notes=audit_notes)

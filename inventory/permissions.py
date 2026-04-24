@@ -1,50 +1,84 @@
-from ams.permissions import StrictDjangoModelPermissions
+"""DRF permission classes for inventory endpoints."""
+from rest_framework import permissions
 
-class StockEntryPermission(StrictDjangoModelPermissions):
-    """
-    Custom permission for StockEntry:
-    - Normal model permissions apply for most operations.
-    - Creators can update/finalize their own entries if they are still in DRAFT status,
-      even without global 'change_stockentry' permissions, provided they have 'add_stockentry'.
-    """
-    def has_permission(self, request, view):
-        # 1. Superusers always have permission
-        if request.user.is_superuser:
+
+def _has_perm(user, codename: str) -> bool:
+    dotted = codename if "." in codename else f"inventory.{codename}"
+    return user.has_perm(dotted)
+
+
+class LocationPermission(permissions.BasePermission):
+    """Domain-permission gate for /api/inventory/locations/."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
             return True
 
-        # 2. For PUT/PATCH/DELETE, allow if they have 'add' permission 
-        # so that has_object_permission can check if they own the draft.
-        if request.method in ['PUT', 'PATCH', 'DELETE']:
-            if request.user.has_perm('inventory.add_stockentry'):
-                return True
-        
-        # 3. Otherwise default to parent (DjangoModelPermissions)
-        return super().has_permission(request, view)
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_locations")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_locations")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_locations")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_locations")
+        return False
 
-    def has_object_permission(self, request, view, obj):
-        # 1. Superusers can do anything
-        if request.user.is_superuser:
+
+class StockEntryPermission(permissions.BasePermission):
+    """Compatibility gate mirroring prior stock-entry method checks."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
             return True
 
-        # 2. If it's a safe method (GET, HEAD, OPTIONS), model permissions (view) apply
-        if request.method in ['GET', 'HEAD', 'OPTIONS']:
-            return super().has_object_permission(request, view, obj)
+        if request.method in permissions.SAFE_METHODS:
+            return (
+                _has_perm(user, "inventory.view_stockentry")
+                or _has_perm(user, "inventory.add_stockentry")
+                or _has_perm(user, "inventory.change_stockentry")
+                or _has_perm(user, "inventory.delete_stockentry")
+            )
 
-        # 3. Handle Updates (PUT, PATCH)
-        if request.method in ['PUT', 'PATCH']:
-            # Exception for DRAFT entries: Allow if user is the creator and has 'add' permission
-            if obj.status == 'DRAFT' and obj.created_by == request.user:
-                return request.user.has_perm('inventory.add_stockentry')
-            
-            # Otherwise, fall back to default model permission check (requires change_stockentry)
-            return super().has_object_permission(request, view, obj)
+        if request.method == "POST":
+            action = getattr(view, "action", None)
+            detail_actions = {"acknowledge", "cancel"}
+            if action in detail_actions:
+                return (
+                    _has_perm(user, "inventory.change_stockentry")
+                    or _has_perm(user, "inventory.add_stockentry")
+                )
+            return _has_perm(user, "inventory.add_stockentry")
 
-        # 4. Handle Deletion
-        if request.method == 'DELETE':
-            # Model-level restriction already ensures only DRAFT can be deleted.
-            # Here we just check if they have permission to delete or if they own the draft.
-            if obj.status == 'DRAFT' and obj.created_by == request.user:
-                return request.user.has_perm('inventory.add_stockentry')
-            return super().has_object_permission(request, view, obj)
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.change_stockentry")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_stockentry")
+        return False
 
-        return super().has_object_permission(request, view, obj)
+
+class CategoryPermission(permissions.BasePermission):
+    """Domain-permission gate for /api/inventory/categories/."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_categories")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_categories")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_categories")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_categories")
+        return False

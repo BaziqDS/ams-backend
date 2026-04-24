@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
@@ -73,6 +74,10 @@ class Location(models.Model):
     class Meta:
         ordering = ['name']
         permissions = [
+            ("view_locations", "Can view locations module"),
+            ("create_locations", "Can create locations module records"),
+            ("edit_locations", "Can edit locations module records"),
+            ("delete_locations", "Can delete locations module records"),
             ("manage_all_locations", "Can access all locations regardless of hierarchy"),
             ("create_standalone_location", "Can create standalone locations"),
             ("create_store_location", "Can create store locations"),
@@ -143,6 +148,22 @@ class Location(models.Model):
                 raise ValidationError("Store hierarchy depth cannot exceed 3 levels (Institutional -> Departmental -> Internal).")
 
     def save(self, *args, **kwargs):
+        # Enforce single-root invariant: at most one location may have no parent
+        # (the university root, level 0). Runs on every save path since DRF does
+        # not call full_clean().
+        if self.parent_location is None:
+            root_qs = Location.objects.filter(parent_location__isnull=True)
+            if self.pk:
+                root_qs = root_qs.exclude(pk=self.pk)
+            if root_qs.exists():
+                existing_root = root_qs.first()
+                raise ValidationError({
+                    'parent_location': (
+                        f"A root location already exists ('{existing_root.name}'). "
+                        "Only one level-0 location is permitted; every other location must have a parent."
+                    ),
+                })
+
         if not self.code:
             self.code = self.generate_location_code()
 

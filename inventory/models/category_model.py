@@ -52,6 +52,12 @@ class Category(models.Model):
     class Meta:
         verbose_name_plural = 'Categories'
         unique_together = [['parent_category', 'name']]
+        permissions = [
+            ('view_categories', 'Can view categories'),
+            ('create_categories', 'Can create categories'),
+            ('edit_categories', 'Can edit categories'),
+            ('delete_categories', 'Can delete categories'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.code})"
