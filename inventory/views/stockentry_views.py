@@ -104,7 +104,6 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
         accepted_items_data = request.data.get('items', [])
         rejected_items = []
-        is_partial = False
 
         # Validate that all accepted items have ack_stock_register and ack_page_number
         for item_data in accepted_items_data:
@@ -118,60 +117,81 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         
         with transaction.atomic():
             if accepted_items_data:
-                # Map accepted items by ID for comparison
                 accepted_map = {str(item['id']): item for item in accepted_items_data}
-                
-                for entry_item in instance.items.all():
-                    accepted_info = accepted_map.get(str(entry_item.id))
-                    
-                    if accepted_info:
-                        try:
-                            ack_register = StockRegister.objects.get(id=accepted_info['ack_stock_register'])
-                            entry_item.ack_stock_register = ack_register
-                            entry_item.ack_page_number = int(accepted_info['ack_page_number'])
-                            entry_item.save(update_fields=['ack_stock_register', 'ack_page_number'])
-                        except (StockRegister.DoesNotExist, ValueError, KeyError):
-                            return Response(
-                                {'detail': f'Invalid ack_stock_register or ack_page_number for item {entry_item.id}.'},
-                                status=400
-                            )
-
-                    if not accepted_info:
-                        # Fully rejected item — use original entry's register for the return
-                        rejected_items.append({
-                            'item': entry_item.item,
-                            'batch': entry_item.batch,
+            else:
+                accepted_map = {}
+                 
+            for entry_item in instance.items.all():
+                accepted_info = accepted_map.get(str(entry_item.id))
+                if not accepted_info:
+                    if instance.entry_type == 'RETURN':
+                        accepted_info = {
+                            'id': entry_item.id,
                             'quantity': entry_item.quantity,
-                            'instances': list(entry_item.instances.all()),
-                            'stock_register': entry_item.stock_register,
-                            'page_number': entry_item.page_number,
-                        })
-                        is_partial = True
+                            'instances': list(entry_item.instances.values_list('id', flat=True)),
+                            'ack_stock_register': None,
+                            'ack_page_number': None,
+                        }
+                    elif accepted_items_data:
+                        return Response({'detail': f'Missing acknowledgement details for item {entry_item.id}.'}, status=400)
                     else:
-                        # Check for partial quantity or instance rejection
-                        acc_qty = accepted_info.get('quantity', entry_item.quantity)
-                        acc_instances_ids = accepted_info.get('instances', []) # List of PKs (strings or ints)
-                        
-                        if acc_qty < entry_item.quantity:
-                            rej_qty = entry_item.quantity - acc_qty
-                            rej_instances = []
-                            
-                            if entry_item.instances.exists():
-                                current_insts_ids = set(entry_item.instances.values_list('id', flat=True))
-                                # Convert incoming IDs to ints for comparison if needed
-                                acc_insts_ids_set = set(map(int, acc_instances_ids)) if acc_instances_ids else current_insts_ids
-                                rej_instances_ids = list(current_insts_ids - acc_insts_ids_set)
-                                rej_instances = list(entry_item.instances.filter(id__in=rej_instances_ids))
-                            
-                            rejected_items.append({
-                                'item': entry_item.item,
-                                'batch': entry_item.batch,
-                                'quantity': rej_qty,
-                                'instances': rej_instances,
-                                'stock_register': entry_item.stock_register,
-                                'page_number': entry_item.page_number,
-                            })
-                            is_partial = True
+                        accepted_info = {
+                            'id': entry_item.id,
+                            'quantity': entry_item.quantity,
+                            'instances': list(entry_item.instances.values_list('id', flat=True)),
+                            'ack_stock_register': entry_item.ack_stock_register_id,
+                            'ack_page_number': entry_item.ack_page_number,
+                        }
+
+                accepted_quantity = entry_item.quantity if instance.entry_type == 'RETURN' else int(accepted_info.get('quantity', entry_item.quantity))
+                if accepted_quantity < 1 or accepted_quantity > entry_item.quantity:
+                    return Response({'detail': f'Accepted quantity for item {entry_item.id} must be between 1 and {entry_item.quantity}.'}, status=400)
+
+                accepted_instance_ids = accepted_info.get('instances', [])
+                current_instance_ids = set(entry_item.instances.values_list('id', flat=True))
+                if current_instance_ids:
+                    accepted_instance_ids = set(map(int, accepted_instance_ids)) if accepted_instance_ids else current_instance_ids
+                    if not accepted_instance_ids.issubset(current_instance_ids):
+                        return Response({'detail': f'Accepted instances for item {entry_item.id} must belong to the entry item.'}, status=400)
+                    if len(accepted_instance_ids) != accepted_quantity:
+                        return Response({'detail': f'Accepted quantity for item {entry_item.id} must match selected instances.'}, status=400)
+                else:
+                    accepted_instance_ids = set()
+
+                try:
+                    ack_register = None
+                    if accepted_info.get('ack_stock_register'):
+                        ack_register = StockRegister.objects.get(id=accepted_info['ack_stock_register'])
+                    elif entry_item.ack_stock_register_id:
+                        ack_register = entry_item.ack_stock_register
+                    else:
+                        return Response({'detail': f'Invalid ack_stock_register or ack_page_number for item {entry_item.id}.'}, status=400)
+
+                    ack_page_number = int(accepted_info.get('ack_page_number') or entry_item.ack_page_number)
+                    if ack_page_number < 1:
+                        raise ValueError()
+                except (StockRegister.DoesNotExist, ValueError, TypeError):
+                    return Response({'detail': f'Invalid ack_stock_register or ack_page_number for item {entry_item.id}.'}, status=400)
+
+                entry_item.ack_stock_register = ack_register
+                entry_item.ack_page_number = ack_page_number
+                entry_item.accepted_quantity = accepted_quantity
+                entry_item.save(update_fields=['ack_stock_register', 'ack_page_number', 'accepted_quantity'])
+                if current_instance_ids:
+                    entry_item.accepted_instances.set(entry_item.instances.filter(id__in=accepted_instance_ids))
+                else:
+                    entry_item.accepted_instances.clear()
+
+                if instance.entry_type != 'RETURN' and accepted_quantity < entry_item.quantity:
+                    rejected_instance_ids = current_instance_ids - accepted_instance_ids
+                    rejected_items.append({
+                        'item': entry_item.item,
+                        'batch': entry_item.batch,
+                        'quantity': entry_item.quantity - accepted_quantity,
+                        'instances': list(entry_item.instances.filter(id__in=rejected_instance_ids)) if rejected_instance_ids else [],
+                        'stock_register': entry_item.stock_register,
+                        'page_number': entry_item.page_number,
+                    })
 
             # 3. Create automatic RETURN if there are discrepancies
             # CRITICAL: Do NOT create a return for a RETURN entry (prevent infinite loops)
@@ -243,15 +263,16 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             # Global/Central managers see everything
             pass 
         elif hasattr(user, 'profile'):
-            accessible_locations = user.profile.get_descendant_locations()
-            
-            # Refined Filtering:
-            # 1. Show if the user's location is the SOURCE (Sender)
-            # 2. Show if the user's location is the TARGET (Receiver) AND it's NOT an 'ISSUE'
-            #    (Level 2 managers should only see the 'RECEIPT' generated for them, not the sender's 'ISSUE')
+            accessible_locations = user.profile.get_stock_entry_scope_locations()
+
+            # Stock entries are visible by workflow role:
+            # 1. ISSUE rows only to the source location
+            # 2. RECEIPT rows only to the destination location
+            # 3. RETURN rows only to the destination location
             queryset = queryset.filter(
-                Q(from_location__in=accessible_locations) |
-                (Q(to_location__in=accessible_locations) & ~Q(entry_type='ISSUE'))
+                Q(entry_type='ISSUE', from_location__in=accessible_locations) |
+                Q(entry_type='RECEIPT', to_location__in=accessible_locations) |
+                Q(entry_type='RETURN', to_location__in=accessible_locations)
             ).distinct()
         else:
             return queryset.none()

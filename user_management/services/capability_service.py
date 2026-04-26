@@ -12,14 +12,26 @@ from __future__ import annotations
 
 from django.contrib.auth.models import Group, Permission
 
-from ams.permissions_manifest import MODULES, READ_PERMS
+from ams.permissions_manifest import MODULES, READ_PERMS, INSPECTION_STAGE_PERMS
 
 
-def resolve_selections_to_codenames(selections: dict[str, str | None]) -> set[str]:
-    """Return the flat set of dotted codenames implied by a module-selection map."""
+def resolve_selections_to_codenames(
+    selections: dict[str, str | None],
+    inspection_stages: list[str] | None = None,
+) -> set[str]:
+    """Return the flat set of dotted codenames implied by a module-selection map.
+
+    If inspection_stages is provided and inspections is at "manage" level,
+    only the listed stage permissions are added (not all four).
+    """
     wanted: set[str] = set()
     for module, level in selections.items():
         if not level or level == "none":
+            continue
+        if module not in MODULES and module in READ_PERMS:
+            if level != "view":
+                raise ValueError(f"Unknown module/level: {module!r} / {level!r}")
+            wanted.update(READ_PERMS[module])
             continue
         if module not in MODULES or level not in MODULES[module]:
             raise ValueError(f"Unknown module/level: {module!r} / {level!r}")
@@ -28,6 +40,12 @@ def resolve_selections_to_codenames(selections: dict[str, str | None]) -> set[st
         for dep in spec["reads"]:
             if dep in READ_PERMS:
                 wanted.update(READ_PERMS[dep])
+
+    if inspection_stages and selections.get("inspections") == "manage":
+        for stage_key in inspection_stages:
+            if stage_key in INSPECTION_STAGE_PERMS:
+                wanted.add(INSPECTION_STAGE_PERMS[stage_key])
+
     return wanted
 
 
@@ -49,15 +67,36 @@ def codenames_to_permissions(dotted_codenames: set[str]) -> list[Permission]:
     return out
 
 
-def apply_module_selections(group: Group, selections: dict[str, str | None]) -> None:
+def apply_module_selections(
+    group: Group,
+    selections: dict[str, str | None],
+    inspection_stages: list[str] | None = None,
+) -> None:
     """Set the group's permissions to exactly what the selections resolve to.
 
     Implied permissions are then added by the m2m_changed signal, so the final
     row count on the group may be larger than len(codenames) — that is expected.
     """
-    codenames = resolve_selections_to_codenames(selections)
+    codenames = resolve_selections_to_codenames(selections, inspection_stages)
     perms = codenames_to_permissions(codenames)
     group.permissions.set(perms)
+
+
+def compute_inspection_stages_for_user(user) -> list[str]:
+    """Return the list of inspection stage keys the user holds."""
+    if not user or not user.is_authenticated:
+        return []
+    held = set(user.get_all_permissions())
+    return [key for key, perm in INSPECTION_STAGE_PERMS.items() if perm in held]
+
+
+def compute_inspection_stages_for_group(group: Group) -> list[str]:
+    """Return the list of inspection stage keys assigned to a group."""
+    held = {
+        f"{p.content_type.app_label}.{p.codename}"
+        for p in group.permissions.select_related("content_type")
+    }
+    return [key for key, perm in INSPECTION_STAGE_PERMS.items() if perm in held]
 
 
 def compute_capabilities_for_user(user) -> dict[str, str | None]:

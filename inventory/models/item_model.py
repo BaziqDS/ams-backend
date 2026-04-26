@@ -17,6 +17,10 @@ class Item(models.Model):
     description = models.TextField(blank=True, null=True)
     acct_unit = models.CharField(max_length=255, help_text="Accounting unit/measurement")
     specifications = models.TextField(blank=True, null=True)
+    low_stock_threshold = models.PositiveIntegerField(
+        default=0,
+        help_text="Raise a low-stock warning when total quantity falls to or below this threshold.",
+    )
 
     def clean(self):
         from django.core.exceptions import ValidationError

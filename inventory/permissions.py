@@ -29,7 +29,7 @@ class LocationPermission(permissions.BasePermission):
 
 
 class StockEntryPermission(permissions.BasePermission):
-    """Compatibility gate mirroring prior stock-entry method checks."""
+    """Domain-permission gate for /api/inventory/stock-entries/."""
 
     def has_permission(self, request, view):  # type: ignore[override]
         user = request.user
@@ -39,27 +39,20 @@ class StockEntryPermission(permissions.BasePermission):
             return True
 
         if request.method in permissions.SAFE_METHODS:
-            return (
-                _has_perm(user, "inventory.view_stockentry")
-                or _has_perm(user, "inventory.add_stockentry")
-                or _has_perm(user, "inventory.change_stockentry")
-                or _has_perm(user, "inventory.delete_stockentry")
-            )
+            return _has_perm(user, "inventory.view_stock_entries")
 
         if request.method == "POST":
             action = getattr(view, "action", None)
-            detail_actions = {"acknowledge", "cancel"}
-            if action in detail_actions:
-                return (
-                    _has_perm(user, "inventory.change_stockentry")
-                    or _has_perm(user, "inventory.add_stockentry")
-                )
-            return _has_perm(user, "inventory.add_stockentry")
+            if action == "acknowledge":
+                return _has_perm(user, "inventory.edit_stock_entries") or _has_perm(user, "inventory.acknowledge_stockentry")
+            if action == "cancel":
+                return _has_perm(user, "inventory.edit_stock_entries")
+            return _has_perm(user, "inventory.create_stock_entries")
 
         if request.method in {"PUT", "PATCH"}:
-            return _has_perm(user, "inventory.change_stockentry")
+            return _has_perm(user, "inventory.edit_stock_entries")
         if request.method == "DELETE":
-            return _has_perm(user, "inventory.delete_stockentry")
+            return _has_perm(user, "inventory.delete_stock_entries")
         return False
 
 
@@ -140,4 +133,28 @@ class ItemInstancePermission(permissions.BasePermission):
             )
         if request.method == "DELETE":
             return _has_perm(user, "inventory.delete_items")
+        return False
+
+
+class StockRegisterPermission(permissions.BasePermission):
+    """Domain-permission gate for /api/inventory/stock-registers/."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_stock_registers")
+        if request.method == "POST":
+            action = getattr(view, "action", None)
+            if action in {"close", "reopen"}:
+                return _has_perm(user, "inventory.edit_stock_registers")
+            return _has_perm(user, "inventory.create_stock_registers")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_stock_registers")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_stock_registers")
         return False

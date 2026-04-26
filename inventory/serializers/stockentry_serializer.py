@@ -1,5 +1,8 @@
+from django.db.models import Sum
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
+from ..models.allocation_model import AllocationStatus, StockAllocation
 from ..models.person_model import Person
 from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..models.item_model import Item
@@ -28,7 +31,8 @@ class StockEntryItemSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'item', 'item_name', 'batch', 'batch_number', 'quantity', 'instances',
             'stock_register', 'stock_register_name', 'page_number',
-            'ack_stock_register', 'ack_stock_register_name', 'ack_page_number'
+            'ack_stock_register', 'ack_stock_register_name', 'ack_page_number',
+            'accepted_quantity', 'accepted_instances'
         )
 
 class StockEntrySerializer(serializers.ModelSerializer):
@@ -37,6 +41,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
     to_location_name = serializers.CharField(source='to_location.name', read_only=True)
     issued_to_name = serializers.CharField(source='issued_to.name', read_only=True, allow_null=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    acknowledged_by_name = serializers.CharField(source='acknowledged_by.username', read_only=True, allow_null=True)
     cancelled_by_name = serializers.CharField(source='cancelled_by.username', read_only=True, allow_null=True)
     can_acknowledge = serializers.SerializerMethodField()
 
@@ -48,19 +53,116 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'from_location', 'from_location_name', 
             'to_location', 'to_location_name',
             'issued_to', 'issued_to_name',
-            'status', 'remarks', 'purpose', 'items',
+            'status', 'remarks', 'purpose', 'items', 'reference_entry',
+            'acknowledged_by', 'acknowledged_by_name', 'acknowledged_at',
             'cancellation_reason', 'cancelled_by', 'cancelled_by_name', 'cancelled_at',
             'created_by', 'created_by_name', 'created_at',
             'can_acknowledge'
         )
-        read_only_fields = ('entry_number', 'created_by', 'created_at', 'cancelled_by', 'cancelled_at')
+        read_only_fields = ('entry_number', 'created_by', 'created_at', 'acknowledged_by', 'acknowledged_at', 'cancelled_by', 'cancelled_at')
 
+
+    def validate(self, attrs):
+        candidate = self.instance or StockEntry()
+        for field, value in attrs.items():
+            if field != 'items':
+                setattr(candidate, field, value)
+
+        entry_type = attrs.get('entry_type', getattr(candidate, 'entry_type', None))
+        from_location = attrs.get('from_location', getattr(candidate, 'from_location', None))
+        to_location = attrs.get('to_location', getattr(candidate, 'to_location', None))
+        issued_to = attrs.get('issued_to', getattr(candidate, 'issued_to', None))
+
+        errors = {}
+        if entry_type == 'RETURN':
+            errors['entry_type'] = 'Create a receipt entry when receiving returned stock.'
+
+        if entry_type == 'ISSUE':
+            if not from_location or not getattr(from_location, 'is_store', False):
+                errors['from_location'] = 'Source store is required.'
+            if issued_to and to_location:
+                errors['issued_to'] = 'Choose either a receiving person or a destination location, not both.'
+            if not issued_to and not to_location:
+                errors['to_location'] = 'Destination store, non-store location, or receiving person is required.'
+        elif entry_type == 'RECEIPT':
+            if not to_location or not getattr(to_location, 'is_store', False):
+                errors['to_location'] = 'Receiving store is required.'
+            if issued_to and from_location:
+                errors['issued_to'] = 'Choose either a returning person or a returning location, not both.'
+            if not issued_to and not from_location:
+                errors['from_location'] = 'Returning person or location is required.'
+
+            is_allocation_return = issued_to or (from_location and not getattr(from_location, 'is_store', False))
+            if to_location and is_allocation_return:
+                requested_by_item = {}
+                items_data = attrs.get('items')
+                if items_data is None and self.instance:
+                    items_data = [
+                        {
+                            'item': entry_item.item,
+                            'batch': entry_item.batch,
+                            'quantity': entry_item.quantity,
+                        }
+                        for entry_item in self.instance.items.all()
+                    ]
+
+                for item_data in items_data or []:
+                    item = item_data.get('item')
+                    if not item:
+                        continue
+                    batch = item_data.get('batch')
+                    item_id = item.pk if hasattr(item, 'pk') else item
+                    batch_id = batch.pk if hasattr(batch, 'pk') else batch
+                    key = (item_id, batch_id)
+                    requested_by_item[key] = requested_by_item.get(key, 0) + (item_data.get('quantity') or 0)
+
+                for (item_id, batch_id), requested_quantity in requested_by_item.items():
+                    allocation_filter = {
+                        'item_id': item_id,
+                        'batch_id': batch_id,
+                        'source_location': to_location,
+                        'status': AllocationStatus.ALLOCATED,
+                    }
+                    if issued_to:
+                        allocation_filter['allocated_to_person'] = issued_to
+                    else:
+                        allocation_filter['allocated_to_location'] = from_location
+
+                    allocated_quantity = StockAllocation.objects.filter(**allocation_filter).aggregate(total=Sum('quantity'))['total'] or 0
+                    if allocated_quantity < requested_quantity:
+                        errors['items'] = (
+                            'Returned items must match an active allocation from this receiving store '
+                            'to the selected person or non-store location.'
+                        )
+                        break
+
+        if from_location and to_location and from_location.pk == to_location.pk:
+            errors['to_location'] = 'Destination cannot be the same as the source store.'
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        try:
+            candidate.clean()
+        except DjangoValidationError as exc:
+            if hasattr(exc, 'message_dict'):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError({'non_field_errors': exc.messages})
+        return attrs
+
+    def _creation_status(self, validated_data):
+        entry_type = validated_data.get('entry_type')
+        to_location = validated_data.get('to_location')
+        issued_to = validated_data.get('issued_to')
+        if entry_type == 'ISSUE' and (issued_to or (to_location and not to_location.is_store)):
+            return 'COMPLETED'
+        return 'PENDING_ACK'
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         request = self.context.get('request')
         if request and request.user:
             validated_data['created_by'] = request.user
+        validated_data['status'] = self._creation_status(validated_data)
         
         from ..models.stock_record_model import StockRecord
         from_location = validated_data.get('from_location')

@@ -24,6 +24,15 @@ class ModuleLevel(TypedDict):
 ModuleSpec = dict[str, ModuleLevel]
 
 
+INSPECTION_STAGE_PERMS: dict[str, str] = {
+    "initiate_inspection": "inventory.initiate_inspection",
+    "fill_stock_details": "inventory.fill_stock_details",
+    "fill_central_register": "inventory.fill_central_register",
+    "review_finance": "inventory.review_finance",
+}
+
+ALL_INSPECTION_STAGE_KEYS = list(INSPECTION_STAGE_PERMS.keys())
+
 MODULES: dict[str, ModuleSpec] = {
     "users": {
         "view": {
@@ -147,6 +156,81 @@ MODULES: dict[str, ModuleSpec] = {
             "reads": ["categories"],
         },
     },
+    "stock-entries": {
+        "view": {
+            "perms": ["inventory.view_stock_entries"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_stock_entries",
+                "inventory.create_stock_entries",
+                "inventory.edit_stock_entries",
+                "inventory.acknowledge_stockentry",
+            ],
+            "reads": ["items", "locations", "persons", "stock-registers", "stock-allocations"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_stock_entries",
+                "inventory.create_stock_entries",
+                "inventory.edit_stock_entries",
+                "inventory.delete_stock_entries",
+                "inventory.acknowledge_stockentry",
+            ],
+            "reads": ["items", "locations", "persons", "stock-registers", "stock-allocations"],
+        },
+    },
+    "stock-registers": {
+        "view": {
+            "perms": ["inventory.view_stock_registers"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_stock_registers",
+                "inventory.create_stock_registers",
+                "inventory.edit_stock_registers",
+            ],
+            "reads": ["locations"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_stock_registers",
+                "inventory.create_stock_registers",
+                "inventory.edit_stock_registers",
+                "inventory.delete_stock_registers",
+            ],
+            "reads": ["locations"],
+        },
+    },
+    "inspections": {
+        "view": {
+            "perms": ["inventory.view_inspectioncertificate"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_inspectioncertificate",
+                "inventory.add_inspectioncertificate",
+                "inventory.change_inspectioncertificate",
+            ],
+            "reads": ["items", "locations", "stock-registers"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_inspectioncertificate",
+                "inventory.add_inspectioncertificate",
+                "inventory.change_inspectioncertificate",
+                "inventory.delete_inspectioncertificate",
+                "inventory.initiate_inspection",
+                "inventory.fill_stock_details",
+                "inventory.fill_central_register",
+                "inventory.review_finance",
+            ],
+            "reads": ["items", "locations", "stock-registers"],
+        },
+    },
 }
 
 
@@ -161,6 +245,11 @@ READ_PERMS: dict[str, list[str]] = {
     "locations": ["inventory.view_locations", "inventory.view_location"],
     "categories": ["inventory.view_categories"],
     "items": ["inventory.view_items"],
+    "stock-entries": ["inventory.view_stock_entries"],
+    "persons": ["inventory.view_person"],
+    "stock-registers": ["inventory.view_stock_registers", "inventory.view_stockregister"],
+    "stock-allocations": ["inventory.view_stockallocation"],
+    "inspections": ["inventory.view_inspectioncertificate"],
 }
 
 

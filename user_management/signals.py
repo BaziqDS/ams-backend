@@ -49,6 +49,14 @@ EXPLICIT_PERMISSION_IMPLICATIONS: dict[str, list[str]] = {
     "create_items": ["view_items"],
     "edit_items": ["view_items"],
     "delete_items": ["view_items"],
+    # Stock entries module
+    "create_stock_entries": ["view_stock_entries"],
+    "edit_stock_entries": ["view_stock_entries"],
+    "delete_stock_entries": ["view_stock_entries"],
+    # Stock registers module
+    "create_stock_registers": ["view_stock_registers"],
+    "edit_stock_registers": ["view_stock_registers"],
+    "delete_stock_registers": ["view_stock_registers"],
 }
 
 

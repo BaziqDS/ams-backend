@@ -2,6 +2,7 @@ from rest_framework import serializers
 from django.db import transaction
 from django.utils import timezone
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage, InspectionDocument
+from ..models.stockentry_model import StockEntry
 from ..models import Item, ItemBatch
 
 ALLOWED_MIME_TYPES = {
@@ -71,12 +72,22 @@ class InspectionItemSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ('inspection_certificate',)
 
+class InspectionRelatedStockEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StockEntry
+        fields = ('id', 'entry_number', 'entry_type', 'status', 'entry_date')
+
 class InspectionCertificateSerializer(serializers.ModelSerializer):
     items = InspectionItemSerializer(many=True)
     documents = InspectionDocumentSerializer(many=True, read_only=True)
+    stock_entries = InspectionRelatedStockEntrySerializer(many=True, read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
     department_hierarchy_level = serializers.IntegerField(source='department.hierarchy_level', read_only=True)
     initiated_by_name = serializers.CharField(source='initiated_by.username', read_only=True)
+    stock_filled_by_name = serializers.CharField(source='stock_filled_by.username', read_only=True, allow_null=True)
+    central_store_filled_by_name = serializers.CharField(source='central_store_filled_by.username', read_only=True, allow_null=True)
+    finance_reviewed_by_name = serializers.CharField(source='finance_reviewed_by.username', read_only=True, allow_null=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.username', read_only=True, allow_null=True)
     is_initiated = serializers.BooleanField(write_only=True, required=False, default=False)
     
     class Meta:
@@ -89,12 +100,12 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             'date_of_delivery', 'delivery_type', 'remarks',
             'inspected_by', 'date_of_inspection',
             'consignee_name', 'consignee_designation',
-            'stage', 'status', 'items', 'documents', 'is_initiated',
+            'stage', 'status', 'items', 'documents', 'stock_entries', 'is_initiated',
             'initiated_by', 'initiated_by_name', 'initiated_at',
-            'stock_filled_by', 'stock_filled_at',
-            'central_store_filled_by', 'central_store_filled_at',
-            'finance_reviewed_at', 'finance_reviewed_by', 'finance_check_date',
-            'rejected_by', 'rejected_at', 'rejection_reason', 'rejection_stage',
+            'stock_filled_by', 'stock_filled_by_name', 'stock_filled_at',
+            'central_store_filled_by', 'central_store_filled_by_name', 'central_store_filled_at',
+            'finance_reviewed_at', 'finance_reviewed_by', 'finance_reviewed_by_name', 'finance_check_date',
+            'rejected_by', 'rejected_by_name', 'rejected_at', 'rejection_reason', 'rejection_stage',
             'created_at', 'updated_at'
         )
         read_only_fields = (
@@ -110,8 +121,15 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
         # When using FormData (multipart/form-data), nested lists/dicts like 'items'
         # are often sent as JSON strings. We need to parse them before validation.
         if isinstance(data, dict) or hasattr(data, 'getlist'):
-            # Create a mutable copy if it's a QueryDict
-            if hasattr(data, 'copy'):
+            if hasattr(data, 'lists'):
+                # QueryDict.copy() deep-copies values and crashes on uploaded files.
+                # Validation only needs form fields; files are handled from request.FILES.
+                data = {
+                    key: values if len(values) > 1 else values[0]
+                    for key, values in data.lists()
+                    if not key.startswith('documents[') and key != 'file'
+                }
+            else:
                 data = data.copy()
             
             if 'items' in data and isinstance(data['items'], str):

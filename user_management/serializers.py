@@ -4,8 +4,9 @@ from .models import UserProfile
 from .services.capability_service import (
     apply_module_selections,
     compute_capabilities_for_user,
+    compute_inspection_stages_for_group,
 )
-from ams.permissions_manifest import MODULES
+from ams.permissions_manifest import MODULES, INSPECTION_STAGE_PERMS
 from inventory.models.location_model import Location
 
 class UserSerializer(serializers.ModelSerializer):
@@ -363,7 +364,7 @@ class GroupSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'name',
             'permissions', 'permissions_details',
-            'module_selections',
+            'module_selections', 'inspection_stages',
         )
 
     def get_permissions_details(self, obj):
@@ -377,6 +378,8 @@ class GroupSerializer(serializers.ModelSerializer):
             }
             for p in perms
         ]
+
+    inspection_stages = serializers.SerializerMethodField()
 
     def get_module_selections(self, obj):
         """Back-compute the highest matching level per module for this group."""
@@ -393,42 +396,60 @@ class GroupSerializer(serializers.ModelSerializer):
             out[module] = current
         return out
 
+    def get_inspection_stages(self, obj):
+        """Return stage keys this group holds for the inspections module."""
+        return compute_inspection_stages_for_group(obj)
+
     def _pop_module_selections(self):
-        """Extract module_selections from raw request.data (not in validated_data)."""
+        """Extract module_selections and inspection_stages from raw request.data."""
         request = self.context.get('request')
         if request is None:
-            return None
+            return None, None
         raw = request.data.get('module_selections')
         if raw is None:
-            return None
+            return None, None
         if not isinstance(raw, dict):
             raise serializers.ValidationError({'module_selections': 'Must be an object mapping module -> level.'})
-        # Validate keys/values against the manifest
+        from ams.permissions_manifest import READ_PERMS
         for module, level in raw.items():
+            if module not in MODULES and module in READ_PERMS:
+                if level not in (None, 'none', 'view'):
+                    raise serializers.ValidationError({'module_selections': f"Unknown level {level!r} for module {module!r}"})
+                continue
             if module not in MODULES:
                 raise serializers.ValidationError({'module_selections': f"Unknown module: {module!r}"})
             if level not in (None, 'none') and level not in MODULES[module]:
                 raise serializers.ValidationError({'module_selections': f"Unknown level {level!r} for module {module!r}"})
-        return raw
+
+        inspection_stages = request.data.get('inspection_stages')
+        if inspection_stages is not None:
+            if not isinstance(inspection_stages, list):
+                raise serializers.ValidationError({'inspection_stages': 'Must be a list of stage keys.'})
+            valid_keys = set(INSPECTION_STAGE_PERMS.keys())
+            for key in inspection_stages:
+                if key not in valid_keys:
+                    raise serializers.ValidationError({'inspection_stages': f"Unknown stage: {key!r}"})
+
+        return raw, inspection_stages
 
     def create(self, validated_data):
-        module_selections = self._pop_module_selections()
+        module_selections, inspection_stages = self._pop_module_selections()
         permissions = validated_data.pop('permissions', None)
         group = Group.objects.create(name=validated_data['name'])
         if module_selections is not None:
-            apply_module_selections(group, module_selections)
+            apply_module_selections(group, module_selections, inspection_stages)
         elif permissions:
             group.permissions.set(permissions)
         return group
 
     def update(self, instance, validated_data):
-        module_selections = self._pop_module_selections()
+        module_selections, inspection_stages = self._pop_module_selections()
         permissions = validated_data.pop('permissions', serializers.empty)
         if 'name' in validated_data:
             instance.name = validated_data['name']
             instance.save()
         if module_selections is not None:
-            apply_module_selections(instance, module_selections)
+            apply_module_selections(instance, module_selections, inspection_stages)
         elif permissions is not serializers.empty:
             instance.permissions.set(permissions or [])
         return instance

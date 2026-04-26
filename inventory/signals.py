@@ -188,6 +188,23 @@ def process_single_stock_item(instance):
     batch = instance.batch
     from_loc = entry.from_location
     to_loc = entry.to_location
+    effective_qty = instance.accepted_quantity if entry.status == 'COMPLETED' and instance.accepted_quantity else qty
+
+    if (
+        entry.status == 'COMPLETED'
+        and entry.entry_type == 'ISSUE'
+        and entry.to_location
+        and entry.to_location.is_store
+        and not entry.reference_entry
+    ):
+        linked_receipt_item = StockEntryItem.objects.filter(
+            stock_entry__reference_entry=entry,
+            stock_entry__entry_type='RECEIPT',
+            item=item,
+            batch=batch,
+        ).order_by('id').first()
+        if linked_receipt_item and linked_receipt_item.accepted_quantity:
+            effective_qty = linked_receipt_item.accepted_quantity
 
     with transaction.atomic():
         # A. Handle "In Transit" (Source side)
@@ -268,13 +285,13 @@ def process_single_stock_item(instance):
                     logger.info(f"[SIGNAL] ALLOCATED: {qty} {item.name} from {from_loc.name}")
                 else:
                     # NORMAL ISSUE (to another store): Decreases total quantity
-                    StockRecord.update_balance(item, from_loc, quantity_change=-qty, batch=batch)
-                    logger.info(f"[SIGNAL] COMPLETED ISSUE (TRANSFER): Decremented {qty} {item.name} from {from_loc.name}")
+                    StockRecord.update_balance(item, from_loc, quantity_change=-effective_qty, batch=batch)
+                    logger.info(f"[SIGNAL] COMPLETED ISSUE (TRANSFER): Decremented {effective_qty} {item.name} from {from_loc.name}")
 
                 # Deduct in-transit if it was previously recorded
                 if instance.is_in_transit_recorded:
-                    StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-qty)
-                    instance.is_in_transit_recorded = False
+                    StockRecord.update_balance(item, from_loc, batch=batch, in_transit_change=-effective_qty)
+                    instance.is_in_transit_recorded = (qty - effective_qty) > 0
             
             elif entry.entry_type == 'RECEIPT' and to_loc:
                 # Is this a return from an allocation (Person or Non-Store)?
@@ -282,7 +299,7 @@ def process_single_stock_item(instance):
                 
                 if is_return:
                     # RETURN logic: Decrements allocated_quantity, moves back to 'Available' but stays in 'Total'
-                    StockRecord.update_balance(item, to_loc, batch=batch, allocated_change=-qty)
+                    StockRecord.update_balance(item, to_loc, batch=batch, allocated_change=-effective_qty)
                     
                     # Update StockAllocation records (Status -> RETURNED)
                     from .models.allocation_model import StockAllocation, AllocationStatus
@@ -301,7 +318,7 @@ def process_single_stock_item(instance):
                     
                     # Find active allocations for this target and reduce them
                     active_allocs = StockAllocation.objects.filter(**alloc_filter).order_by('allocated_at')
-                    remaining_to_return = qty
+                    remaining_to_return = effective_qty
                     for alloc in active_allocs:
                         if remaining_to_return <= 0: break
                         
@@ -340,22 +357,51 @@ def process_single_stock_item(instance):
                             batch=batch,
                             action=MovementAction.RETURN,
                             to_location=to_loc,
-                            quantity=qty,
+                                quantity=effective_qty,
                             stock_entry=entry,
                             performed_by=entry.created_by,
                             remarks=f"Returned via {entry.entry_number}"
                         )
 
-                    logger.info(f"[SIGNAL] RETURNED: {qty} {item.name} back to {to_loc.name} from {'person' if entry.issued_to else 'non-store'}")
+                    logger.info(f"[SIGNAL] RETURNED: {effective_qty} {item.name} back to {to_loc.name} from {'person' if entry.issued_to else 'non-store'}")
                 else:
                     # NORMAL RECEIPT (from another store): Increments total quantity
-                    StockRecord.update_balance(item, to_loc, quantity_change=qty, batch=batch)
+                    StockRecord.update_balance(item, to_loc, quantity_change=effective_qty, batch=batch)
                     
                     # Update instances location and set to AVAILABLE
                     if instance.instances.exists():
-                        instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
-                    
-                    logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {qty} {item.name} in {to_loc.name}")
+                        if instance.accepted_instances.exists():
+                            instance.accepted_instances.all().update(current_location=to_loc, status='AVAILABLE')
+                        else:
+                            instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                     
+                    logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {effective_qty} {item.name} in {to_loc.name}")
+            elif (
+                entry.entry_type == 'RETURN'
+                and from_loc
+                and to_loc
+                and from_loc.is_store
+                and to_loc.is_store
+                and entry.reference_entry
+                and entry.reference_entry.entry_type == 'RECEIPT'
+            ):
+                # Inter-store rejection return: clear the source store's remaining
+                # in-transit quantity and make it available again without changing
+                # the source total quantity, because the rejected stock was never
+                # fully received into the destination store.
+                StockRecord.update_balance(item, to_loc, batch=batch, in_transit_change=-effective_qty)
+
+                if instance.instances.exists():
+                    instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+
+                original_issue = entry.reference_entry.reference_entry
+                if original_issue:
+                    original_issue_item = original_issue.items.filter(item=item, batch=batch).order_by('id').first()
+                    if original_issue_item:
+                        original_issue_item.is_in_transit_recorded = False
+                        original_issue_item.save(update_fields=['is_in_transit_recorded'])
+
+                logger.info(f"[SIGNAL] COMPLETED RETURN (TRANSFER): Cleared {effective_qty} {item.name} in-transit back into {to_loc.name}")
             
             instance.is_stock_recorded = True
             instance.save(update_fields=['is_stock_recorded', 'is_in_transit_recorded'])

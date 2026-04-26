@@ -10,15 +10,18 @@ class ItemSerializer(serializers.ModelSerializer):
     total_quantity = serializers.SerializerMethodField()
     in_transit_quantity = serializers.SerializerMethodField()
     available_quantity = serializers.SerializerMethodField()
+    is_low_stock = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
         fields = (
             'id', 'name', 'code', 'category', 'category_display', 
             'category_type', 'tracking_type', 'description', 
-            'acct_unit', 'specifications', 'total_quantity', 
+            'acct_unit', 'specifications', 'low_stock_threshold',
+            'total_quantity', 
             'in_transit_quantity', 'available_quantity',
-            'is_active', 'created_at', 'updated_at', 'created_by_name'
+            'is_low_stock', 'is_active', 'created_at', 'updated_at',
+            'created_by_name'
         )
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
@@ -39,5 +42,10 @@ class ItemSerializer(serializers.ModelSerializer):
         total = getattr(obj, 'restricted_total', 0)
         in_transit = getattr(obj, 'restricted_in_transit', 0)
         return max(0, total - in_transit)
+
+    def get_is_low_stock(self, obj):
+        total = getattr(obj, 'restricted_total', 0)
+        threshold = obj.low_stock_threshold or 0
+        return threshold > 0 and total > 0 and total <= threshold
 
 

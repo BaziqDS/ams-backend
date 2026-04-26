@@ -23,6 +23,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     inspection_certificate_id = serializers.PrimaryKeyRelatedField(source='inspection_certificate', read_only=True)
     allocated_to = serializers.SerializerMethodField()
     allocated_to_type = serializers.SerializerMethodField()
+    stock_entry_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = ItemInstance
@@ -32,7 +33,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             'current_location', 'location_name', 'location_code', 'full_location_path',
             'status', 'in_charge', 'authority_store_name', 'authority_store_code',
             'inspection_certificate', 'inspection_certificate_id', 'allocated_to', 'allocated_to_type',
-            'is_active', 'created_at', 'updated_at', 'created_by_name'
+            'stock_entry_ids', 'is_active', 'created_at', 'updated_at', 'created_by_name'
         ]
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
@@ -100,6 +101,9 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
                 if latest_alloc.allocated_to_location:
                     return 'LOCATION'
         return None
+
+    def get_stock_entry_ids(self, obj):
+        return list(obj.stock_entry_items.values_list('stock_entry_id', flat=True).distinct())
 
     def get_authority_store_name(self, obj):
         # Use prefetched parent_location relationship instead of method call

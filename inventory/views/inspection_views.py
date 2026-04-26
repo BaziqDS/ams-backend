@@ -12,7 +12,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = InspectionCertificate.objects.all().select_related(
         'department', 'initiated_by', 'stock_filled_by', 
         'central_store_filled_by', 'finance_reviewed_by', 'rejected_by'
-    ).prefetch_related('items__item')
+    ).prefetch_related('items__item', 'stock_entries')
     serializer_class = InspectionCertificateSerializer
     permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
     filter_backends = [filters.SearchFilter]

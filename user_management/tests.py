@@ -194,6 +194,87 @@ class CapabilityManifestItemsTests(TestCase):
         caps = compute_capabilities_for_user(user)
         self.assertEqual(caps['items'], 'full')
 
+    def test_dependency_only_read_modules_resolve_to_read_perms(self):
+        resolved = resolve_selections_to_codenames({
+            'persons': 'view',
+            'stock-registers': 'view',
+        })
+
+        self.assertIn('inventory.view_person', resolved)
+        self.assertIn('inventory.view_stock_registers', resolved)
+        self.assertNotIn('inventory.view_stockregister', resolved)
+
+
+class CapabilityManifestStockRegistersTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_resolve_stock_registers_manage_includes_domain_perms_and_locations_read(self):
+        resolved = resolve_selections_to_codenames({'stock-registers': 'manage'})
+
+        self.assertIn('inventory.view_stock_registers', resolved)
+        self.assertIn('inventory.create_stock_registers', resolved)
+        self.assertIn('inventory.edit_stock_registers', resolved)
+        self.assertIn('inventory.view_locations', resolved)
+        self.assertIn('inventory.view_location', resolved)
+        self.assertNotIn('inventory.delete_stock_registers', resolved)
+
+    def test_stock_registers_module_declared_with_view_manage_full(self):
+        self.assertIn('stock-registers', MODULES)
+        self.assertIn('view', MODULES['stock-registers'])
+        self.assertIn('manage', MODULES['stock-registers'])
+        self.assertIn('full', MODULES['stock-registers'])
+
+    def test_stock_registers_read_perms_declared(self):
+        self.assertEqual(
+            READ_PERMS.get('stock-registers'),
+            ['inventory.view_stock_registers', 'inventory.view_stockregister'],
+        )
+
+    def test_compute_capabilities_reports_stock_registers_level(self):
+        user = User.objects.create_user(username='cap_stock_registers', password='x')
+        group = Group.objects.create(name='Stock Registers Manage')
+        for dotted in MODULES['stock-registers']['manage']['perms']:
+            group.permissions.add(self._perm(dotted))
+        user.groups.add(group)
+
+        caps = compute_capabilities_for_user(user)
+        self.assertEqual(caps['stock-registers'], 'manage')
+
+
+class CapabilityManifestStockRegistersImplicationTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_create_stock_registers_implies_view_stock_registers(self):
+        group = Group.objects.create(name='Stock Register Managers Create')
+        create_perm = self._perm('inventory.create_stock_registers')
+        view_perm = self._perm('inventory.view_stock_registers')
+
+        group.permissions.add(create_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
+    def test_edit_stock_registers_implies_view_stock_registers(self):
+        group = Group.objects.create(name='Stock Register Managers Edit')
+        edit_perm = self._perm('inventory.edit_stock_registers')
+        view_perm = self._perm('inventory.view_stock_registers')
+
+        group.permissions.add(edit_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
+    def test_delete_stock_registers_implies_view_stock_registers(self):
+        group = Group.objects.create(name='Stock Register Managers Delete')
+        delete_perm = self._perm('inventory.delete_stock_registers')
+        view_perm = self._perm('inventory.view_stock_registers')
+
+        group.permissions.add(delete_perm)
+
+        self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
+
 
 class CapabilityManifestItemsImplicationTests(TestCase):
     def _perm(self, dotted):

@@ -19,8 +19,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from ams.permissions_manifest import MODULES
-from user_management.services.capability_service import compute_capabilities_for_user
+from ams.permissions_manifest import MODULES, INSPECTION_STAGE_PERMS, ALL_INSPECTION_STAGE_KEYS
+from user_management.services.capability_service import (
+    compute_capabilities_for_user,
+    compute_inspection_stages_for_user,
+)
 
 
 @api_view(["GET"])
@@ -30,9 +33,9 @@ def capabilities(request):
     manifest = {module: list(levels.keys()) for module, levels in MODULES.items()}
     dependencies = {
         module: {
-            level: list(spec.get("reads", []))
+            level: [dep for dep in spec.get("reads", []) if dep in MODULES]
             for level, spec in levels.items()
-            if spec.get("reads")
+            if any(dep in MODULES for dep in spec.get("reads", []))
         }
         for module, levels in MODULES.items()
     }
@@ -42,5 +45,9 @@ def capabilities(request):
             "is_superuser": bool(request.user.is_superuser),
             "manifest": manifest,
             "dependencies": dependencies,
+            "inspection_stages": {
+                "available": ALL_INSPECTION_STAGE_KEYS,
+                "held": compute_inspection_stages_for_user(request.user),
+            },
         }
     )

@@ -1,19 +1,38 @@
 # pyright: reportAttributeAccessIssue=false
+import json
+
 from django.contrib.auth.models import Group, Permission, User
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import TemporaryUploadedFile
+from django.http import QueryDict
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from inventory.models import (
     Category,
     CategoryType,
+    InspectionCertificate,
+    InspectionStage,
     Item,
     ItemBatch,
     ItemInstance,
     Location,
     LocationType,
+    Person,
+    AllocationStatus,
+    StockAllocation,
     StockRecord,
+    StockEntry,
+    StockEntryItem,
+    StockRegister,
     TrackingType,
 )
+from inventory.serializers.inspection_serializer import InspectionCertificateSerializer
+
+from ams.permissions_manifest import MODULES, READ_PERMS
+from user_management.services.capability_service import resolve_selections_to_codenames
+from user_management.signals import EXPLICIT_PERMISSION_IMPLICATIONS
 
 
 class CategoryDomainPermissionBootstrapTests(TestCase):
@@ -46,6 +65,269 @@ class ItemDomainPermissionBootstrapTests(TestCase):
                 'delete_items',
             }.issubset(perms)
         )
+
+
+class StockEntryDomainPermissionBootstrapTests(TestCase):
+    def test_stock_entry_domain_permissions_exist(self):
+        perms = set(
+            Permission.objects.filter(content_type__app_label='inventory').values_list('codename', flat=True)
+        )
+
+        self.assertTrue(
+            {
+                'view_stock_entries',
+                'create_stock_entries',
+                'edit_stock_entries',
+                'delete_stock_entries',
+            }.issubset(perms)
+        )
+
+    def test_stock_entries_manifest_declares_dependencies(self):
+        resolved = resolve_selections_to_codenames({'stock-entries': 'manage'})
+
+        self.assertIn('inventory.view_stock_entries', resolved)
+        self.assertIn('inventory.create_stock_entries', resolved)
+        self.assertIn('inventory.edit_stock_entries', resolved)
+        self.assertIn('inventory.acknowledge_stockentry', resolved)
+        self.assertIn('inventory.view_items', resolved)
+        self.assertIn('inventory.view_locations', resolved)
+        self.assertIn('inventory.view_person', resolved)
+        self.assertIn('inventory.view_stockregister', resolved)
+        self.assertIn('inventory.view_stockallocation', resolved)
+        self.assertNotIn('inventory.delete_stock_entries', resolved)
+
+    def test_stock_entries_read_perm_declared(self):
+        self.assertIn('stock-entries', MODULES)
+        self.assertEqual(READ_PERMS.get('stock-entries'), ['inventory.view_stock_entries'])
+
+    def test_stock_entry_permission_implications_declared(self):
+        self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('create_stock_entries'), ['view_stock_entries'])
+        self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('edit_stock_entries'), ['view_stock_entries'])
+        self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('delete_stock_entries'), ['view_stock_entries'])
+
+
+class InspectionCertificateSerializerContractTests(TestCase):
+    def test_multipart_create_data_with_file_does_not_deepcopy_upload(self):
+        department = Location.objects.create(
+            name='Inspection Multipart Department',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        upload = TemporaryUploadedFile('delivery.pdf', 'application/pdf', 0, 'utf-8')
+
+        data = QueryDict('', mutable=True)
+        data.update({
+            'date': timezone.now().date().isoformat(),
+            'contract_no': 'IC-MULTIPART-001',
+            'contract_date': timezone.now().date().isoformat(),
+            'contractor_name': 'Multipart Supplier',
+            'contractor_address': 'Block B',
+            'indenter': 'Multipart Indenter',
+            'indent_no': 'IND-MULTI-1',
+            'department': str(department.id),
+            'date_of_delivery': timezone.now().date().isoformat(),
+            'delivery_type': 'FULL',
+            'remarks': 'Multipart contract',
+            'inspected_by': 'Multipart Inspector',
+            'date_of_inspection': timezone.now().date().isoformat(),
+            'consignee_name': 'Multipart Consignee',
+            'consignee_designation': 'Manager',
+            'items': json.dumps([
+                {
+                    'item': None,
+                    'item_description': 'Multipart line item',
+                    'item_specifications': 'Specs',
+                    'tendered_quantity': 1,
+                    'accepted_quantity': 0,
+                    'rejected_quantity': 0,
+                    'unit_price': '0.00',
+                    'remarks': '',
+                }
+            ]),
+        })
+        data.setlist('documents[0]', [upload])
+
+        try:
+            serializer = InspectionCertificateSerializer(data=data)
+
+            self.assertTrue(serializer.is_valid(), serializer.errors)
+        finally:
+            upload.close()
+
+    def test_serializer_exposes_named_workflow_actors_and_related_stock_entries(self):
+        department = Location.objects.create(
+            name='Inspection Serializer Department',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        stock_user = User.objects.create_user(username='stock.actor', password='pw')
+        central_user = User.objects.create_user(username='central.actor', password='pw')
+        finance_user = User.objects.create_user(username='finance.actor', password='pw')
+        initiated_user = User.objects.create_user(username='initiated.actor', password='pw')
+
+        certificate = InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no='IC-SERIALIZER-001',
+            contract_date=timezone.now().date(),
+            contractor_name='Serializer Supplier',
+            contractor_address='Block A',
+            indenter='Serializer Indenter',
+            indent_no='IND-SER-1',
+            department=department,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='Serializer contract',
+            inspected_by='QA Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Serializer Consignee',
+            consignee_designation='Manager',
+            stage=InspectionStage.FINANCE_REVIEW,
+            status='IN_PROGRESS',
+            initiated_by=initiated_user,
+            stock_filled_by=stock_user,
+            central_store_filled_by=central_user,
+            finance_reviewed_by=finance_user,
+        )
+
+        StockEntry.objects.create(
+            entry_type='RECEIPT',
+            status='COMPLETED',
+            inspection_certificate=certificate,
+            created_by=finance_user,
+        )
+
+        data = InspectionCertificateSerializer(certificate).data
+
+        self.assertEqual(data['initiated_by_name'], 'initiated.actor')
+        self.assertEqual(data['stock_filled_by_name'], 'stock.actor')
+        self.assertEqual(data['central_store_filled_by_name'], 'central.actor')
+        self.assertEqual(data['finance_reviewed_by_name'], 'finance.actor')
+        self.assertEqual(len(data['stock_entries']), 1)
+        self.assertEqual(data['stock_entries'][0]['entry_type'], 'RECEIPT')
+        self.assertIn('entry_number', data['stock_entries'][0])
+
+
+class StockRegisterDomainPermissionBootstrapTests(TestCase):
+    def test_stock_register_domain_permissions_exist(self):
+        perms = set(
+            Permission.objects.filter(content_type__app_label='inventory').values_list('codename', flat=True)
+        )
+
+        self.assertTrue(
+            {
+                'view_stock_registers',
+                'create_stock_registers',
+                'edit_stock_registers',
+                'delete_stock_registers',
+            }.issubset(perms)
+        )
+
+
+class StockEntryStoreHierarchyRulesTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Hierarchy Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.root.refresh_from_db()
+        cls.central_store = cls.root.auto_created_store
+
+        cls.csit = Location.objects.create(
+            name='Hierarchy CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.csit.refresh_from_db()
+        cls.csit_main_store = cls.csit.auto_created_store
+
+        cls.electrical = Location.objects.create(
+            name='Hierarchy Electrical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.electrical.refresh_from_db()
+        cls.electrical_main_store = cls.electrical.auto_created_store
+
+        cls.csit_lab = Location.objects.create(
+            name='Hierarchy CSIT Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.csit,
+            is_standalone=False,
+        )
+        cls.csit_lab_store = Location.objects.create(
+            name='Hierarchy CSIT Lab Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.csit_lab,
+            is_store=True,
+        )
+        cls.csit_lab_two_store = Location.objects.create(
+            name='Hierarchy CSIT Lab Two Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.csit_main_store,
+            is_store=True,
+        )
+        cls.electrical_lab_store = Location.objects.create(
+            name='Hierarchy Electrical Lab Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.electrical_main_store,
+            is_store=True,
+        )
+
+        cls.user = User.objects.create_user(username='hierarchy_rules', password='pw')
+
+    def transferrable_ids(self, source):
+        return set(self.user.profile.get_transferrable_locations(source).values_list('id', flat=True))
+
+    def test_central_store_transfers_only_to_standalone_main_stores(self):
+        ids = self.transferrable_ids(self.central_store)
+
+        self.assertIn(self.csit_main_store.id, ids)
+        self.assertIn(self.electrical_main_store.id, ids)
+        self.assertNotIn(self.csit_lab_store.id, ids)
+
+    def test_standalone_main_store_transfers_to_central_and_same_scope_regular_stores(self):
+        ids = self.transferrable_ids(self.csit_main_store)
+
+        self.assertIn(self.central_store.id, ids)
+        self.assertIn(self.csit_lab_store.id, ids)
+        self.assertIn(self.csit_lab_two_store.id, ids)
+        self.assertNotIn(self.electrical_main_store.id, ids)
+        self.assertNotIn(self.electrical_lab_store.id, ids)
+
+    def test_regular_store_transfers_to_own_main_store_and_peer_regular_stores(self):
+        ids = self.transferrable_ids(self.csit_lab_store)
+
+        self.assertIn(self.csit_main_store.id, ids)
+        self.assertIn(self.csit_lab_two_store.id, ids)
+        self.assertNotIn(self.central_store.id, ids)
+        self.assertNotIn(self.electrical_lab_store.id, ids)
+
+    def test_model_validation_allows_main_store_to_same_scope_regular_store(self):
+        entry = StockEntry(
+            entry_type='ISSUE',
+            from_location=self.csit_main_store,
+            to_location=self.csit_lab_store,
+            status='DRAFT',
+            created_by=self.user,
+        )
+
+        entry.clean()
+
+    def test_model_validation_blocks_regular_store_to_central_store(self):
+        entry = StockEntry(
+            entry_type='ISSUE',
+            from_location=self.csit_lab_store,
+            to_location=self.central_store,
+            status='DRAFT',
+            created_by=self.user,
+        )
+
+        with self.assertRaises(ValidationError):
+            entry.clean()
 
 
 class LocationApiPermissionAndScopeTests(TestCase):
@@ -401,6 +683,33 @@ class LocationStandaloneWorkflowTests(TestCase):
         self.assertEqual(child.parent_location, csit)
         self.assertFalse(child.is_standalone)
 
+    def test_children_create_endpoint_marks_store_type_as_store(self):
+        root = Location.objects.create(
+            name='Store Type Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        csit = Location.objects.create(
+            name='Store Type CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+
+        resp = self.client.post(
+            f'/api/inventory/locations/{csit.id}/children/',
+            {
+                'name': 'CSIT Lab Store',
+                'location_type': LocationType.STORE,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        child = Location.objects.get(pk=resp.data['id'])
+        self.assertTrue(child.is_store)
+        self.assertFalse(child.is_standalone)
+
 
 class CategoryApiDomainPermissionTests(TestCase):
     @classmethod
@@ -648,6 +957,7 @@ class ItemApiDomainPermissionTests(TestCase):
     def _make_user(self, username):
         user = User.objects.create_user(username=username, password='pw')
         user.profile.assigned_locations.add(self.root)
+        user.user_permissions.add(self._perm('view_scoped_distribution'))
         return user
 
     def test_list_requires_domain_view_items_perm(self):
@@ -696,11 +1006,44 @@ class ItemApiDomainPermissionTests(TestCase):
                 'name': 'Domain Created Item',
                 'category': self.subcategory.id,
                 'acct_unit': 'unit',
+                'low_stock_threshold': 4,
             },
             format='json',
         )
 
         self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['low_stock_threshold'], 4)
+
+    def test_list_exposes_low_stock_threshold_and_flag(self):
+        self.item.low_stock_threshold = 5
+        self.item.save(update_fields=['low_stock_threshold'])
+        user = self._make_user('item_low_stock_view')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(resp.status_code, 200)
+        row = next(record for record in resp.data['results'] if record['id'] == self.item.id)
+        self.assertEqual(row['low_stock_threshold'], 5)
+        self.assertTrue(row['is_low_stock'])
+
+    def test_update_allows_domain_edit_items_perm(self):
+        user = self._make_user('item_domain_edit')
+        user.user_permissions.add(self._perm('edit_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/items/{self.item.id}/',
+            {
+                'low_stock_threshold': 2,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.low_stock_threshold, 2)
 
     def test_distribution_hierarchical_allows_domain_view_items_perm(self):
         user = self._make_user('item_distribution_view')
@@ -738,3 +1081,901 @@ class ItemApiDomainPermissionTests(TestCase):
         resp = self.client.get(f'/api/inventory/item-instances/?item={self.item.id}')
 
         self.assertEqual(resp.status_code, 200)
+
+
+class StockEntryApiDomainPermissionTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Stock Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='Stock CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.store = Location.objects.create(
+            name='Stock CSIT Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.csit,
+            is_store=True,
+            is_main_store=True,
+        )
+        cls.child_store = Location.objects.create(
+            name='Stock CSIT Lab Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.store,
+            is_store=True,
+        )
+        cls.non_store_location = Location.objects.create(
+            name='Stock CSIT Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.csit,
+            is_standalone=False,
+        )
+        cls.person = Person.objects.create(
+            name='Stock Entry Person',
+            department='Stock CSIT',
+        )
+        cls.person.standalone_locations.add(cls.csit)
+        cls.parent_category = Category.objects.create(
+            name='Stock Entry Hardware',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        cls.subcategory = Category.objects.create(
+            name='Stock Entry Mouse',
+            parent_category=cls.parent_category,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.BATCH,
+        )
+        cls.item = Item.objects.create(
+            name='USB Mouse',
+            category=cls.subcategory,
+            acct_unit='unit',
+        )
+        cls.batch = ItemBatch.objects.create(
+            item=cls.item,
+            batch_number='MOUSE-B1',
+        )
+        cls.source_stock = StockRecord.objects.create(
+            item=cls.item,
+            batch=cls.batch,
+            location=cls.store,
+            quantity=10,
+        )
+        cls.entry = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=cls.store,
+            to_location=cls.child_store,
+            status='DRAFT',
+        )
+        StockEntryItem.objects.create(
+            stock_entry=cls.entry,
+            item=cls.item,
+            batch=cls.batch,
+            quantity=3,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(self.root)
+        user.user_permissions.add(self._perm('view_scoped_distribution'))
+        return user
+
+    def _payload(self, purpose='Created from domain permission test'):
+        return {
+            'entry_type': 'ISSUE',
+            'from_location': self.store.id,
+            'to_location': self.child_store.id,
+            'status': 'DRAFT',
+            'purpose': purpose,
+            'remarks': '',
+            'items': [
+                {
+                    'item': self.item.id,
+                    'batch': self.batch.id,
+                    'quantity': 1,
+                    'instances': [],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+    def _register(self, store, number):
+        return StockRegister.objects.create(register_number=number, store=store)
+
+    def _allocation(self, *, person=None, location=None, quantity=1, status=AllocationStatus.ALLOCATED):
+        return StockAllocation.objects.create(
+            item=self.item,
+            batch=self.batch,
+            source_location=self.store,
+            quantity=quantity,
+            allocated_to_person=person,
+            allocated_to_location=location,
+            status=status,
+        )
+
+    def test_list_requires_domain_view_stock_entries_perm(self):
+        user = self._make_user('stock_entry_legacy_view')
+        user.user_permissions.add(self._perm('view_stockentry'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-entries/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_list_allows_domain_view_stock_entries_perm(self):
+        user = self._make_user('stock_entry_domain_view')
+        user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-entries/')
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_list_scopes_entries_by_stock_entry_workflow_without_distribution_permission(self):
+        issue_to_child = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='COMPLETED',
+        )
+        receipt_to_child = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='PENDING_ACK',
+            reference_entry=issue_to_child,
+        )
+        issue_to_store = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='COMPLETED',
+        )
+        receipt_to_store = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='PENDING_ACK',
+            reference_entry=issue_to_store,
+        )
+        return_to_store = StockEntry.objects.create(
+            entry_type='RETURN',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='PENDING_ACK',
+            reference_entry=receipt_to_child,
+        )
+
+        store_user = User.objects.create_user(username='stock_entry_store_scope', password='pw')
+        store_user.profile.assigned_locations.add(self.store)
+        store_user.user_permissions.add(self._perm('view_stock_entries'))
+
+        child_store_user = User.objects.create_user(username='stock_entry_child_scope', password='pw')
+        child_store_user.profile.assigned_locations.add(self.child_store)
+        child_store_user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=store_user)
+        store_resp = self.client.get('/api/inventory/stock-entries/')
+        self.assertEqual(store_resp.status_code, 200)
+        store_numbers = {row['entry_number'] for row in store_resp.data['results']}
+        self.assertIn(issue_to_child.entry_number, store_numbers)
+        self.assertIn(receipt_to_store.entry_number, store_numbers)
+        self.assertIn(return_to_store.entry_number, store_numbers)
+        self.assertNotIn(receipt_to_child.entry_number, store_numbers)
+        self.assertNotIn(issue_to_store.entry_number, store_numbers)
+
+        self.client.force_authenticate(user=child_store_user)
+        child_resp = self.client.get('/api/inventory/stock-entries/')
+        self.assertEqual(child_resp.status_code, 200)
+        child_numbers = {row['entry_number'] for row in child_resp.data['results']}
+        self.assertIn(receipt_to_child.entry_number, child_numbers)
+        self.assertIn(issue_to_store.entry_number, child_numbers)
+        self.assertNotIn(issue_to_child.entry_number, child_numbers)
+        self.assertNotIn(receipt_to_store.entry_number, child_numbers)
+        self.assertNotIn(return_to_store.entry_number, child_numbers)
+
+    def test_create_requires_domain_create_stock_entries_perm(self):
+        user = self._make_user('stock_entry_legacy_add')
+        user.user_permissions.add(self._perm('add_stockentry'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', self._payload(), format='json')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_allows_domain_create_stock_entries_perm(self):
+        user = self._make_user('stock_entry_domain_create')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', self._payload(), format='json')
+
+        self.assertEqual(resp.status_code, 201)
+
+    def test_create_forces_store_transfer_issue_to_pending_ack_and_creates_pending_receipt(self):
+        user = self._make_user('stock_entry_force_pending_ack')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Force status to pending ack')
+        payload['status'] = 'COMPLETED'
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'PENDING_ACK')
+        linked_receipt = StockEntry.objects.get(reference_entry_id=resp.data['id'], entry_type='RECEIPT')
+        self.assertEqual(linked_receipt.status, 'PENDING_ACK')
+
+    def test_acknowledge_receipt_completes_receipt_and_parent_issue(self):
+        user = self._make_user('stock_entry_acknowledger')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        ack_register = self._register(self.child_store, 'ACK-FULL-1')
+
+        self.client.force_authenticate(user=user)
+        create_resp = self.client.post('/api/inventory/stock-entries/', self._payload('Acknowledge transfer'), format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        linked_receipt = StockEntry.objects.get(reference_entry_id=create_resp.data['id'], entry_type='RECEIPT')
+        receipt_item = linked_receipt.items.get()
+
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{linked_receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': receipt_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 1,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(ack_resp.status_code, 200)
+        linked_receipt.refresh_from_db()
+        parent_issue = StockEntry.objects.get(id=create_resp.data['id'])
+        self.assertEqual(linked_receipt.status, 'COMPLETED')
+        self.assertEqual(parent_issue.status, 'COMPLETED')
+
+    def test_detail_includes_acknowledgement_audit_fields(self):
+        user = self._make_user('stock_entry_detail_audit')
+        user.user_permissions.add(self._perm('view_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        receipt = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='COMPLETED',
+            reference_entry=self.entry,
+            acknowledged_by=user,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/stock-entries/{receipt.id}/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('reference_entry', resp.data)
+        self.assertIn('acknowledged_at', resp.data)
+        self.assertIn('acknowledged_by_name', resp.data)
+
+    def test_partial_receipt_acknowledgement_records_accepted_quantity_and_creates_pending_return(self):
+        user = self._make_user('stock_entry_partial_acknowledger')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        ack_register = self._register(self.child_store, 'ACK-PARTIAL-1')
+        payload = self._payload('Partial acknowledgement transfer')
+        payload['items'][0]['quantity'] = 5
+
+        self.client.force_authenticate(user=user)
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        source_record = StockRecord.objects.get(item=self.item, batch=self.batch, location=self.store)
+        self.assertEqual(source_record.quantity, 10)
+        self.assertEqual(source_record.in_transit_quantity, 5)
+        self.assertEqual(source_record.available_quantity, 5)
+        linked_receipt = StockEntry.objects.get(reference_entry_id=create_resp.data['id'], entry_type='RECEIPT')
+        receipt_item = linked_receipt.items.get()
+
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{linked_receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': 2,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 9,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(ack_resp.status_code, 200)
+        receipt_item.refresh_from_db()
+        self.assertEqual(receipt_item.quantity, 5)
+        self.assertEqual(receipt_item.accepted_quantity, 2)
+        self.assertEqual(receipt_item.ack_stock_register, ack_register)
+        self.assertEqual(receipt_item.ack_page_number, 9)
+        return_entry = StockEntry.objects.get(reference_entry=linked_receipt, entry_type='RETURN')
+        self.assertEqual(return_entry.from_location, self.child_store)
+        self.assertEqual(return_entry.to_location, self.store)
+        self.assertEqual(return_entry.status, 'PENDING_ACK')
+        self.assertEqual(return_entry.items.get().quantity, 3)
+        source_record.refresh_from_db()
+        child_record = StockRecord.objects.get(item=self.item, batch=self.batch, location=self.child_store)
+        self.assertEqual(source_record.quantity, 8)
+        self.assertEqual(source_record.in_transit_quantity, 3)
+        self.assertEqual(source_record.available_quantity, 5)
+        self.assertEqual(child_record.quantity, 2)
+        self.assertEqual(child_record.in_transit_quantity, 0)
+        self.assertEqual(child_record.available_quantity, 2)
+
+    def test_partial_transfer_return_acknowledgement_restores_source_available_from_in_transit(self):
+        user = self._make_user('stock_entry_partial_return_recovery')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        dest_ack_register = self._register(self.child_store, 'ACK-PARTIAL-RETURN-DEST')
+        source_ack_register = self._register(self.store, 'ACK-PARTIAL-RETURN-SOURCE')
+        payload = self._payload('Partial acknowledgement with return completion')
+        payload['items'][0]['quantity'] = 5
+
+        self.client.force_authenticate(user=user)
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+
+        linked_receipt = StockEntry.objects.get(reference_entry_id=create_resp.data['id'], entry_type='RECEIPT')
+        receipt_item = linked_receipt.items.get()
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{linked_receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': 2,
+                        'instances': [],
+                        'ack_stock_register': dest_ack_register.id,
+                        'ack_page_number': 4,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(ack_resp.status_code, 200)
+
+        return_entry = StockEntry.objects.get(reference_entry=linked_receipt, entry_type='RETURN')
+        return_item = return_entry.items.get()
+        return_ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': return_item.id,
+                        'quantity': return_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': source_ack_register.id,
+                        'ack_page_number': 12,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(return_ack_resp.status_code, 200)
+        source_record = StockRecord.objects.get(item=self.item, batch=self.batch, location=self.store)
+        child_record = StockRecord.objects.get(item=self.item, batch=self.batch, location=self.child_store)
+        self.assertEqual(source_record.quantity, 8)
+        self.assertEqual(source_record.in_transit_quantity, 0)
+        self.assertEqual(source_record.available_quantity, 8)
+        self.assertEqual(child_record.quantity, 2)
+        self.assertEqual(child_record.available_quantity, 2)
+
+    def test_return_acknowledgement_accepts_all_and_does_not_create_recursive_return(self):
+        user = self._make_user('stock_entry_return_acknowledger')
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        ack_register = self._register(self.store, 'ACK-RETURN-1')
+        receipt = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='COMPLETED',
+        )
+        return_entry = StockEntry.objects.create(
+            entry_type='RETURN',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='PENDING_ACK',
+            reference_entry=receipt,
+        )
+        return_item = StockEntryItem.objects.create(
+            stock_entry=return_entry,
+            item=self.item,
+            batch=self.batch,
+            quantity=3,
+        )
+
+        self.client.force_authenticate(user=user)
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': return_item.id,
+                        'quantity': 1,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 12,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(ack_resp.status_code, 200)
+        return_item.refresh_from_db()
+        return_entry.refresh_from_db()
+        self.assertEqual(return_entry.status, 'COMPLETED')
+        self.assertEqual(return_item.accepted_quantity, 3)
+        self.assertFalse(StockEntry.objects.filter(reference_entry=return_entry, entry_type='RETURN').exists())
+
+    def test_patch_requires_domain_edit_stock_entries_perm(self):
+        user = self._make_user('stock_entry_legacy_change')
+        user.user_permissions.add(self._perm('change_stockentry'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/stock-entries/{self.entry.id}/',
+            self._payload('Legacy edit should be blocked'),
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_patch_allows_domain_edit_stock_entries_perm(self):
+        user = self._make_user('stock_entry_domain_edit')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/stock-entries/{self.entry.id}/',
+            self._payload('Domain edit should pass'),
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_delete_requires_domain_delete_stock_entries_perm(self):
+        user = self._make_user('stock_entry_legacy_delete')
+        user.user_permissions.add(self._perm('delete_stockentry'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.delete(f'/api/inventory/stock-entries/{self.entry.id}/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_rejects_return_entry_type_for_user_created_entries(self):
+        user = self._make_user('stock_entry_return_blocked')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload()
+        payload['entry_type'] = 'RETURN'
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('entry_type', resp.data)
+
+    def test_create_requires_source_store(self):
+        user = self._make_user('stock_entry_source_required')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload()
+        payload['from_location'] = None
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('from_location', resp.data)
+
+    def test_create_rejects_same_source_and_destination_store(self):
+        user = self._make_user('stock_entry_same_store_blocked')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload()
+        payload['from_location'] = self.store.id
+        payload['to_location'] = self.store.id
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('to_location', resp.data)
+
+    def test_create_allows_receipt_return_from_person_to_store(self):
+        user = self._make_user('stock_entry_receipt_person')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        self._allocation(person=self.person)
+        payload = self._payload('Person return receipt')
+        payload['entry_type'] = 'RECEIPT'
+        payload['from_location'] = None
+        payload['to_location'] = self.store.id
+        payload['issued_to'] = self.person.id
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+
+    def test_create_allows_receipt_return_from_non_store_to_store(self):
+        user = self._make_user('stock_entry_receipt_non_store')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        self._allocation(location=self.non_store_location)
+        payload = self._payload('Non-store return receipt')
+        payload['entry_type'] = 'RECEIPT'
+        payload['from_location'] = self.non_store_location.id
+        payload['to_location'] = self.store.id
+        payload['issued_to'] = None
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+
+    def test_create_rejects_receipt_return_from_person_without_active_allocation(self):
+        user = self._make_user('stock_entry_receipt_person_unallocated')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Unallocated person return receipt')
+        payload['entry_type'] = 'RECEIPT'
+        payload['from_location'] = None
+        payload['to_location'] = self.store.id
+        payload['issued_to'] = self.person.id
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('items', resp.data)
+
+    def test_create_rejects_receipt_return_from_non_store_without_active_allocation(self):
+        user = self._make_user('stock_entry_receipt_location_unallocated')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Unallocated non-store return receipt')
+        payload['entry_type'] = 'RECEIPT'
+        payload['from_location'] = self.non_store_location.id
+        payload['to_location'] = self.store.id
+        payload['issued_to'] = None
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('items', resp.data)
+
+
+class StockRegisterApiPermissionAndScopeTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Stock Register Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='Stock Register CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.ee = Location.objects.create(
+            name='Stock Register EE',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.central_store = cls.root.auto_created_store
+        cls.csit_store = cls.csit.auto_created_store
+        cls.ee_store = cls.ee.auto_created_store
+        cls.root_lab = Location.objects.create(
+            name='Stock Register Root Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.root,
+            is_standalone=False,
+        )
+        cls.root_lab_store = Location.objects.create(
+            name='Stock Register Root Lab Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.root_lab,
+            is_store=True,
+        )
+        cls.csit_lab_store = Location.objects.create(
+            name='Stock Register CSIT Lab Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.csit_store,
+            is_store=True,
+        )
+        cls.central_register = StockRegister.objects.create(register_number='CSR-CENTRAL-1', register_type='CSR', store=cls.central_store)
+        cls.root_lab_register = StockRegister.objects.create(register_number='CSR-ROOT-LAB-1', register_type='CSR', store=cls.root_lab_store)
+        cls.csit_register = StockRegister.objects.create(register_number='CSR-CSIT-1', register_type='CSR', store=cls.csit_store)
+        cls.csit_lab_register = StockRegister.objects.create(register_number='CSR-CSIT-LAB-1', register_type='CSR', store=cls.csit_lab_store)
+        cls.ee_register = StockRegister.objects.create(register_number='DSR-EE-1', register_type='DSR', store=cls.ee_store)
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username, assigned_location):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(assigned_location)
+        return user
+
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and 'results' in data:
+            return data['results']
+        return data
+
+    def _payload(self, *, register_number='CSR-NEW-1', register_type='CSR', store=None, is_active=True):
+        return {
+            'register_number': register_number,
+            'register_type': register_type,
+            'store': store or self.csit_store.id,
+            'is_active': is_active,
+        }
+
+    def test_list_requires_domain_view_stock_registers_perm(self):
+        user = self._make_user('stock_register_legacy_view', self.csit)
+        user.user_permissions.add(self._perm('view_stockregister'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_scoped_list_only_returns_registers_within_accessible_locations(self):
+        user = self._make_user('stock_register_scoped_view', self.csit)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.csit_register.id, returned_ids)
+        self.assertIn(self.csit_lab_register.id, returned_ids)
+        self.assertNotIn(self.central_register.id, returned_ids)
+        self.assertNotIn(self.root_lab_register.id, returned_ids)
+        self.assertNotIn(self.ee_register.id, returned_ids)
+
+    def test_main_store_assigned_user_sees_registers_within_same_standalone_unit(self):
+        user = self._make_user('stock_register_central_store_view', self.central_store)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.central_register.id, returned_ids)
+        self.assertIn(self.root_lab_register.id, returned_ids)
+        self.assertNotIn(self.csit_register.id, returned_ids)
+        self.assertNotIn(self.csit_lab_register.id, returned_ids)
+        self.assertNotIn(self.ee_register.id, returned_ids)
+
+    def test_main_store_assigned_user_stays_same_standalone_scoped_even_with_global_distribution_permissions(self):
+        user = self._make_user('stock_register_central_perm_scope', self.central_store)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+        user.user_permissions.add(self._perm('view_global_distribution'))
+        user.user_permissions.add(self._perm('manage_all_locations'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.central_register.id, returned_ids)
+        self.assertIn(self.root_lab_register.id, returned_ids)
+        self.assertNotIn(self.csit_register.id, returned_ids)
+        self.assertNotIn(self.csit_lab_register.id, returned_ids)
+        self.assertNotIn(self.ee_register.id, returned_ids)
+
+    def test_department_main_store_sees_its_unit_registers_only(self):
+        user = self._make_user('stock_register_csit_main_store_view', self.csit_store)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.csit_register.id, returned_ids)
+        self.assertIn(self.csit_lab_register.id, returned_ids)
+        self.assertNotIn(self.central_register.id, returned_ids)
+        self.assertNotIn(self.root_lab_register.id, returned_ids)
+        self.assertNotIn(self.ee_register.id, returned_ids)
+
+    def test_non_main_store_user_only_sees_own_registers(self):
+        user = self._make_user('stock_register_csit_lab_store_view', self.csit_lab_store)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-registers/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.csit_lab_register.id, returned_ids)
+        self.assertNotIn(self.csit_register.id, returned_ids)
+        self.assertNotIn(self.central_register.id, returned_ids)
+        self.assertNotIn(self.root_lab_register.id, returned_ids)
+        self.assertNotIn(self.ee_register.id, returned_ids)
+
+    def test_create_requires_domain_create_stock_registers_perm(self):
+        user = self._make_user('stock_register_view_only', self.csit)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-registers/', self._payload(register_number='CSR-CREATE-FAIL'), format='json')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_allows_domain_create_stock_registers_perm_for_in_scope_store(self):
+        user = self._make_user('stock_register_creator', self.csit)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-registers/', self._payload(register_number='CSR-CREATE-OK'), format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['store'], self.csit_store.id)
+
+    def test_create_rejects_out_of_scope_store_even_with_create_perm(self):
+        user = self._make_user('stock_register_creator_scoped', self.csit)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/stock-registers/',
+            self._payload(register_number='CSR-CREATE-OOS', store=self.ee_store.id),
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('store', resp.data)
+
+    def test_update_requires_domain_edit_stock_registers_perm(self):
+        user = self._make_user('stock_register_view_patch', self.csit)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/',
+            {'register_number': 'CSR-PATCH-NOPE'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_update_allows_domain_edit_stock_registers_perm(self):
+        user = self._make_user('stock_register_editor', self.csit)
+        user.user_permissions.add(self._perm('edit_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/',
+            {'register_number': 'CSR-PATCH-OK'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.csit_register.refresh_from_db()
+        self.assertEqual(self.csit_register.register_number, 'CSR-PATCH-OK')
+
+    def test_close_requires_domain_edit_stock_registers_perm(self):
+        user = self._make_user('stock_register_close_view_only', self.csit_store)
+        user.user_permissions.add(self._perm('view_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/close/',
+            {'reason': 'Closing for audit'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_close_sets_closed_metadata_and_deactivates_register(self):
+        user = self._make_user('stock_register_closer', self.csit_store)
+        user.user_permissions.add(self._perm('edit_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/close/',
+            {'reason': 'Ledger complete'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.csit_register.refresh_from_db()
+        self.assertFalse(self.csit_register.is_active)
+        self.assertEqual(self.csit_register.closed_reason, 'Ledger complete')
+        self.assertEqual(self.csit_register.closed_by, user)
+        self.assertIsNotNone(self.csit_register.closed_at)
+
+    def test_close_allows_blank_reason(self):
+        user = self._make_user('stock_register_close_blank_reason', self.csit_store)
+        user.user_permissions.add(self._perm('edit_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/close/',
+            {'reason': ''},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.csit_register.refresh_from_db()
+        self.assertEqual(self.csit_register.closed_reason, '')
+
+    def test_reopen_reactivates_register_and_clears_close_metadata(self):
+        user = self._make_user('stock_register_reopener', self.csit_store)
+        user.user_permissions.add(self._perm('edit_stock_registers'))
+        self.csit_register.is_active = False
+        self.csit_register.closed_reason = 'End of year close'
+        self.csit_register.closed_by = user
+        self.csit_register.closed_at = timezone.now()
+        self.csit_register.save(update_fields=['is_active', 'closed_reason', 'closed_by', 'closed_at'])
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            f'/api/inventory/stock-registers/{self.csit_register.id}/reopen/',
+            {'reason': 'Audit resumed'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.csit_register.refresh_from_db()
+        self.assertTrue(self.csit_register.is_active)
+        self.assertEqual(self.csit_register.closed_reason, 'End of year close')
+        self.assertEqual(self.csit_register.closed_by, user)
+        self.assertIsNotNone(self.csit_register.closed_at)
+        self.assertEqual(self.csit_register.reopened_reason, 'Audit resumed')
+        self.assertEqual(self.csit_register.reopened_by, user)
+        self.assertIsNotNone(self.csit_register.reopened_at)
+
+    def test_delete_requires_domain_delete_stock_registers_perm(self):
+        user = self._make_user('stock_register_editor_no_delete', self.csit)
+        user.user_permissions.add(self._perm('edit_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.delete(f'/api/inventory/stock-registers/{self.csit_register.id}/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_delete_allows_domain_delete_stock_registers_perm(self):
+        register = StockRegister.objects.create(register_number='CSR-DELETE-ME', register_type='CSR', store=self.csit_store)
+        user = self._make_user('stock_register_deleter', self.csit)
+        user.user_permissions.add(self._perm('delete_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.delete(f'/api/inventory/stock-registers/{register.id}/')
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(StockRegister.objects.filter(id=register.id).exists())

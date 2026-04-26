@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
-from ..models.location_model import Location
+from ..models.location_model import Location, LocationType
 
 class LocationSerializer(serializers.ModelSerializer):
     parent_location_display = serializers.StringRelatedField(source='parent_location', read_only=True)
@@ -19,6 +19,9 @@ class LocationSerializer(serializers.ModelSerializer):
         return obj.auto_created_store.code if obj.auto_created_store else None
 
     def validate(self, attrs):
+        if 'location_type' in attrs:
+            attrs['is_store'] = attrs['location_type'] == LocationType.STORE
+
         candidate = self.instance or Location()
         for field, value in attrs.items():
             setattr(candidate, field, value)

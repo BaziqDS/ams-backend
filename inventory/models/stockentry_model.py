@@ -113,26 +113,31 @@ class StockEntry(models.Model):
         
         # 1. Hierarchical Movement Validation (Store-to-Store)
         if self.from_location and self.to_location and self.from_location.is_store and self.to_location.is_store:
-            level_from = self.from_location.hierarchy_level
-            level_to = self.to_location.hierarchy_level
-            
-            # L1 Rules
-            if level_from == 1:
-                if level_to != 2:
-                    raise ValidationError("L1 Store (Central) can only issue to L2 Stores (Department Stores).")
-            
-            # L2 Rules
-            elif level_from == 2:
-                is_return_to_l1 = (level_to == 1)
-                is_issue_to_l3_child = (level_to == 3 and self.to_location.parent_location == self.from_location)
-                if not (is_return_to_l1 or is_issue_to_l3_child):
-                    raise ValidationError("L2 Store can only return to L1 or issue to its direct L3 Sub-Stores.")
-            
-            # L3 Rules
-            elif level_from == 3:
-                is_return_to_l2_parent = (level_to == 2 and self.from_location.parent_location == self.to_location)
-                if not is_return_to_l2_parent:
-                    raise ValidationError("L3 Store can only return to its parent L2 Store.")
+            if self.from_location_id == self.to_location_id:
+                raise ValidationError("Destination cannot be the same as the source store.")
+
+            if self.from_location.hierarchy_level == 1:
+                if self.to_location.hierarchy_level != 2 or not self.to_location.is_main_store:
+                    raise ValidationError("Central Store can only issue to standalone main stores.")
+            else:
+                source_standalone = self.from_location.get_parent_standalone()
+                target_standalone = self.to_location.get_parent_standalone()
+                source_main_store = source_standalone.get_main_store() if source_standalone else None
+                is_source_main_store = bool(source_main_store and source_main_store.id == self.from_location_id)
+
+                if not source_standalone or not target_standalone:
+                    raise ValidationError("Store transfers must stay within a valid standalone scope.")
+
+                if is_source_main_store:
+                    is_to_central = self.to_location.hierarchy_level == 1
+                    is_same_scope_regular_store = target_standalone == source_standalone and not self.to_location.is_main_store
+                    if not (is_to_central or is_same_scope_regular_store):
+                        raise ValidationError("Main stores can only issue to Central Store or regular stores in their own standalone location.")
+                else:
+                    is_to_own_main_store = bool(source_main_store and self.to_location_id == source_main_store.id)
+                    is_same_scope_regular_store = target_standalone == source_standalone and not self.to_location.is_main_store
+                    if not (is_to_own_main_store or is_same_scope_regular_store):
+                        raise ValidationError("Regular stores can only issue to their own main store or peer stores in the same standalone location.")
 
         # 2. Allocation Scope Validation (Issuance to Use)
         if self.entry_type == 'ISSUE' and (self.issued_to or (self.to_location and not self.to_location.is_store)):
@@ -166,6 +171,10 @@ class StockEntry(models.Model):
 
     class Meta:
         permissions = [
+            ("view_stock_entries", "Can view stock entries module"),
+            ("create_stock_entries", "Can create stock entries module records"),
+            ("edit_stock_entries", "Can edit stock entries module records"),
+            ("delete_stock_entries", "Can delete stock entries module records"),
             ("acknowledge_stockentry", "Can acknowledge stock receipt entries"),
         ]
 
@@ -201,6 +210,18 @@ class StockEntryItem(models.Model):
     ack_page_number = models.PositiveIntegerField(
         null=True, blank=True,
         help_text="Page number in the destination stock register (filled at acknowledgment)."
+    )
+    accepted_quantity = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="Quantity accepted by the destination during acknowledgment. Original quantity is preserved for audit."
+    )
+    accepted_instances = models.ManyToManyField(
+        ItemInstance,
+        blank=True,
+        related_name='accepted_stock_entry_items',
+        help_text="Instances accepted by the destination during acknowledgment. Original instances are preserved for audit."
     )
 
     # Tracking flags for signals
