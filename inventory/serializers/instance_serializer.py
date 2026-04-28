@@ -11,7 +11,6 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='current_location.name', read_only=True)
     location_code = serializers.CharField(source='current_location.code', read_only=True)
     full_location_path = serializers.CharField(source='current_location.hierarchy_path', read_only=True)
-    batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
     
     in_charge = serializers.SerializerMethodField()
@@ -29,7 +28,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
         model = ItemInstance
         fields = [
             'id', 'item', 'item_name', 'item_code', 'item_category_name', 'item_model_number',
-            'batch', 'batch_number', 'serial_number', 'qr_code', 'qr_code_image',
+            'serial_number', 'qr_code', 'qr_code_image',
             'current_location', 'location_name', 'location_code', 'full_location_path',
             'status', 'in_charge', 'authority_store_name', 'authority_store_code',
             'inspection_certificate', 'inspection_certificate_id', 'allocated_to', 'allocated_to_type',
@@ -54,7 +53,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             from ..models.allocation_model import StockAllocation, AllocationStatus
             obj._cached_allocation = StockAllocation.objects.filter(
                 item=obj.item,
-                batch=obj.batch,
+                batch=None,
                 status=AllocationStatus.ALLOCATED
             ).filter(
                 models.Q(allocated_to_person__isnull=False) | models.Q(allocated_to_location__isnull=False)

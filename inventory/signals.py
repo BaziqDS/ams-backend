@@ -9,9 +9,30 @@ from .models.stock_record_model import StockRecord
 from .models.instance_model import ItemInstance
 from .models.inspection_model import InspectionCertificate, InspectionItem
 from .models.batch_model import ItemBatch
+from .models.category_model import TrackingType
 from .models.history_model import MovementHistory, MovementAction
 
 logger = logging.getLogger(__name__)
+
+
+def _inspection_tracking_lot_code(certificate, inspection_item):
+    return f"{certificate.contract_no}-L{inspection_item.id}"
+
+
+def _sync_linked_receipt_item_instances(issue_item):
+    stock_entry = issue_item.stock_entry
+    if stock_entry.entry_type != 'ISSUE' or stock_entry.status == 'DRAFT' or not stock_entry.to_location or stock_entry.reference_entry:
+        return
+
+    linked_receipt = StockEntry.objects.filter(reference_entry=stock_entry, entry_type='RECEIPT').first()
+    if not linked_receipt:
+        return
+
+    receipt_item = linked_receipt.items.filter(item=issue_item.item, batch=issue_item.batch).first()
+    if not receipt_item:
+        return
+
+    receipt_item.instances.set(issue_item.instances.all())
 
 @receiver(post_save, sender=Location)
 def auto_create_store_for_standalone(sender, instance, created, **kwargs):
@@ -555,6 +576,9 @@ def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
     This fires after the serializer calls instances.set(), which happens after is_stock_recorded
     is already True, so process_single_stock_item won't re-run the COMPLETED block.
     """
+    if action in {"post_add", "post_remove", "post_clear"} and instance.stock_entry.entry_type == 'ISSUE':
+        _sync_linked_receipt_item_instances(instance)
+
     if action == "post_add" and instance.stock_entry.status == 'COMPLETED':
         entry = instance.stock_entry
         to_loc = entry.to_location
@@ -609,13 +633,20 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
 
         items_to_move = []
         for i_item in instance.items.filter(accepted_quantity__gt=0):
+            tracking_type = i_item.item.category.get_tracking_type()
             # Find or Create Batch
             batch = None
-            if i_item.batch_number:
+            if tracking_type == TrackingType.QUANTITY:
+                if not i_item.batch_number:
+                    i_item.batch_number = _inspection_tracking_lot_code(instance, i_item)
+                    i_item.save(update_fields=['batch_number'])
+
+            if tracking_type != TrackingType.INDIVIDUAL and i_item.batch_number:
                 batch, _ = ItemBatch.objects.get_or_create(
                     item=i_item.item,
                     batch_number=i_item.batch_number,
                     defaults={
+                        'manufactured_date': i_item.manufactured_date,
                         'expiry_date': i_item.expiry_date,
                         'created_by': receipt.created_by
                     }
@@ -634,18 +665,17 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                 batch=batch,
                 quantity=i_item.accepted_quantity,
                 stock_register=i_item.central_register,
-                page_number=page_no
+                page_number=page_no,
+                accepted_quantity=i_item.accepted_quantity,
             )
 
             # 2.1 Handle Individual Tracking (Instance Generation)
-            tracking_type = i_item.item.category.get_tracking_type()
-            if tracking_type == 'INDIVIDUAL':
+            if tracking_type == TrackingType.INDIVIDUAL:
                 instances = []
                 for idx in range(i_item.accepted_quantity):
                     # DO NOT auto-generate serial number - leave as NULL for store manager to assign later
                     instance_obj = ItemInstance.objects.create(
                         item=i_item.item,
-                        batch=batch,
                         serial_number=None,  # Will be assigned manually by store manager
                         inspection_certificate=receipt.inspection_certificate,  # Link to IC
                         current_location=central_store,
@@ -656,12 +686,13 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                 
                 # Link instances to the entry item
                 sei.instances.set(instances)
+                sei.accepted_instances.set(instances)
 
             items_to_move.append((
                 i_item.item, 
                 batch, 
                 i_item.accepted_quantity, 
-                (instances if tracking_type == 'INDIVIDUAL' else []),
+                (instances if tracking_type == TrackingType.INDIVIDUAL else []),
                 i_item.central_register,
                 page_no
             ))

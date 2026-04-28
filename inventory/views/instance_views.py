@@ -15,7 +15,7 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = ItemInstanceSerializer
     permission_classes = [permissions.IsAuthenticated, ItemInstancePermission]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['serial_number', 'batch_number']
+    search_fields = ['serial_number', 'qr_code']
 
     def get_queryset(self):
         # Base queryset with select_related for foreign keys (avoids N+1)
@@ -24,7 +24,6 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             'item__category',
             'current_location',
             'current_location__parent_location',
-            'batch',
             'created_by',
             'inspection_certificate'
         ).order_by('-created_at')

@@ -1,309 +1,663 @@
 #!/usr/bin/env python
 """
-AMS Initial Data Population Script
+AMS sample data population script for the current backend schema.
 
-This script populates the database with seed data using Django's ORM
-so that signals fire correctly (auto-store creation, UserProfile creation, etc.).
+Run from backend/ with:
+    python populate_data.py
 
-Run from backend/ directory with: python populate_data.py
+This script is safe to re-run on a mostly empty/dev database. It uses the
+current ORM so signals still fire for hierarchy stores, QR images, and stock
+entry receipt bridges.
 """
 
 import os
-import sys
+from datetime import timedelta
+from decimal import Decimal
+
 import django
 
-# Setup Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ams.settings')
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "ams.settings")
 django.setup()
 
-from django.contrib.auth.models import User, Group
+from django.contrib.auth.models import Group, User
 from django.core.management import call_command
+from django.db import transaction
+from django.utils import timezone
 
-from inventory.models import Location, LocationType, Category, CategoryType, TrackingType, Item
-from inventory.models import StockRegister, Person
-from user_management.models import UserProfile
+from inventory.models import (
+    Category,
+    CategoryType,
+    InspectionCertificate,
+    InspectionItem,
+    Item,
+    ItemBatch,
+    ItemInstance,
+    Location,
+    LocationType,
+    Person,
+    StockEntry,
+    StockEntryItem,
+    StockRecord,
+    StockRegister,
+    TrackingType,
+)
+
+
+def ensure_user(username, password, first_name="", last_name=""):
+    user, created = User.objects.get_or_create(
+        username=username,
+        defaults={"first_name": first_name, "last_name": last_name},
+    )
+    if created or not user.check_password(password):
+        user.set_password(password)
+    if first_name:
+        user.first_name = first_name
+    if last_name:
+        user.last_name = last_name
+    user.is_active = True
+    user.save()
+    return user
+
+
+def ensure_group_membership(user, group_name):
+    group = Group.objects.get(name=group_name)
+    user.groups.add(group)
+    return group
+
+
+def assign_locations(user, *locations):
+    profile = user.profile
+    profile.assigned_locations.set([loc for loc in locations if loc])
+    return profile
+
+
+def ensure_location(name, location_type, *, parent=None, is_standalone=False, description="", in_charge="", contact=""):
+    location, created = Location.objects.get_or_create(
+        name=name,
+        defaults={
+            "location_type": location_type,
+            "parent_location": parent,
+            "is_standalone": is_standalone,
+            "description": description,
+            "in_charge": in_charge,
+            "contact_number": contact,
+            "is_active": True,
+        },
+    )
+    if not created:
+        changed = False
+        if location.parent_location_id != (parent.id if parent else None):
+            location.parent_location = parent
+            changed = True
+        if location.location_type != location_type:
+            location.location_type = location_type
+            changed = True
+        if location.is_standalone != is_standalone:
+            location.is_standalone = is_standalone
+            changed = True
+        if description and location.description != description:
+            location.description = description
+            changed = True
+        if in_charge and location.in_charge != in_charge:
+            location.in_charge = in_charge
+            changed = True
+        if contact and location.contact_number != contact:
+            location.contact_number = contact
+            changed = True
+        if changed:
+            location.save()
+    location.refresh_from_db()
+    return location
+
+
+def ensure_category(name, *, parent=None, category_type=None, tracking_type=None, rate=None):
+    category, created = Category.objects.get_or_create(
+        name=name,
+        parent_category=parent,
+        defaults={
+            "category_type": category_type,
+            "tracking_type": tracking_type,
+            "default_depreciation_rate": rate,
+            "is_active": True,
+        },
+    )
+    if not created:
+        changed = False
+        if category.category_type != category_type:
+            category.category_type = category_type
+            changed = True
+        if category.tracking_type != tracking_type:
+            category.tracking_type = tracking_type
+            changed = True
+        if category.default_depreciation_rate != rate:
+            category.default_depreciation_rate = rate
+            changed = True
+        if changed:
+            category.save()
+    return category
+
+
+def ensure_item(name, category, *, acct_unit="Unit", description="", specifications="", threshold=0, created_by=None):
+    item, created = Item.objects.get_or_create(
+        name=name,
+        category=category,
+        defaults={
+            "acct_unit": acct_unit,
+            "description": description,
+            "specifications": specifications,
+            "low_stock_threshold": threshold,
+            "created_by": created_by,
+            "is_active": True,
+        },
+    )
+    if not created:
+        changed = False
+        updates = {
+            "acct_unit": acct_unit,
+            "description": description,
+            "specifications": specifications,
+            "low_stock_threshold": threshold,
+        }
+        for field, value in updates.items():
+            if getattr(item, field) != value:
+                setattr(item, field, value)
+                changed = True
+        if created_by and item.created_by_id != created_by.id:
+            item.created_by = created_by
+            changed = True
+        if changed:
+            item.save()
+    return item
+
+
+def ensure_register(number, register_type, store, created_by=None):
+    register, created = StockRegister.objects.get_or_create(
+        register_number=number,
+        store=store,
+        defaults={"register_type": register_type, "created_by": created_by, "is_active": True},
+    )
+    if not created and register.register_type != register_type:
+        register.register_type = register_type
+        register.save(update_fields=["register_type"])
+    return register
+
+
+def ensure_person(name, designation, department, *locations):
+    person, _ = Person.objects.get_or_create(
+        name=name,
+        defaults={"designation": designation, "department": department, "is_active": True},
+    )
+    person.designation = designation
+    person.department = department
+    person.is_active = True
+    person.save()
+    if locations:
+        person.standalone_locations.set(locations)
+    return person
+
+
+def ensure_batch(item, batch_number, *, manufactured_date=None, expiry_date=None, created_by=None):
+    batch, created = ItemBatch.objects.get_or_create(
+        item=item,
+        batch_number=batch_number,
+        defaults={
+            "manufactured_date": manufactured_date,
+            "expiry_date": expiry_date,
+            "created_by": created_by,
+            "is_active": True,
+        },
+    )
+    if not created:
+        changed = False
+        if batch.manufactured_date != manufactured_date:
+            batch.manufactured_date = manufactured_date
+            changed = True
+        if batch.expiry_date != expiry_date:
+            batch.expiry_date = expiry_date
+            changed = True
+        if created_by and batch.created_by_id != created_by.id:
+            batch.created_by = created_by
+            changed = True
+        if changed:
+            batch.save()
+    return batch
+
+
+def ensure_instance(item, serial_number, *, location, batch=None, status="AVAILABLE", created_by=None, inspection=None):
+    instance, created = ItemInstance.objects.get_or_create(
+        serial_number=serial_number,
+        defaults={
+            "item": item,
+            "batch": batch,
+            "current_location": location,
+            "status": status,
+            "created_by": created_by,
+            "inspection_certificate": inspection,
+            "is_active": True,
+        },
+    )
+    if not created:
+        changed = False
+        updates = {
+            "item": item,
+            "batch": batch,
+            "current_location": location,
+            "status": status,
+            "inspection_certificate": inspection,
+            "is_active": True,
+        }
+        for field, value in updates.items():
+            current = getattr(instance, field)
+            current_id = getattr(current, "id", current)
+            value_id = getattr(value, "id", value)
+            if current_id != value_id:
+                setattr(instance, field, value)
+                changed = True
+        if created_by and instance.created_by_id != created_by.id:
+            instance.created_by = created_by
+            changed = True
+        if changed:
+            instance.save()
+    return instance
+
+
+def ensure_stock(item, location, quantity, *, batch=None, in_transit=0, allocated=0):
+    record, _ = StockRecord.objects.get_or_create(
+        item=item,
+        location=location,
+        batch=batch,
+        defaults={"quantity": quantity, "in_transit_quantity": in_transit, "allocated_quantity": allocated},
+    )
+    updates = {
+        "quantity": quantity,
+        "in_transit_quantity": in_transit,
+        "allocated_quantity": allocated,
+    }
+    changed = False
+    for field, value in updates.items():
+        if getattr(record, field) != value:
+            setattr(record, field, value)
+            changed = True
+    if changed:
+        record.save()
+    return record
+
+
+def ensure_inspection(
+    contract_no,
+    department,
+    initiated_by,
+    stock_filled_by,
+    central_store_filled_by,
+    finance_reviewed_by,
+    items,
+):
+    today = timezone.now().date()
+    inspection, created = InspectionCertificate.objects.get_or_create(
+        contract_no=contract_no,
+        defaults={
+            "date": today - timedelta(days=15),
+            "contract_date": today - timedelta(days=20),
+            "contractor_name": "TechSource Pakistan",
+            "contractor_address": "Main Shahrah-e-Faisal, Karachi",
+            "indenter": "Procurement Cell",
+            "indent_no": "IND-AMS-2026-001",
+            "department": department,
+            "date_of_delivery": today - timedelta(days=12),
+            "delivery_type": "FULL",
+            "remarks": "Sample seeded certificate for stock intake and dashboard workflows.",
+            "inspected_by": "Inspection Committee A",
+            "date_of_inspection": today - timedelta(days=10),
+            "consignee_name": "Mr. Moin",
+            "consignee_designation": "Stock In-charge",
+            "stage": "COMPLETED",
+            "status": "COMPLETED",
+            "initiated_by": initiated_by,
+            "stock_filled_by": stock_filled_by,
+            "stock_filled_at": timezone.now() - timedelta(days=11),
+            "central_store_filled_by": central_store_filled_by,
+            "central_store_filled_at": timezone.now() - timedelta(days=9),
+            "finance_reviewed_by": finance_reviewed_by,
+            "finance_reviewed_at": timezone.now() - timedelta(days=8),
+            "finance_check_date": today - timedelta(days=8),
+        },
+    )
+    if created:
+        for payload in items:
+            InspectionItem.objects.create(inspection_certificate=inspection, **payload)
+    return inspection
+
+
+def create_completed_transfer(
+    *,
+    item,
+    batch,
+    instances,
+    quantity,
+    from_location,
+    to_location,
+    created_by,
+    source_register,
+    source_page,
+    ack_register,
+    ack_page,
+    purpose,
+    remarks,
+    inspection_certificate=None,
+):
+    existing = StockEntry.objects.filter(
+        entry_type="ISSUE",
+        from_location=from_location,
+        to_location=to_location,
+        purpose=purpose,
+    ).order_by("id").first()
+    if existing:
+        return existing
+
+    issue = StockEntry.objects.create(
+        entry_type="ISSUE",
+        from_location=from_location,
+        to_location=to_location,
+        status="PENDING_ACK",
+        created_by=created_by,
+        purpose=purpose,
+        remarks=remarks,
+        inspection_certificate=inspection_certificate,
+        entry_date=timezone.now() - timedelta(days=7),
+    )
+    issue_item = StockEntryItem.objects.create(
+        stock_entry=issue,
+        item=item,
+        batch=batch,
+        quantity=quantity,
+        stock_register=source_register,
+        page_number=source_page,
+    )
+    if instances:
+        issue_item.instances.set(instances)
+
+    receipt = StockEntry.objects.get(reference_entry=issue, entry_type="RECEIPT")
+    receipt_item = receipt.items.get(item=item, batch=batch)
+    receipt_item.ack_stock_register = ack_register
+    receipt_item.ack_page_number = ack_page
+    receipt_item.accepted_quantity = quantity
+    receipt_item.save()
+    if instances:
+        receipt_item.accepted_instances.set(instances)
+    receipt.acknowledged_by = created_by
+    receipt.acknowledged_at = timezone.now() - timedelta(days=6)
+    receipt.status = "COMPLETED"
+    receipt.save()
+    return issue
+
+
+def create_pending_allocation(
+    *,
+    item,
+    instances,
+    quantity,
+    from_location,
+    issued_to,
+    created_by,
+    source_register,
+    source_page,
+    purpose,
+    remarks,
+):
+    existing = StockEntry.objects.filter(
+        entry_type="ISSUE",
+        from_location=from_location,
+        issued_to=issued_to,
+        status="PENDING_ACK",
+        purpose=purpose,
+    ).order_by("id").first()
+    if existing:
+        return existing
+
+    entry = StockEntry.objects.create(
+        entry_type="ISSUE",
+        from_location=from_location,
+        issued_to=issued_to,
+        status="PENDING_ACK",
+        created_by=created_by,
+        purpose=purpose,
+        remarks=remarks,
+        entry_date=timezone.now() - timedelta(days=2),
+    )
+    entry_item = StockEntryItem.objects.create(
+        stock_entry=entry,
+        item=item,
+        quantity=quantity,
+        stock_register=source_register,
+        page_number=source_page,
+    )
+    if instances:
+        entry_item.instances.set(instances)
+    return entry
 
 
 def main():
-    print("=" * 60)
-    print("AMS Data Population Script")
-    print("=" * 60)
-    
-    # Step 1: Initialize Roles
-    print("\n[1/8] Initializing roles...")
-    call_command('initialize_roles')
-    print("Roles initialized.")
-    
-    # Step 2: Create Locations
-    print("\n[2/8] Creating locations...")
-    
-    # NED University (Root standalone - auto-creates "Central Store")
-    ned_university = Location.objects.create(
-        name="NED University",
-        location_type=LocationType.BUILDING,
-        is_standalone=True,
-        description="NED University of Engineering & Technology"
-    )
-    ned_university.refresh_from_db()  # Get auto_created_store reference
-    central_store = ned_university.auto_created_store
-    print(f"  Created: {ned_university.name} (code: {ned_university.code})")
-    print(f"  Auto-created store: {central_store.name} (code: {central_store.code})")
-    
-    # CSIT Department (Child standalone - auto-creates "CSIT - Main Store")
-    csit = Location.objects.create(
-        name="CSIT",
-        location_type=LocationType.DEPARTMENT,
-        parent_location=ned_university,
-        is_standalone=True,
-        description="Computer Science & Information Technology Department"
-    )
-    csit.refresh_from_db()  # Get auto_created_store reference
-    csit_main_store = csit.auto_created_store
-    print(f"  Created: {csit.name} (code: {csit.code})")
-    print(f"  Auto-created store: {csit_main_store.name} (code: {csit_main_store.code})")
-    
-    # Rooms under CSIT
-    rooms_data = ["Room 1", "Room 2", "Room 3"]
-    for room_name in rooms_data:
-        room = Location.objects.create(
-            name=room_name,
-            location_type=LocationType.ROOM,
-            parent_location=csit,
-            is_standalone=False
+    print("=" * 72)
+    print("AMS Sample Data Population")
+    print("=" * 72)
+
+    with transaction.atomic():
+        print("\n[1/9] Initializing roles and root hierarchy...")
+        call_command("initialize_roles")
+        call_command("initialize_hierarchy")
+
+        root = Location.objects.order_by("id").first()
+        if not root:
+            raise RuntimeError("Root location was not created.")
+        root.refresh_from_db()
+        central_store = root.auto_created_store
+        if not central_store:
+            raise RuntimeError("Central Store is missing after hierarchy initialization.")
+        print(f"  Root: {root.name} ({root.code})")
+        print(f"  Central Store: {central_store.name} ({central_store.code})")
+
+        print("\n[2/9] Creating organizational locations...")
+        csit = ensure_location(
+            "CSIT",
+            LocationType.DEPARTMENT,
+            parent=root,
+            is_standalone=True,
+            description="Computer Science and Information Technology Department",
+            in_charge="Dr. Mubashir",
+            contact="021-111-111",
         )
-        print(f"  Created: {room.name} (code: {room.code})")
-    
-    print(f"  Total locations created: {Location.objects.count()}")
-    
-    # Step 3: Create Users
-    print("\n[3/8] Creating users...")
-    
-    # Get groups
-    location_head_group = Group.objects.get(name="Location Head")
-    central_store_manager_group = Group.objects.get(name="Central Store Manager")
-    stock_incharge_group = Group.objects.get(name="Stock In-charge")
-    ad_finance_group = Group.objects.get(name="AD Finance")
-    
-    # Dr. Tufail - Location Head for NED University
-    user_tufail = User.objects.create_user(
-        username="mainhead",
-        first_name="Dr. Tufail",
-        last_name="",
-        password="head1234"
-    )
-    user_tufail.groups.add(location_head_group)
-    user_tufail.profile.assigned_locations.set([ned_university])
-    print(f"  Created: {user_tufail.username} (Location Head - NED University)")
-    
-    # Dr. Mubashir - Location Head for CSIT
-    user_mubashir = User.objects.create_user(
-        username="csithead",
-        first_name="Dr. Mubashir",
-        last_name="",
-        password="head1234"
-    )
-    user_mubashir.groups.add(location_head_group)
-    user_mubashir.profile.assigned_locations.set([csit])
-    print(f"  Created: {user_mubashir.username} (Location Head - CSIT)")
-    
-    # Mr. Asad - Central Store Manager
-    user_asad = User.objects.create_user(
-        username="mainstock",
-        first_name="Mr. Asad",
-        last_name="",
-        password="stock1234"
-    )
-    user_asad.groups.add(central_store_manager_group)
-    user_asad.profile.assigned_locations.set([ned_university, central_store])
-    print(f"  Created: {user_asad.username} (Central Store Manager - NED University + Central Store)")
-    
-    # Mr. Moin - Stock In-charge for CSIT
-    user_moin = User.objects.create_user(
-        username="csitstock",
-        first_name="Mr. Moin",
-        last_name="",
-        password="stock1234"
-    )
-    user_moin.groups.add(stock_incharge_group)
-    user_moin.profile.assigned_locations.set([csit, csit_main_store])
-    print(f"  Created: {user_moin.username} (Stock In-charge - CSIT + CSIT Main Store)")
-    
-    # Finance user (AD Finance)
-    user_finance = User.objects.create_user(
-        username="finance",
-        first_name="",
-        last_name="",
-        password="finance123"
-    )
-    user_finance.groups.add(ad_finance_group)
-    print(f"  Created: {user_finance.username} (AD Finance - no location)")
-    
-    print(f"  Total users created: {User.objects.count()}")
-    
-    # Step 4: Create Categories
-    print("\n[4/8] Creating categories...")
-    
-    # Parent: IT Equipments
-    it_equipments = Category.objects.create(
-        name="IT Equipments",
-        category_type=CategoryType.FIXED_ASSET,
-        default_depreciation_rate=25.00
-    )
-    print(f"  Created parent: {it_equipments.name} (type: {it_equipments.category_type}, depreciation: {it_equipments.default_depreciation_rate}%)")
-    
-    # Parent: Furniture
-    furniture = Category.objects.create(
-        name="Furniture",
-        category_type=CategoryType.FIXED_ASSET,
-        default_depreciation_rate=20.00
-    )
-    print(f"  Created parent: {furniture.name} (type: {furniture.category_type}, depreciation: {furniture.default_depreciation_rate}%)")
-    
-    # Subcategories for IT Equipments
-    it_subcategories = [
-        {"name": "Processor", "tracking_type": TrackingType.INDIVIDUAL},
-        {"name": "Keyboard", "tracking_type": TrackingType.INDIVIDUAL},
-        {"name": "Monitor", "tracking_type": TrackingType.INDIVIDUAL},
-    ]
-    for sub_data in it_subcategories:
-        sub = Category.objects.create(
-            name=sub_data["name"],
-            parent_category=it_equipments,
-            category_type=CategoryType.FIXED_ASSET,
-            tracking_type=sub_data["tracking_type"]
+        ee = ensure_location(
+            "Electrical Engineering",
+            LocationType.DEPARTMENT,
+            parent=root,
+            is_standalone=True,
+            description="Electrical Engineering Department",
+            in_charge="Dr. Noman",
+            contact="021-222-222",
         )
-        print(f"    Created subcategory: {sub.name} (tracking: {sub.tracking_type})")
-    
-    # Subcategories for Furniture
-    furniture_subcategories = [
-        {"name": "Chair", "tracking_type": TrackingType.BATCH},
-        {"name": "Table", "tracking_type": TrackingType.BATCH},
-    ]
-    for sub_data in furniture_subcategories:
-        sub = Category.objects.create(
-            name=sub_data["name"],
-            parent_category=furniture,
-            category_type=CategoryType.CONSUMABLE,  # Note: Furniture is CONSUMABLE in this subcategory
-            tracking_type=sub_data["tracking_type"]
+        csit_store = csit.auto_created_store
+        ee_store = ee.auto_created_store
+        ai_lab = ensure_location("AI Lab", LocationType.LAB, parent=csit, description="AI research lab")
+        room_101 = ensure_location("CSIT Room 101", LocationType.ROOM, parent=csit, description="Teaching room")
+        store_annex = ensure_location("CSIT Store Annex", LocationType.STORE, parent=csit_store, description="Internal CSIT store", in_charge="Mr. Moin")
+        ee_lab = ensure_location("Power Lab", LocationType.LAB, parent=ee, description="Power systems lab")
+        print(f"  Locations in system: {Location.objects.count()}")
+
+        print("\n[3/9] Creating users and assigning scopes...")
+        admin = User.objects.get(username="admin")
+        ensure_group_membership(admin, "System Admin")
+        assign_locations(admin, root, central_store)
+
+        csit_head = ensure_user("csithead", "head1234", first_name="Dr. Mubashir")
+        ensure_group_membership(csit_head, "Location Head")
+        assign_locations(csit_head, csit)
+
+        central_mgr = ensure_user("mainstock", "stock1234", first_name="Mr. Asad")
+        ensure_group_membership(central_mgr, "Central Store Manager")
+        assign_locations(central_mgr, root, central_store)
+
+        csit_stock = ensure_user("csitstock", "stock1234", first_name="Mr. Moin")
+        ensure_group_membership(csit_stock, "Stock In-charge")
+        assign_locations(csit_stock, csit, csit_store, store_annex)
+
+        finance = ensure_user("finance", "finance123", first_name="AD", last_name="Finance")
+        ensure_group_membership(finance, "AD Finance")
+
+        auditor = ensure_user("auditor", "audit1234", first_name="Internal", last_name="Audit")
+        ensure_group_membership(auditor, "Auditor")
+        print(f"  Users in system: {User.objects.count()}")
+
+        print("\n[4/9] Creating reference people...")
+        dr_umar = ensure_person("Dr. Umar Farooq", "Assistant Professor", "CSIT", csit)
+        ensure_person("Mr. Rohail Qamar", "Lecturer", "CSIT", csit)
+        ensure_person("Engr. Hina Ahmed", "Lab Engineer", "Electrical Engineering", ee)
+        ensure_person("Mr. Waqar", "Central Store Staff", "Main University", root)
+        print(f"  Persons in system: {Person.objects.count()}")
+
+        print("\n[5/9] Creating categories and items...")
+        it_parent = ensure_category("IT Equipment", category_type=CategoryType.FIXED_ASSET, rate=Decimal("25.00"))
+        furniture_parent = ensure_category("Furniture", category_type=CategoryType.FIXED_ASSET, rate=Decimal("15.00"))
+        consumables_parent = ensure_category("Consumables", category_type=CategoryType.CONSUMABLE)
+
+        processor_cat = ensure_category("Processor", parent=it_parent, category_type=CategoryType.FIXED_ASSET, tracking_type=TrackingType.INDIVIDUAL)
+        laptop_cat = ensure_category("Laptop", parent=it_parent, category_type=CategoryType.FIXED_ASSET, tracking_type=TrackingType.INDIVIDUAL)
+        chair_cat = ensure_category("Chair", parent=furniture_parent, category_type=CategoryType.FIXED_ASSET, tracking_type=TrackingType.QUANTITY)
+        cable_cat = ensure_category("Network Cable", parent=consumables_parent, category_type=CategoryType.CONSUMABLE, tracking_type=TrackingType.QUANTITY)
+
+        cpu_item = ensure_item("Core i5 Workstation", processor_cat, description="Standard desktop CPU", specifications="12th Gen / 16GB / 512GB SSD", threshold=2, created_by=admin)
+        laptop_item = ensure_item("Dell Latitude 5440", laptop_cat, description="Faculty laptop", specifications="Core i7 / 16GB / 512GB SSD", threshold=1, created_by=admin)
+        chair_item = ensure_item("Ergonomic Office Chair", chair_cat, acct_unit="Piece", description="Mesh ergonomic chair", threshold=10, created_by=admin)
+        cable_item = ensure_item("Cat6 Cable Box", cable_cat, acct_unit="Box", description="305m CAT6 network cable box", threshold=4, created_by=admin)
+        print(f"  Items in system: {Item.objects.count()}")
+
+        print("\n[6/9] Creating stock registers, batches and base stock...")
+        central_dsr = ensure_register("CENTRAL-DSR-2026", "DSR", central_store, created_by=central_mgr)
+        central_csr = ensure_register("CENTRAL-CSR-2026", "CSR", central_store, created_by=central_mgr)
+        csit_dsr = ensure_register("CSIT-DSR-2026", "DSR", csit_store, created_by=csit_stock)
+        csit_csr = ensure_register("CSIT-CSR-2026", "CSR", csit_store, created_by=csit_stock)
+        annex_csr = ensure_register("CSIT-ANNEX-CSR-2026", "CSR", store_annex, created_by=csit_stock)
+
+        chair_batch = ensure_batch(chair_item, "CH-2026-01", manufactured_date=timezone.now().date() - timedelta(days=40), created_by=central_mgr)
+        cable_batch = ensure_batch(cable_item, "CB-2026-01", manufactured_date=timezone.now().date() - timedelta(days=30), expiry_date=timezone.now().date() + timedelta(days=365), created_by=central_mgr)
+
+        ensure_stock(cpu_item, central_store, 3)
+        ensure_stock(laptop_item, central_store, 2)
+        ensure_stock(chair_item, central_store, 24, batch=chair_batch)
+        ensure_stock(cable_item, central_store, 12, batch=cable_batch)
+        ensure_stock(chair_item, csit_store, 6, batch=chair_batch)
+        ensure_stock(cable_item, csit_store, 4, batch=cable_batch)
+
+        print(f"  Stock registers in system: {StockRegister.objects.count()}")
+        print(f"  Stock records in system: {StockRecord.objects.count()}")
+
+        print("\n[7/9] Creating inspection data and tracked instances...")
+        inspection = ensure_inspection(
+            "C-AMS-2026-001",
+            csit,
+            initiated_by=csit_head,
+            stock_filled_by=csit_stock,
+            central_store_filled_by=central_mgr,
+            finance_reviewed_by=finance,
+            items=[
+                {
+                    "item": cpu_item,
+                    "item_description": "Core i5 Workstation",
+                    "item_specifications": "12th Gen / 16GB / 512GB SSD",
+                    "tendered_quantity": 2,
+                    "accepted_quantity": 2,
+                    "rejected_quantity": 0,
+                    "unit_price": Decimal("185000.00"),
+                    "remarks": "Accepted for CSIT lab use.",
+                    "stock_register": csit_dsr,
+                    "stock_register_no": csit_dsr.register_number,
+                    "stock_register_page_no": "15",
+                    "stock_entry_date": timezone.now().date() - timedelta(days=11),
+                    "central_register": central_dsr,
+                    "central_register_no": central_dsr.register_number,
+                    "central_register_page_no": "44",
+                },
+                {
+                    "item": cable_item,
+                    "item_description": "Cat6 Cable Box",
+                    "item_specifications": "305m sealed box",
+                    "tendered_quantity": 4,
+                    "accepted_quantity": 4,
+                    "rejected_quantity": 0,
+                    "unit_price": Decimal("22000.00"),
+                    "remarks": "For networking lab expansion.",
+                    "stock_register": csit_csr,
+                    "stock_register_no": csit_csr.register_number,
+                    "stock_register_page_no": "8",
+                    "stock_entry_date": timezone.now().date() - timedelta(days=11),
+                    "central_register": central_csr,
+                    "central_register_no": central_csr.register_number,
+                    "central_register_page_no": "19",
+                    "batch_number": cable_batch.batch_number,
+                    "expiry_date": cable_batch.expiry_date,
+                },
+            ],
         )
-        print(f"    Created subcategory: {sub.name} (tracking: {sub.tracking_type}, type: {sub.category_type})")
-    
-    print(f"  Total categories created: {Category.objects.count()}")
-    
-    # Step 5: Create Items
-    print("\n[5/8] Creating items...")
-    
-    # Get subcategories
-    processor_cat = Category.objects.get(name="Processor")
-    keyboard_cat = Category.objects.get(name="Keyboard")
-    
-    # Create items
-    item1 = Item.objects.create(
-        name="Core i5 Processor",
-        category=processor_cat,
-        acct_unit="Unit"
-    )
-    print(f"  Created: {item1.name} (code: {item1.code}, category: {processor_cat.name})")
-    
-    item2 = Item.objects.create(
-        name="Office Keyboard",
-        category=keyboard_cat,
-        acct_unit="Unit"
-    )
-    print(f"  Created: {item2.name} (code: {item2.code}, category: {keyboard_cat.name})")
-    
-    print(f"  Total items created: {Item.objects.count()}")
-    
-    # Step 6: Create Stock Registers
-    print("\n[6/8] Creating stock registers...")
-    
-    # CSIT Main Store registers
-    csit_csr = StockRegister.objects.create(
-        register_number="CSR2025",
-        register_type="CSR",
-        store=csit_main_store
-    )
-    print(f"  Created: {csit_csr.register_number} (type: {csit_csr.register_type}, store: {csit_main_store.name})")
-    
-    csit_dsr = StockRegister.objects.create(
-        register_number="DSR-2025",
-        register_type="DSR",
-        store=csit_main_store
-    )
-    print(f"  Created: {csit_dsr.register_number} (type: {csit_dsr.register_type}, store: {csit_main_store.name})")
-    
-    # Central Store registers
-    central_csr = StockRegister.objects.create(
-        register_number="bulk44CSR",
-        register_type="CSR",
-        store=central_store
-    )
-    print(f"  Created: {central_csr.register_number} (type: {central_csr.register_type}, store: {central_store.name})")
-    
-    central_dsr = StockRegister.objects.create(
-        register_number="bulk40DSR",
-        register_type="DSR",
-        store=central_store
-    )
-    print(f"  Created: {central_dsr.register_number} (type: {central_dsr.register_type}, store: {central_store.name})")
-    
-    print(f"  Total stock registers created: {StockRegister.objects.count()}")
-    
-    # Step 7: Create Persons
-    print("\n[7/8] Creating persons...")
-    
-    # CSIT Persons
-    person1 = Person.objects.create(
-        name="Dr. Umar Farooq",
-        designation="Assistant Professor",
-        department="CSIT"
-    )
-    person1.standalone_locations.add(csit)
-    print(f"  Created: {person1.name} (designation: {person1.designation}, location: {csit.name})")
-    
-    person2 = Person.objects.create(
-        name="Mr. Rohail Qamar",
-        designation="Lecturer",
-        department="CSIT"
-    )
-    person2.standalone_locations.add(csit)
-    print(f"  Created: {person2.name} (designation: {person2.designation}, location: {csit.name})")
-    
-    person3 = Person.objects.create(
-        name="Dr. Usman Amjad",
-        designation="Assistant Professor",
-        department="CSIT"
-    )
-    person3.standalone_locations.add(csit)
-    print(f"  Created: {person3.name} (designation: {person3.designation}, location: {csit.name})")
-    
-    # NED University Persons
-    person4 = Person.objects.create(
-        name="Mr. Waqar",
-        designation="Central Store Staff",
-        department="NED University"
-    )
-    person4.standalone_locations.add(ned_university)
-    print(f"  Created: {person4.name} (designation: {person4.designation}, location: {ned_university.name})")
-    
-    print(f"  Total persons created: {Person.objects.count()}")
-    
-    # Step 8: Summary
-    print("\n[8/8] Verification Summary")
-    print("-" * 40)
-    print(f"  Locations:      {Location.objects.count()} (expected: 8)")
-    print(f"  Users:          {User.objects.count()} (expected: 5)")
-    print(f"  Groups:         {Group.objects.count()} (expected: 6)")
-    print(f"  Categories:     {Category.objects.count()} (expected: 7)")
-    print(f"  Items:          {Item.objects.count()} (expected: 2)")
-    print(f"  Stock Registers: {StockRegister.objects.count()} (expected: 4)")
-    print(f"  Persons:        {Person.objects.count()} (expected: 4)")
-    print("-" * 40)
-    print(f"  Central Store auto-created: {central_store.name}")
-    print(f"  CSIT Main Store auto-created: {csit_main_store.name}")
-    print("=" * 60)
-    print("Data population completed successfully!")
-    print("=" * 60)
+
+        cpu_1 = ensure_instance(cpu_item, "CPU-CSIT-001", location=csit_store, created_by=central_mgr, inspection=inspection)
+        cpu_2 = ensure_instance(cpu_item, "CPU-CSIT-002", location=ai_lab, created_by=central_mgr, inspection=inspection)
+        laptop_1 = ensure_instance(laptop_item, "LAP-CSIT-001", location=central_store, created_by=central_mgr)
+        laptop_2 = ensure_instance(laptop_item, "LAP-CSIT-002", location=central_store, created_by=central_mgr)
+        print(f"  Item instances in system: {ItemInstance.objects.count()}")
+
+        print("\n[8/9] Creating live stock movements...")
+        create_completed_transfer(
+            item=laptop_item,
+            batch=None,
+            instances=[laptop_1],
+            quantity=1,
+            from_location=central_store,
+            to_location=csit_store,
+            created_by=central_mgr,
+            source_register=central_dsr,
+            source_page=21,
+            ack_register=csit_dsr,
+            ack_page=12,
+            purpose="Faculty deployment",
+            remarks="Completed transfer from Central Store to CSIT main store.",
+            inspection_certificate=inspection,
+        )
+        create_pending_allocation(
+            item=cpu_item,
+            instances=[cpu_2],
+            quantity=1,
+            from_location=csit_store,
+            issued_to=dr_umar,
+            created_by=csit_stock,
+            source_register=csit_dsr,
+            source_page=18,
+            purpose="Faculty assignment",
+            remarks="Pending handover to faculty member.",
+        )
+
+        print("\n[9/9] Summary")
+        print("-" * 48)
+        print(f"  Locations:        {Location.objects.count()}")
+        print(f"  Users:            {User.objects.count()}")
+        print(f"  Groups:           {Group.objects.count()}")
+        print(f"  Categories:       {Category.objects.count()}")
+        print(f"  Items:            {Item.objects.count()}")
+        print(f"  Registers:        {StockRegister.objects.count()}")
+        print(f"  Persons:          {Person.objects.count()}")
+        print(f"  Batches:          {ItemBatch.objects.count()}")
+        print(f"  Instances:        {ItemInstance.objects.count()}")
+        print(f"  Stock Records:    {StockRecord.objects.count()}")
+        print(f"  Inspections:      {InspectionCertificate.objects.count()}")
+        print(f"  Stock Entries:    {StockEntry.objects.count()}")
+        print("-" * 48)
+        print("  Demo users:")
+        print("    admin / admin")
+        print("    mainstock / stock1234")
+        print("    csitstock / stock1234")
+        print("    csithead / head1234")
+        print("    finance / finance123")
+        print("    auditor / audit1234")
+
+    print("\nSample data population completed.")
 
 
 if __name__ == "__main__":

@@ -55,6 +55,8 @@ class InspectionItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     item_name = serializers.CharField(source='item.name', read_only=True)
     item_code = serializers.CharField(source='item.code', read_only=True)
+    item_category_type = serializers.CharField(source='item.category.get_category_type', read_only=True)
+    item_tracking_type = serializers.CharField(source='item.category.get_tracking_type', read_only=True)
     central_register_name = serializers.CharField(source='central_register.register_number', read_only=True)
     stock_register_name = serializers.CharField(source='stock_register.register_number', read_only=True)
 
@@ -62,13 +64,14 @@ class InspectionItemSerializer(serializers.ModelSerializer):
         model = InspectionItem
         fields = (
             'id', 'inspection_certificate', 'item', 'item_name', 'item_code',
+            'item_category_type', 'item_tracking_type',
             'item_description', 'item_specifications',
             'tendered_quantity', 'accepted_quantity', 'rejected_quantity',
             'unit_price', 'remarks',
             'stock_register', 'stock_register_name', 'stock_register_no', 
             'stock_register_page_no', 'stock_entry_date',
             'central_register', 'central_register_name', 'central_register_no', 
-            'central_register_page_no', 'batch_number', 'expiry_date'
+            'central_register_page_no', 'batch_number', 'manufactured_date', 'expiry_date'
         )
         read_only_fields = ('inspection_certificate',)
 
@@ -141,6 +144,12 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
         
         return super().to_internal_value(data)
 
+    @staticmethod
+    def _initial_stage_for_department(department):
+        if department and department.hierarchy_level == 0:
+            return InspectionStage.CENTRAL_REGISTER
+        return InspectionStage.STOCK_DETAILS
+
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         is_initiated = validated_data.pop('is_initiated', False)
@@ -152,12 +161,7 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
         if is_initiated:
             validated_data['status'] = 'IN_PROGRESS'
             validated_data['initiated_at'] = timezone.now()
-            
-            department = validated_data.get('department')
-            if department and department.hierarchy_level == 0:
-                validated_data['stage'] = InspectionStage.CENTRAL_REGISTER
-            else:
-                validated_data['stage'] = InspectionStage.STOCK_DETAILS
+            validated_data['stage'] = self._initial_stage_for_department(validated_data.get('department'))
         else:
             validated_data['status'] = 'DRAFT'
             validated_data['stage'] = InspectionStage.DRAFT
@@ -193,10 +197,9 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
              if request and request.user:
                  instance.initiated_by = request.user
              
-             if instance.department.hierarchy_level == 0:
-                 instance.stage = InspectionStage.CENTRAL_REGISTER
-             else:
-                 instance.stage = InspectionStage.STOCK_DETAILS
+             instance.stage = self._initial_stage_for_department(
+                 validated_data.get('department', instance.department)
+             )
 
         with transaction.atomic():
             # Update main fields

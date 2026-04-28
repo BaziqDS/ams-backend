@@ -8,6 +8,8 @@ from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..models.item_model import Item
 from ..models.batch_model import ItemBatch
 from ..models.instance_model import ItemInstance
+from ..models.stock_record_model import StockRecord
+from ..models.category_model import CategoryType, TrackingType
 
 class PersonSerializer(serializers.ModelSerializer):
     standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
@@ -37,6 +39,8 @@ class StockEntryItemSerializer(serializers.ModelSerializer):
 
 class StockEntrySerializer(serializers.ModelSerializer):
     items = StockEntryItemSerializer(many=True)
+    inspection_certificate = serializers.PrimaryKeyRelatedField(read_only=True)
+    inspection_certificate_number = serializers.CharField(source='inspection_certificate.contract_no', read_only=True, allow_null=True)
     from_location_name = serializers.CharField(source='from_location.name', read_only=True)
     to_location_name = serializers.CharField(source='to_location.name', read_only=True)
     issued_to_name = serializers.CharField(source='issued_to.name', read_only=True, allow_null=True)
@@ -50,6 +54,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
         model = StockEntry
         fields = (
             'id', 'entry_type', 'entry_number', 'entry_date', 
+            'inspection_certificate', 'inspection_certificate_number',
             'from_location', 'from_location_name', 
             'to_location', 'to_location_name',
             'issued_to', 'issued_to_name',
@@ -60,6 +65,82 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'can_acknowledge'
         )
         read_only_fields = ('entry_number', 'created_by', 'created_at', 'acknowledged_by', 'acknowledged_at', 'cancelled_by', 'cancelled_at')
+
+    def _should_auto_split_consumable_issue_item(self, entry_type, from_location, item_data):
+        if entry_type != 'ISSUE' or not from_location:
+            return False
+
+        item = item_data.get('item')
+        batch = item_data.get('batch')
+        if not item or batch is not None:
+            return False
+
+        category = getattr(item, 'category', None)
+        if not category:
+            return False
+
+        return (
+            category.get_tracking_type() == TrackingType.QUANTITY and
+            category.get_category_type() == CategoryType.CONSUMABLE
+        )
+
+    def _expand_consumable_issue_items(self, entry_type, from_location, items_data):
+        if entry_type != 'ISSUE' or not from_location:
+            return items_data
+
+        expanded_items = []
+
+        for item_data in items_data:
+            if not self._should_auto_split_consumable_issue_item(entry_type, from_location, item_data):
+                expanded_items.append(item_data)
+                continue
+
+            item = item_data['item']
+            remaining_quantity = item_data.get('quantity') or 0
+            matched_any_batch = False
+
+            batched_records = list(
+                StockRecord.objects.filter(item=item, location=from_location)
+                .exclude(batch=None)
+                .select_related('batch')
+                .order_by('batch__created_at', 'batch_id', 'id')
+            )
+            null_batch_records = list(
+                StockRecord.objects.filter(item=item, location=from_location, batch=None)
+                .select_related('batch')
+                .order_by('id')
+            )
+
+            for record in [*batched_records, *null_batch_records]:
+                if remaining_quantity <= 0:
+                    break
+
+                available_quantity = record.available_quantity
+                if available_quantity <= 0:
+                    continue
+
+                take_quantity = min(remaining_quantity, available_quantity)
+                if take_quantity <= 0:
+                    continue
+
+                matched_any_batch = True
+                expanded_items.append({
+                    **item_data,
+                    'batch': record.batch,
+                    'quantity': take_quantity,
+                })
+                remaining_quantity -= take_quantity
+
+            if remaining_quantity > 0:
+                expanded_items.append({
+                    **item_data,
+                    'batch': None,
+                    'quantity': remaining_quantity,
+                })
+            elif not matched_any_batch:
+                expanded_items.append(item_data)
+
+        return expanded_items
 
 
     def validate(self, attrs):
@@ -163,10 +244,10 @@ class StockEntrySerializer(serializers.ModelSerializer):
         if request and request.user:
             validated_data['created_by'] = request.user
         validated_data['status'] = self._creation_status(validated_data)
-        
-        from ..models.stock_record_model import StockRecord
+
         from_location = validated_data.get('from_location')
         entry_type = validated_data.get('entry_type')
+        items_data = self._expand_consumable_issue_items(entry_type, from_location, items_data)
 
         # Validate stock availability for all items before creating anything
         if entry_type == 'ISSUE' and from_location:

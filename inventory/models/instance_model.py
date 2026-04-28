@@ -2,7 +2,6 @@
 from django.db import models
 from django.contrib.auth.models import User
 from .item_model import Item
-from .batch_model import ItemBatch
 from .location_model import Location
 
 class InstanceStatus(models.TextChoices):
@@ -20,8 +19,7 @@ class ItemInstance(models.Model):
     Individual tracked unit of an Item.
     """
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='instances')
-    batch = models.ForeignKey(ItemBatch, on_delete=models.SET_NULL, null=True, blank=True, related_name='instances')
-    
+
     # Link to inspection certificate - tracks which IC this instance came from
     inspection_certificate = models.ForeignKey(
         'InspectionCertificate',

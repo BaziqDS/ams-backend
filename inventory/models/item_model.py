@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 class Item(models.Model):
     """
     Items must be linked to sub-categories (leaf nodes).
-    Tracking type (Individual vs Batch) is inherited from the category hierarchy.
+    Tracking type (Individual vs Quantity) is inherited from the category hierarchy.
     """
     name = models.CharField(max_length=150)
     code = models.CharField(max_length=50, unique=True, blank=True)

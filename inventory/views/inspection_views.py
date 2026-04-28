@@ -4,7 +4,10 @@ from rest_framework.response import Response
 from django.utils import timezone
 from django.db import transaction, models
 from .utils import ScopedViewSetMixin
+from .distribution_views import build_hierarchical_distribution
+from ..models.category_model import CategoryType, TrackingType
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage
+from ..models.batch_model import ItemBatch
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
 
@@ -30,8 +33,12 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Filter based on user department/power level
-        return self.get_scoped_queryset(queryset, location_field='department')
+        user = self.request.user
+        if not hasattr(user, 'profile'):
+            return queryset.none()
+
+        accessible_locations = user.profile.get_user_management_locations()
+        return queryset.filter(department__in=accessible_locations).distinct()
 
     @action(detail=True, methods=['post'])
     def initiate(self, request, pk=None):
@@ -136,8 +143,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
             # Validation: Ensure Stage 2 (Departmental) info is recorded if department is not Main University
             # Check if department code is 'NED-UET' or name contains 'university'
-            is_main_uw = instance.department.code == 'NED-UET' or 'university' in instance.department.name.lower()
-            if not is_main_uw:
+            if instance.department.hierarchy_level != 0:
                 if instance.items.filter(accepted_quantity__gt=0).filter(
                     models.Q(stock_register__isnull=True) | 
                     models.Q(stock_register_page_no__isnull=True) | 
@@ -166,9 +172,19 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             ).exists():
                  return Response({'detail': 'All accepted items must have Central Register and Page Number recorded before completion.'}, status=status.HTTP_400_BAD_REQUEST)
 
+            perishable_without_batch = [
+                item.id
+                for item in instance.items.filter(accepted_quantity__gt=0).select_related('item__category')
+                if item.item
+                and item.item.category.get_category_type() == CategoryType.PERISHABLE
+                and item.item.category.get_tracking_type() == TrackingType.QUANTITY
+                and not item.batch_number
+            ]
+            if perishable_without_batch:
+                return Response({'detail': 'All accepted perishable quantity items must have a batch number before completion.'}, status=status.HTTP_400_BAD_REQUEST)
+
             # Final Validation: Ensure Stage 2 info is present if not Main University
-            is_main_uw = instance.department.code == 'NED-UET' or 'university' in instance.department.name.lower()
-            if not is_main_uw:
+            if instance.department.hierarchy_level != 0:
                 if instance.items.filter(accepted_quantity__gt=0).filter(
                     models.Q(stock_register__isnull=True) | 
                     models.Q(stock_register_page_no__isnull=True) | 
@@ -202,6 +218,63 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.rejected_at = timezone.now()
             instance.save()
             return Response(self.get_serializer(instance).data)
+
+    @action(detail=True, methods=['get'], url_path=r'items/(?P<item_id>[^/.]+)/distribution')
+    def item_distribution(self, request, pk=None, item_id=None):
+        instance = self.get_object()
+        inspection_item = instance.items.select_related('item__category').filter(pk=item_id).first()
+        if not inspection_item:
+            return Response({'detail': 'Inspection item not found for this certificate.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not inspection_item.item:
+            return Response({'detail': 'Inspection item is not linked to a catalog item.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if inspection_item.item.category.get_tracking_type() != TrackingType.QUANTITY:
+            return Response({'detail': 'Distribution tracing is available only for quantity-tracked inspection items.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not inspection_item.batch_number:
+            return Response({'detail': 'No tracking lot exists for this inspection item yet.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        batch = ItemBatch.objects.filter(
+            item=inspection_item.item,
+            batch_number=inspection_item.batch_number,
+        ).first()
+        if not batch:
+            return Response({'detail': 'Tracking lot not found for this inspection item.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'inspection': {
+                'id': instance.id,
+                'contract_no': instance.contract_no,
+                'department_id': instance.department_id,
+                'department_name': instance.department.name if instance.department else None,
+                'stage': instance.stage,
+                'status': instance.status,
+            },
+            'inspection_item': {
+                'id': inspection_item.id,
+                'item_id': inspection_item.item_id,
+                'item_name': inspection_item.item.name,
+                'item_code': inspection_item.item.code,
+                'accepted_quantity': inspection_item.accepted_quantity,
+                'tracking_type': inspection_item.item.category.get_tracking_type(),
+                'tracking_lot': inspection_item.batch_number,
+                'manufactured_date': inspection_item.manufactured_date,
+                'expiry_date': inspection_item.expiry_date,
+            },
+            'batch': {
+                'id': batch.id,
+                'batch_number': batch.batch_number,
+                'manufactured_date': batch.manufactured_date,
+                'expiry_date': batch.expiry_date,
+            },
+            'units': build_hierarchical_distribution(
+                request.user,
+                inspection_item.item_id,
+                batch_id=batch.id,
+            ),
+        })
+
     @action(detail=True, methods=['get'])
     def view_pdf(self, request, pk=None):
         instance = self.get_object()

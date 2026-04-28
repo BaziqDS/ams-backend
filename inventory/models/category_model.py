@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class TrackingType(models.TextChoices):
     INDIVIDUAL = 'INDIVIDUAL', 'Individual Tracking (Serial/QR)'
-    BATCH = 'BATCH', 'Batch Tracking (FIFO/Expiry)'
+    QUANTITY = 'QUANTITY', 'Quantity Based Tracking'
 
 class CategoryType(models.TextChoices):
     FIXED_ASSET = 'FIXED_ASSET', 'Fixed Asset'
@@ -122,7 +122,7 @@ class Category(models.Model):
         # Case 2: Subcategory
         else:
             if not self.tracking_type:
-                raise ValidationError("Subcategories must define a Tracking Type (Individual or Batch)")
+                raise ValidationError("Subcategories must define a Tracking Type (Individual or Quantity)")
             
             # Compatibility Check: No Fixed Asset under Consumable parent
             if self.category_type == CategoryType.FIXED_ASSET and self.parent_category.get_category_type() == CategoryType.CONSUMABLE:

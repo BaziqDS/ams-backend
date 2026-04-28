@@ -142,6 +142,7 @@ class InspectionItem(models.Model):
 
     # Tracking info (set at Stage 3 if item is linked)
     batch_number = models.CharField(max_length=100, blank=True, null=True)
+    manufactured_date = models.DateField(null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
 
     def clean(self):

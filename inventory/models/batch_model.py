@@ -4,7 +4,7 @@ from .item_model import Item
 
 class ItemBatch(models.Model):
     """
-    Groups items received together. Essential for Batch Tracking (FIFO/Expiry).
+    Groups quantity-tracked perishable items received together.
     """
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='batches')
     batch_number = models.CharField(max_length=100)

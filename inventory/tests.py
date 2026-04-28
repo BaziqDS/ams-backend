@@ -1,5 +1,6 @@
 # pyright: reportAttributeAccessIssue=false
 import json
+from datetime import timedelta
 
 from django.contrib.auth.models import Group, Permission, User
 from django.core.exceptions import ValidationError
@@ -13,6 +14,7 @@ from inventory.models import (
     Category,
     CategoryType,
     InspectionCertificate,
+    InspectionItem,
     InspectionStage,
     Item,
     ItemBatch,
@@ -202,9 +204,717 @@ class InspectionCertificateSerializerContractTests(TestCase):
         self.assertEqual(data['stock_filled_by_name'], 'stock.actor')
         self.assertEqual(data['central_store_filled_by_name'], 'central.actor')
         self.assertEqual(data['finance_reviewed_by_name'], 'finance.actor')
+        self.assertIsNone(data['rejected_by_name'])
         self.assertEqual(len(data['stock_entries']), 1)
         self.assertEqual(data['stock_entries'][0]['entry_type'], 'RECEIPT')
         self.assertIn('entry_number', data['stock_entries'][0])
+
+    def test_initiated_create_starts_at_stock_details_for_non_root_departments(self):
+        root = Location.objects.create(
+            name='Inspection Initiated Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        department = Location.objects.create(
+            name='Inspection Initiated Department',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+
+        serializer = InspectionCertificateSerializer(data={
+            'date': timezone.now().date().isoformat(),
+            'contract_no': 'IC-INIT-001',
+            'contract_date': timezone.now().date().isoformat(),
+            'contractor_name': 'Initiated Supplier',
+            'contractor_address': 'Block C',
+            'indenter': 'Initiated Indenter',
+            'indent_no': 'IND-INIT-1',
+            'department': department.id,
+            'date_of_delivery': timezone.now().date().isoformat(),
+            'delivery_type': 'FULL',
+            'remarks': '',
+            'inspected_by': 'Initiated Inspector',
+            'date_of_inspection': timezone.now().date().isoformat(),
+            'consignee_name': 'Initiated Consignee',
+            'consignee_designation': 'Manager',
+            'is_initiated': True,
+            'items': [
+                {
+                    'item': None,
+                    'item_description': 'Initiated line item',
+                    'item_specifications': '',
+                    'tendered_quantity': 1,
+                    'accepted_quantity': 1,
+                    'rejected_quantity': 0,
+                    'unit_price': '10.00',
+                    'remarks': '',
+                }
+            ],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        certificate = serializer.save()
+
+        self.assertEqual(certificate.stage, InspectionStage.STOCK_DETAILS)
+        self.assertEqual(certificate.status, 'IN_PROGRESS')
+
+    def test_initiated_create_skips_stock_details_for_root_departments(self):
+        department = Location.objects.create(
+            name='Inspection Root Department',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+
+        serializer = InspectionCertificateSerializer(data={
+            'date': timezone.now().date().isoformat(),
+            'contract_no': 'IC-INIT-ROOT-001',
+            'contract_date': timezone.now().date().isoformat(),
+            'contractor_name': 'Root Supplier',
+            'contractor_address': 'Block R',
+            'indenter': 'Root Indenter',
+            'indent_no': 'IND-INIT-ROOT-1',
+            'department': department.id,
+            'date_of_delivery': timezone.now().date().isoformat(),
+            'delivery_type': 'FULL',
+            'remarks': '',
+            'inspected_by': 'Root Inspector',
+            'date_of_inspection': timezone.now().date().isoformat(),
+            'consignee_name': 'Root Consignee',
+            'consignee_designation': 'Manager',
+            'is_initiated': True,
+            'items': [
+                {
+                    'item': None,
+                    'item_description': 'Root line item',
+                    'item_specifications': '',
+                    'tendered_quantity': 1,
+                    'accepted_quantity': 1,
+                    'rejected_quantity': 0,
+                    'unit_price': '10.00',
+                    'remarks': '',
+                }
+            ],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        certificate = serializer.save()
+
+        self.assertEqual(certificate.stage, InspectionStage.CENTRAL_REGISTER)
+        self.assertEqual(certificate.status, 'IN_PROGRESS')
+
+    def test_non_initiated_create_stays_draft(self):
+        department = Location.objects.create(
+            name='Inspection Draft Department',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+
+        serializer = InspectionCertificateSerializer(data={
+            'date': timezone.now().date().isoformat(),
+            'contract_no': 'IC-DRAFT-001',
+            'contract_date': timezone.now().date().isoformat(),
+            'contractor_name': 'Draft Supplier',
+            'contractor_address': 'Block D',
+            'indenter': 'Draft Indenter',
+            'indent_no': 'IND-DRAFT-1',
+            'department': department.id,
+            'date_of_delivery': timezone.now().date().isoformat(),
+            'delivery_type': 'FULL',
+            'remarks': '',
+            'inspected_by': 'Draft Inspector',
+            'date_of_inspection': timezone.now().date().isoformat(),
+            'consignee_name': 'Draft Consignee',
+            'consignee_designation': 'Manager',
+            'items': [
+                {
+                    'item': None,
+                    'item_description': 'Draft line item',
+                    'item_specifications': '',
+                    'tendered_quantity': 1,
+                    'accepted_quantity': 1,
+                    'rejected_quantity': 0,
+                    'unit_price': '10.00',
+                    'remarks': '',
+                }
+            ],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        certificate = serializer.save()
+
+        self.assertEqual(certificate.stage, InspectionStage.DRAFT)
+        self.assertEqual(certificate.status, 'DRAFT')
+
+
+class InspectionCertificateApiScopeTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Inspection Scope Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.electrical = Location.objects.create(
+            name='Inspection Scope Electrical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='Inspection Scope CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.electrical_certificate = cls._certificate('IC-SCOPE-EE', cls.electrical)
+        cls.csit_certificate = cls._certificate('IC-SCOPE-CSIT', cls.csit)
+
+    @classmethod
+    def _certificate(cls, contract_no, department):
+        return InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no=contract_no,
+            contract_date=timezone.now().date(),
+            contractor_name='Scope Supplier',
+            contractor_address='Block A',
+            indenter='Scope Indenter',
+            indent_no=f'IND-{contract_no}',
+            department=department,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='',
+            inspected_by='Scope Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Scope Consignee',
+            consignee_designation='Manager',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username, assigned_location):
+        user = User.objects.create_user(username=username, password='pw')
+        user.user_permissions.add(self._perm('view_inspectioncertificate'))
+        user.profile.assigned_locations.add(assigned_location)
+        return user
+
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and 'results' in data:
+            return data['results']
+        return data
+
+    def test_root_assigned_user_sees_all_inspections_without_distribution_permissions(self):
+        user = self._make_user('inspection_root_scope', self.root)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/inspections/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.electrical_certificate.id, returned_ids)
+        self.assertIn(self.csit_certificate.id, returned_ids)
+
+    def test_standalone_assigned_user_sees_only_own_location_inspections(self):
+        user = self._make_user('inspection_standalone_scope', self.electrical)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/inspections/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.electrical_certificate.id, returned_ids)
+        self.assertNotIn(self.csit_certificate.id, returned_ids)
+
+
+class InspectionRootWorkflowTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.root = Location.objects.create(
+            name='Root Campus',
+            code='ROOT-CAMPUS',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        self.central_register = StockRegister.objects.create(
+            register_number='ROOT-CENTRAL-1',
+            store=self.root.auto_created_store,
+            register_type='CSR',
+        )
+
+        asset_parent = Category.objects.create(
+            name='Root Workflow Assets',
+            code='ROOT-WF-ASSET',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        asset_child = Category.objects.create(
+            name='Root Workflow Individual Assets',
+            code='ROOT-WF-IND',
+            parent_category=asset_parent,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        self.item = Item.objects.create(
+            name='Root Workflow Laptop',
+            category=asset_child,
+            acct_unit='Nos',
+        )
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username, *perm_codenames):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(self.root)
+        for codename in perm_codenames:
+            user.user_permissions.add(self._perm(codename))
+        return user
+
+    def _make_certificate(self, stage):
+        certificate = InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no=f'IC-ROOT-WF-{stage}',
+            contract_date=timezone.now().date(),
+            contractor_name='Root Workflow Supplier',
+            contractor_address='Block A',
+            indenter='Root Workflow Indenter',
+            indent_no=f'IND-ROOT-WF-{stage}',
+            department=self.root,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='',
+            inspected_by='Root Workflow Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Root Workflow Consignee',
+            consignee_designation='Manager',
+            stage=stage,
+            status='IN_PROGRESS',
+        )
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.item,
+            item_description='Root workflow line item',
+            tendered_quantity=1,
+            accepted_quantity=1,
+            rejected_quantity=0,
+            unit_price='10.00',
+            central_register=self.central_register,
+            central_register_no=self.central_register.register_number,
+            central_register_page_no='11',
+        )
+        return certificate
+
+    def test_root_departments_can_submit_to_finance_without_stock_details_register(self):
+        certificate = self._make_certificate(InspectionStage.CENTRAL_REGISTER)
+        user = self._make_user(
+            'root.workflow.central',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_central_register',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/submit_to_finance_review/'
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.FINANCE_REVIEW)
+
+    def test_root_departments_can_complete_without_stock_details_register(self):
+        certificate = self._make_certificate(InspectionStage.FINANCE_REVIEW)
+        user = self._make_user(
+            'root.workflow.finance',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'review_finance',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.COMPLETED)
+        self.assertEqual(certificate.status, 'COMPLETED')
+
+
+class InspectionTrackingIntakeTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Tracking Intake University',
+            code='TRACK-ROOT',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.department = Location.objects.create(
+            name='Tracking Intake Department',
+            code='TRACK-DEPT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.user = User.objects.create_superuser(username='tracking.intake', password='pw')
+        cls.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label='inventory', codename='view_inspectioncertificate'),
+            Permission.objects.get(content_type__app_label='inventory', codename='review_finance'),
+        )
+        cls.user.profile.assigned_locations.add(cls.root)
+        cls.register = StockRegister.objects.create(
+            register_number='TRACK-REG-1',
+            store=cls.root.auto_created_store,
+            register_type='CENTRAL',
+            created_by=cls.user,
+        )
+
+        cls.asset_parent = Category.objects.create(
+            name='Tracking Intake Assets',
+            code='TRACK-ASSET',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        cls.asset_child = Category.objects.create(
+            name='Tracking Intake Individual Assets',
+            code='TRACK-IND',
+            parent_category=cls.asset_parent,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        cls.asset_item = Item.objects.create(
+            name='Tracked Processor',
+            code='TRACK-CPU',
+            category=cls.asset_child,
+            acct_unit='unit',
+        )
+
+        cls.perishable_parent = Category.objects.create(
+            name='Tracking Intake Perishables',
+            code='TRACK-PER',
+            category_type=CategoryType.PERISHABLE,
+        )
+        cls.perishable_child = Category.objects.create(
+            name='Tracking Intake Chemicals',
+            code='TRACK-CHEM',
+            parent_category=cls.perishable_parent,
+            category_type=CategoryType.PERISHABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        cls.perishable_item = Item.objects.create(
+            name='Tracked Chemical',
+            code='TRACK-CHEM-ITM',
+            category=cls.perishable_child,
+            acct_unit='bottle',
+        )
+
+        cls.consumable_parent = Category.objects.create(
+            name='Tracking Intake Consumables',
+            code='TRACK-CON',
+            category_type=CategoryType.CONSUMABLE,
+        )
+        cls.consumable_child = Category.objects.create(
+            name='Tracking Intake Stationery',
+            code='TRACK-STAPLE',
+            parent_category=cls.consumable_parent,
+            category_type=CategoryType.CONSUMABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        cls.consumable_item = Item.objects.create(
+            name='Tracked Stapler Box',
+            code='TRACK-STAPLER',
+            category=cls.consumable_child,
+            acct_unit='box',
+        )
+
+    def _certificate(self, contract_no):
+        return InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no=contract_no,
+            contract_date=timezone.now().date(),
+            contractor_name='Tracking Supplier',
+            contractor_address='Block T',
+            indenter='Tracking Indenter',
+            indent_no=f'IND-{contract_no}',
+            department=self.department,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='Tracking intake',
+            inspected_by='Tracking Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Tracking Consignee',
+            consignee_designation='Manager',
+            stage=InspectionStage.FINANCE_REVIEW,
+            status='IN_PROGRESS',
+            initiated_by=self.user,
+            stock_filled_by=self.user,
+            central_store_filled_by=self.user,
+        )
+
+    def test_individual_inspection_intake_creates_batchless_instances(self):
+        certificate = self._certificate('TRACK-IC-IND-001')
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.asset_item,
+            item_description='Processors',
+            tendered_quantity=2,
+            accepted_quantity=2,
+            rejected_quantity=0,
+            unit_price=100,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+            batch_number='IGNORED-FOR-INDIVIDUAL',
+            expiry_date=timezone.now().date(),
+        )
+
+        certificate.status = 'COMPLETED'
+        certificate.stage = InspectionStage.COMPLETED
+        certificate.finance_reviewed_by = self.user
+        certificate.finance_reviewed_at = timezone.now()
+        certificate.save()
+
+        instances = ItemInstance.objects.filter(item=self.asset_item)
+        self.assertEqual(instances.count(), 2)
+        self.assertNotIn('batch', {field.name for field in ItemInstance._meta.get_fields()})
+        self.assertFalse(ItemBatch.objects.filter(item=self.asset_item).exists())
+        receipt_item = StockEntryItem.objects.get(
+            stock_entry__inspection_certificate=certificate,
+            stock_entry__entry_type='RECEIPT',
+            stock_entry__from_location__isnull=True,
+            item=self.asset_item,
+        )
+        self.assertEqual(receipt_item.accepted_quantity, 2)
+        self.assertEqual(receipt_item.stock_register, self.register)
+        self.assertEqual(receipt_item.page_number, 1)
+        self.assertEqual(receipt_item.accepted_instances.count(), 2)
+
+    def test_perishable_quantity_inspection_persists_manufactured_and_expiry_dates_to_batch(self):
+        certificate = self._certificate('TRACK-IC-PER-002')
+        manufactured_date = timezone.now().date() - timedelta(days=30)
+        expiry_date = timezone.now().date() + timedelta(days=180)
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.perishable_item,
+            item_description='Chemicals',
+            tendered_quantity=3,
+            accepted_quantity=3,
+            rejected_quantity=0,
+            unit_price=10,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+            batch_number='TRACK-BATCH-001',
+            manufactured_date=manufactured_date,
+            expiry_date=expiry_date,
+        )
+
+        certificate.status = 'COMPLETED'
+        certificate.stage = InspectionStage.COMPLETED
+        certificate.finance_reviewed_by = self.user
+        certificate.finance_reviewed_at = timezone.now()
+        certificate.save()
+
+        batch = ItemBatch.objects.get(item=self.perishable_item, batch_number='TRACK-BATCH-001')
+        self.assertEqual(batch.manufactured_date, manufactured_date)
+        self.assertEqual(batch.expiry_date, expiry_date)
+
+    def test_batch_listing_exposes_quantity_for_item_and_location_scopes(self):
+        batch = ItemBatch.objects.create(
+            item=self.perishable_item,
+            batch_number='TRACK-BATCH-003',
+            created_by=self.user,
+        )
+        StockRecord.objects.create(
+            item=self.perishable_item,
+            batch=batch,
+            location=self.root.auto_created_store,
+            quantity=2,
+        )
+        StockRecord.objects.create(
+            item=self.perishable_item,
+            batch=batch,
+            location=self.department.auto_created_store,
+            quantity=3,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.get('/api/inventory/item-batches/', {
+            'item': self.perishable_item.id,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.data['results'] if isinstance(response.data, dict) and 'results' in response.data else response.data
+        batch_row = next(row for row in payload if row['batch_number'] == 'TRACK-BATCH-003')
+        self.assertEqual(batch_row['quantity'], 5)
+        self.assertEqual(batch_row['available_quantity'], 5)
+        self.assertEqual(batch_row['allocated_quantity'], 0)
+        self.assertEqual(batch_row['in_transit_quantity'], 0)
+
+        scoped_response = client.get('/api/inventory/item-batches/', {
+            'item': self.perishable_item.id,
+            'location': self.department.auto_created_store.id,
+        })
+
+        self.assertEqual(scoped_response.status_code, 200)
+        scoped_payload = scoped_response.data['results'] if isinstance(scoped_response.data, dict) and 'results' in scoped_response.data else scoped_response.data
+        scoped_batch_row = next(row for row in scoped_payload if row['batch_number'] == 'TRACK-BATCH-003')
+        self.assertEqual(scoped_batch_row['quantity'], 3)
+        self.assertEqual(scoped_batch_row['available_quantity'], 3)
+
+    def test_perishable_quantity_inspection_requires_batch_number_before_completion(self):
+        certificate = self._certificate('TRACK-IC-PER-001')
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.perishable_item,
+            item_description='Chemicals',
+            tendered_quantity=3,
+            accepted_quantity=3,
+            rejected_quantity=0,
+            unit_price=10,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('batch number', response.data['detail'].lower())
+
+    def test_consumable_quantity_inspection_auto_generates_tracking_lot(self):
+        certificate = self._certificate('TRACK-IC-CON-001')
+        inspection_item = InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.consumable_item,
+            item_description='Staplers',
+            tendered_quantity=10,
+            accepted_quantity=10,
+            rejected_quantity=0,
+            unit_price=10,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+        )
+
+        certificate.status = 'COMPLETED'
+        certificate.stage = InspectionStage.COMPLETED
+        certificate.finance_reviewed_by = self.user
+        certificate.finance_reviewed_at = timezone.now()
+        certificate.save()
+
+        inspection_item.refresh_from_db()
+        self.assertEqual(inspection_item.batch_number, f'{certificate.contract_no}-L{inspection_item.id}')
+
+        batch = ItemBatch.objects.get(item=self.consumable_item, batch_number=inspection_item.batch_number)
+        self.assertTrue(
+            StockEntryItem.objects.filter(
+                stock_entry__inspection_certificate=certificate,
+                item=self.consumable_item,
+                batch=batch,
+            ).exists()
+        )
+        receipt_item = StockEntryItem.objects.get(
+            stock_entry__inspection_certificate=certificate,
+            stock_entry__entry_type='RECEIPT',
+            stock_entry__from_location__isnull=True,
+            item=self.consumable_item,
+            batch=batch,
+        )
+        self.assertEqual(receipt_item.accepted_quantity, 10)
+        self.assertEqual(receipt_item.stock_register, self.register)
+        self.assertEqual(receipt_item.page_number, 1)
+
+    def test_inspection_item_distribution_endpoint_returns_quantity_lot_breakdown(self):
+        certificate = self._certificate('TRACK-IC-CON-002')
+        inspection_item = InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.consumable_item,
+            item_description='Staplers',
+            tendered_quantity=10,
+            accepted_quantity=10,
+            rejected_quantity=0,
+            unit_price=10,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+        )
+
+        certificate.status = 'COMPLETED'
+        certificate.stage = InspectionStage.COMPLETED
+        certificate.finance_reviewed_by = self.user
+        certificate.finance_reviewed_at = timezone.now()
+        certificate.save()
+
+        inspection_item.refresh_from_db()
+        batch = ItemBatch.objects.get(item=self.consumable_item, batch_number=inspection_item.batch_number)
+
+        StockRecord.objects.filter(item=self.consumable_item, batch=batch).delete()
+        StockAllocation.objects.filter(item=self.consumable_item, batch=batch).delete()
+
+        StockRecord.objects.create(
+            item=self.consumable_item,
+            batch=batch,
+            location=self.root.auto_created_store,
+            quantity=4,
+            allocated_quantity=0,
+            in_transit_quantity=1,
+        )
+        StockRecord.objects.create(
+            item=self.consumable_item,
+            batch=batch,
+            location=self.department.auto_created_store,
+            quantity=6,
+            allocated_quantity=2,
+            in_transit_quantity=0,
+        )
+        person = Person.objects.create(name='Lab Attendant', designation='Attendant')
+        person.standalone_locations.add(self.department)
+        allocation = StockAllocation.objects.create(
+            item=self.consumable_item,
+            batch=batch,
+            source_location=self.department.auto_created_store,
+            quantity=2,
+            allocated_to_person=person,
+            status=AllocationStatus.ALLOCATED,
+            allocated_by=self.user,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.get(
+            f'/api/inventory/inspections/{certificate.id}/items/{inspection_item.id}/distribution/'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['inspection']['id'], certificate.id)
+        self.assertEqual(response.data['inspection_item']['id'], inspection_item.id)
+        self.assertEqual(response.data['inspection_item']['tracking_lot'], inspection_item.batch_number)
+        self.assertEqual(response.data['batch']['id'], batch.id)
+        self.assertEqual(response.data['batch']['batch_number'], inspection_item.batch_number)
+
+        root_unit = next(unit for unit in response.data['units'] if unit['id'] == self.root.id)
+        self.assertEqual(root_unit['totalQuantity'], 4)
+        self.assertEqual(root_unit['inTransitQuantity'], 1)
+        self.assertEqual(root_unit['stores'][0]['batchId'], batch.id)
+        self.assertEqual(root_unit['stores'][0]['batchNumber'], inspection_item.batch_number)
+
+        department_unit = next(unit for unit in response.data['units'] if unit['id'] == self.department.id)
+        self.assertEqual(department_unit['totalQuantity'], 6)
+        self.assertEqual(department_unit['allocatedQuantity'], 2)
+        self.assertEqual(department_unit['allocations'][0]['id'], allocation.id)
+        self.assertEqual(department_unit['allocations'][0]['targetName'], 'Lab Attendant')
+        self.assertEqual(department_unit['allocations'][0]['batchId'], batch.id)
 
 
 class StockRegisterDomainPermissionBootstrapTests(TestCase):
@@ -884,7 +1594,7 @@ class CategoryApiDomainPermissionTests(TestCase):
         self.client.force_authenticate(user=user)
         resp = self.client.patch(
             f'/api/inventory/categories/{child.id}/',
-            {'tracking_type': TrackingType.BATCH},
+            {'tracking_type': TrackingType.QUANTITY},
             format='json',
         )
 
@@ -936,7 +1646,6 @@ class ItemApiDomainPermissionTests(TestCase):
         )
         cls.instance = ItemInstance.objects.create(
             item=cls.item,
-            batch=cls.batch,
             current_location=cls.store,
             serial_number='CPU-001',
         )
@@ -1056,6 +1765,37 @@ class ItemApiDomainPermissionTests(TestCase):
         returned_ids = {row['id'] for row in resp.data}
         self.assertIn(self.csit.id, returned_ids)
 
+    def test_distribution_hierarchical_aggregates_store_rows_across_batches_for_same_location(self):
+        user = self._make_user('item_distribution_aggregate')
+        user.user_permissions.add(self._perm('view_items'))
+        StockRecord.objects.create(
+            item=self.item,
+            batch=None,
+            location=self.store,
+            quantity=4,
+            allocated_quantity=1,
+            in_transit_quantity=1,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/distribution/hierarchical/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        unit = next(row for row in resp.data if row['id'] == self.csit.id)
+
+        self.assertEqual(unit['totalQuantity'], 9)
+        self.assertEqual(unit['availableQuantity'], 5)
+        self.assertEqual(unit['allocatedQuantity'], 3)
+        self.assertEqual(unit['inTransitQuantity'], 1)
+        self.assertEqual(len(unit['stores']), 1)
+        self.assertEqual(unit['stores'][0]['locationId'], self.store.id)
+        self.assertEqual(unit['stores'][0]['quantity'], 9)
+        self.assertEqual(unit['stores'][0]['availableQuantity'], 5)
+        self.assertEqual(unit['stores'][0]['allocatedTotal'], 3)
+        self.assertEqual(unit['stores'][0]['inTransitQuantity'], 1)
+        self.assertIsNone(unit['stores'][0]['batchId'])
+        self.assertIsNone(unit['stores'][0]['batchNumber'])
+
     def test_batches_allow_domain_view_items_perm(self):
         user = self._make_user('item_batch_view')
         user.user_permissions.add(self._perm('view_items'))
@@ -1129,22 +1869,57 @@ class StockEntryApiDomainPermissionTests(TestCase):
             name='Stock Entry Mouse',
             parent_category=cls.parent_category,
             category_type=CategoryType.FIXED_ASSET,
-            tracking_type=TrackingType.BATCH,
+            tracking_type=TrackingType.QUANTITY,
         )
         cls.item = Item.objects.create(
             name='USB Mouse',
             category=cls.subcategory,
             acct_unit='unit',
         )
+        cls.consumable_parent_category = Category.objects.create(
+            name='Stock Entry Office Supplies',
+            category_type=CategoryType.CONSUMABLE,
+        )
+        cls.consumable_subcategory = Category.objects.create(
+            name='Stock Entry Staplers',
+            parent_category=cls.consumable_parent_category,
+            category_type=CategoryType.CONSUMABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        cls.consumable_item = Item.objects.create(
+            name='Stapler Box',
+            category=cls.consumable_subcategory,
+            acct_unit='box',
+        )
         cls.batch = ItemBatch.objects.create(
             item=cls.item,
             batch_number='MOUSE-B1',
+        )
+        cls.consumable_batch_a = ItemBatch.objects.create(
+            item=cls.consumable_item,
+            batch_number='STAPLER-B1',
+        )
+        cls.consumable_batch_b = ItemBatch.objects.create(
+            item=cls.consumable_item,
+            batch_number='STAPLER-B2',
         )
         cls.source_stock = StockRecord.objects.create(
             item=cls.item,
             batch=cls.batch,
             location=cls.store,
             quantity=10,
+        )
+        cls.consumable_stock_a = StockRecord.objects.create(
+            item=cls.consumable_item,
+            batch=cls.consumable_batch_a,
+            location=cls.store,
+            quantity=4,
+        )
+        cls.consumable_stock_b = StockRecord.objects.create(
+            item=cls.consumable_item,
+            batch=cls.consumable_batch_b,
+            location=cls.store,
+            quantity=6,
         )
         cls.entry = StockEntry.objects.create(
             entry_type='ISSUE',
@@ -1184,6 +1959,29 @@ class StockEntryApiDomainPermissionTests(TestCase):
                     'item': self.item.id,
                     'batch': self.batch.id,
                     'quantity': 1,
+                    'instances': [],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+    def _consumable_payload(self, *, quantity=1, to_location=None, issued_to=None, purpose='Consumable movement'):
+        return {
+            'entry_type': 'ISSUE',
+            'from_location': self.store.id,
+            'to_location': to_location,
+            'issued_to': issued_to,
+            'status': 'DRAFT',
+            'purpose': purpose,
+            'remarks': '',
+            'items': [
+                {
+                    'item': self.consumable_item.id,
+                    'batch': None,
+                    'quantity': quantity,
                     'instances': [],
                     'stock_register': None,
                     'page_number': None,
@@ -1306,6 +2104,73 @@ class StockEntryApiDomainPermissionTests(TestCase):
 
         self.assertEqual(resp.status_code, 201)
 
+    def test_create_issue_auto_splits_consumable_quantity_across_internal_batches(self):
+        user = self._make_user('stock_entry_consumable_batchless_transfer')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._consumable_payload(
+            quantity=7,
+            to_location=self.child_store.id,
+            purpose='Consumable transfer without explicit batch',
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'PENDING_ACK')
+
+        issue = StockEntry.objects.get(id=resp.data['id'])
+        issue_items = list(issue.items.order_by('batch_id'))
+        self.assertEqual(
+            [(item.batch.batch_number if item.batch else None, item.quantity) for item in issue_items],
+            [('STAPLER-B1', 4), ('STAPLER-B2', 3)],
+        )
+
+        linked_receipt = StockEntry.objects.get(reference_entry=issue, entry_type='RECEIPT')
+        linked_items = list(linked_receipt.items.order_by('batch_id'))
+        self.assertEqual(
+            [(item.batch.batch_number if item.batch else None, item.quantity) for item in linked_items],
+            [('STAPLER-B1', 4), ('STAPLER-B2', 3)],
+        )
+
+        self.consumable_stock_a.refresh_from_db()
+        self.consumable_stock_b.refresh_from_db()
+        self.assertEqual(self.consumable_stock_a.in_transit_quantity, 4)
+        self.assertEqual(self.consumable_stock_b.in_transit_quantity, 3)
+
+    def test_create_allocation_auto_splits_consumable_quantity_across_internal_batches(self):
+        user = self._make_user('stock_entry_consumable_batchless_allocation')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._consumable_payload(
+            quantity=8,
+            issued_to=self.person.id,
+            purpose='Consumable allocation without explicit batch',
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'COMPLETED')
+
+        entry = StockEntry.objects.get(id=resp.data['id'])
+        entry_items = list(entry.items.order_by('batch_id'))
+        self.assertEqual(
+            [(item.batch.batch_number if item.batch else None, item.quantity) for item in entry_items],
+            [('STAPLER-B1', 4), ('STAPLER-B2', 4)],
+        )
+
+        allocations = list(StockAllocation.objects.filter(stock_entry=entry).order_by('batch_id'))
+        self.assertEqual(
+            [(allocation.batch.batch_number if allocation.batch else None, allocation.quantity) for allocation in allocations],
+            [('STAPLER-B1', 4), ('STAPLER-B2', 4)],
+        )
+
+        self.consumable_stock_a.refresh_from_db()
+        self.consumable_stock_b.refresh_from_db()
+        self.assertEqual(self.consumable_stock_a.allocated_quantity, 4)
+        self.assertEqual(self.consumable_stock_b.allocated_quantity, 4)
+
     def test_create_forces_store_transfer_issue_to_pending_ack_and_creates_pending_receipt(self):
         user = self._make_user('stock_entry_force_pending_ack')
         user.user_permissions.add(self._perm('create_stock_entries'))
@@ -1354,16 +2219,118 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(linked_receipt.status, 'COMPLETED')
         self.assertEqual(parent_issue.status, 'COMPLETED')
 
+    def test_issue_create_syncs_individual_instances_to_linked_receipt_and_acknowledge_self_heals_missing_receipt_instances(self):
+        user = self._make_user('stock_entry_individual_sync')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        ack_register = self._register(self.child_store, 'ACK-IND-1')
+
+        individual_parent = Category.objects.create(
+            name='Stock Entry Individual Hardware',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        individual_category = Category.objects.create(
+            name='Stock Entry Individual Device',
+            parent_category=individual_parent,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        individual_item = Item.objects.create(
+            name='Portable Device',
+            category=individual_category,
+            acct_unit='unit',
+        )
+        instance = ItemInstance.objects.create(
+            item=individual_item,
+            current_location=self.store,
+            status='AVAILABLE',
+            created_by=user,
+        )
+
+        payload = {
+            'entry_type': 'ISSUE',
+            'from_location': self.store.id,
+            'to_location': self.child_store.id,
+            'status': 'DRAFT',
+            'purpose': 'Individual transfer sync',
+            'remarks': '',
+            'items': [
+                {
+                    'item': individual_item.id,
+                    'batch': None,
+                    'quantity': 1,
+                    'instances': [instance.id],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+        self.client.force_authenticate(user=user)
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(create_resp.status_code, 201)
+        linked_receipt = StockEntry.objects.get(reference_entry_id=create_resp.data['id'], entry_type='RECEIPT')
+        receipt_item = linked_receipt.items.get(item=individual_item)
+        self.assertEqual(list(receipt_item.instances.values_list('id', flat=True)), [instance.id])
+
+        receipt_item.instances.clear()
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{linked_receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': 1,
+                        'instances': [instance.id],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 1,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(ack_resp.status_code, 200)
+        receipt_item.refresh_from_db()
+        self.assertEqual(list(receipt_item.instances.values_list('id', flat=True)), [instance.id])
+        self.assertEqual(list(receipt_item.accepted_instances.values_list('id', flat=True)), [instance.id])
+
     def test_detail_includes_acknowledgement_audit_fields(self):
         user = self._make_user('stock_entry_detail_audit')
         user.user_permissions.add(self._perm('view_stock_entries'))
         user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        certificate = InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no='IC-STOCK-DETAIL-001',
+            contract_date=timezone.now().date(),
+            contractor_name='Detail Supplier',
+            contractor_address='Block D',
+            indenter='Detail Indenter',
+            indent_no='IND-DETAIL-1',
+            department=self.csit,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='Detail link check',
+            inspected_by='Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Consignee',
+            consignee_designation='Manager',
+            stage=InspectionStage.FINANCE_REVIEW,
+            status='IN_PROGRESS',
+            initiated_by=user,
+            stock_filled_by=user,
+            central_store_filled_by=user,
+        )
         receipt = StockEntry.objects.create(
             entry_type='RECEIPT',
             from_location=self.store,
             to_location=self.child_store,
             status='COMPLETED',
             reference_entry=self.entry,
+            inspection_certificate=certificate,
             acknowledged_by=user,
         )
 
@@ -1374,6 +2341,8 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertIn('reference_entry', resp.data)
         self.assertIn('acknowledged_at', resp.data)
         self.assertIn('acknowledged_by_name', resp.data)
+        self.assertEqual(resp.data['inspection_certificate'], certificate.id)
+        self.assertEqual(resp.data['inspection_certificate_number'], 'IC-STOCK-DETAIL-001')
 
     def test_partial_receipt_acknowledgement_records_accepted_quantity_and_creates_pending_return(self):
         user = self._make_user('stock_entry_partial_acknowledger')

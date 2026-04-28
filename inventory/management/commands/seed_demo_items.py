@@ -156,9 +156,9 @@ class Command(BaseCommand):
         processor_cat = self.category("Processor", "SUB-0002", fixed_assets, "FIXED_ASSET", "INDIVIDUAL")
         desktop_cat = self.category("Desktop Computer", "SUB-DESKTOP", fixed_assets, "FIXED_ASSET", "INDIVIDUAL")
         network_cat = self.category("Network Equipment", "SUB-NETWORK", fixed_assets, "FIXED_ASSET", "INDIVIDUAL")
-        keyboard_cat = self.category("Keyboard", "SUB-0003", fixed_assets, "FIXED_ASSET", "BATCH")
-        toner_cat = self.category("Printer Toner", "SUB-TONER", consumables, "CONSUMABLE", "BATCH")
-        paper_cat = self.category("Printer Paper", "SUB-PAPER", consumables, "CONSUMABLE", "BATCH")
+            keyboard_cat = self.category("Keyboard", "SUB-0003", fixed_assets, "FIXED_ASSET", "QUANTITY")
+            toner_cat = self.category("Printer Toner", "SUB-TONER", consumables, "CONSUMABLE", "QUANTITY")
+            paper_cat = self.category("Printer Paper", "SUB-PAPER", consumables, "CONSUMABLE", "QUANTITY")
 
         processor = self.item(
             "Intel Core i5 Processor",

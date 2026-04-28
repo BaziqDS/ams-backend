@@ -148,6 +148,22 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                     return Response({'detail': f'Accepted quantity for item {entry_item.id} must be between 1 and {entry_item.quantity}.'}, status=400)
 
                 accepted_instance_ids = accepted_info.get('instances', [])
+                if (
+                    not entry_item.instances.exists()
+                    and instance.entry_type == 'RECEIPT'
+                    and instance.reference_entry
+                ):
+                    source_item = instance.reference_entry.items.filter(
+                        item=entry_item.item,
+                        batch=entry_item.batch,
+                        quantity=entry_item.quantity,
+                    ).first() or instance.reference_entry.items.filter(
+                        item=entry_item.item,
+                        batch=entry_item.batch,
+                    ).first()
+                    if source_item and source_item.instances.exists():
+                        entry_item.instances.set(source_item.instances.all())
+
                 current_instance_ids = set(entry_item.instances.values_list('id', flat=True))
                 if current_instance_ids:
                     accepted_instance_ids = set(map(int, accepted_instance_ids)) if accepted_instance_ids else current_instance_ids
