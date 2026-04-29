@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+from urllib.parse import urlparse
 from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -205,6 +206,24 @@ else:
 
 
 # =============================================================================
+# FRONTEND URL (QR codes, links)
+# =============================================================================
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+
+COOKIE_SECURE = config(
+    'COOKIE_SECURE',
+    default=IS_PRODUCTION and urlparse(FRONTEND_URL).scheme.lower() == 'https',
+    cast=bool,
+)
+
+CSRF_TRUSTED_ORIGINS = config(
+    'CSRF_TRUSTED_ORIGINS',
+    default=FRONTEND_URL if IS_PRODUCTION else 'http://localhost:3000,http://127.0.0.1:3000',
+    cast=Csv(),
+)
+
+
+# =============================================================================
 # DJOSER (AUTH)
 # =============================================================================
 DJOSER = {
@@ -231,11 +250,5 @@ if IS_PRODUCTION:
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-
-
-# =============================================================================
-# FRONTEND URL (QR codes, links)
-# =============================================================================
-FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+    SESSION_COOKIE_SECURE = COOKIE_SECURE
+    CSRF_COOKIE_SECURE = COOKIE_SECURE

@@ -42,6 +42,35 @@ jobs:
 
       - name: Create environment file
         run: |
+          $frontendUrl = "${{ secrets.FRONTEND_URL }}".Trim()
+          $corsAllowedOrigins = "${{ secrets.CORS_ALLOWED_ORIGINS }}".Trim()
+
+          if ([string]::IsNullOrWhiteSpace($frontendUrl)) {
+            Write-Host "ERROR: FRONTEND_URL secret is empty."
+            exit 1
+          }
+
+          try {
+            $null = [uri]$frontendUrl
+          } catch {
+            Write-Host "ERROR: FRONTEND_URL must be a valid absolute URL."
+            exit 1
+          }
+
+          if ([string]::IsNullOrWhiteSpace($corsAllowedOrigins)) {
+            Write-Host "ERROR: CORS_ALLOWED_ORIGINS secret is empty."
+            exit 1
+          }
+
+          foreach ($origin in ($corsAllowedOrigins -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            try {
+              $null = [uri]$origin
+            } catch {
+              Write-Host "ERROR: Invalid CORS origin '$origin'."
+              exit 1
+            }
+          }
+
           $lines = @(
             "ENVIRONMENT=production",
             "SECRET_KEY=${{ secrets.SECRET_KEY }}",
@@ -51,8 +80,8 @@ jobs:
             "DB_HOST=${{ secrets.DB_HOST }}",
             "DB_PORT=${{ secrets.DB_PORT }}",
             "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}",
-            "CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}",
-            "FRONTEND_URL=${{ secrets.FRONTEND_URL }}"
+            "CORS_ALLOWED_ORIGINS=$corsAllowedOrigins",
+            "FRONTEND_URL=$frontendUrl"
           )
           $lines | Out-File -FilePath .env -Encoding utf8 -Force
 
@@ -76,24 +105,114 @@ jobs:
         run: |
           $appDir = (Resolve-Path ".").Path
           $pythonExe = "$appDir\venv\Scripts\python.exe"
+          $backendArgs = "-m waitress --listen=0.0.0.0:8000 --threads=4 ams.wsgi:application"
 
           $service = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
           if (-not $service) {
             Write-Host "Creating AMSBackend service..."
-            nssm install AMSBackend $pythonExe "-m waitress --port=8000 --threads=4 ams.wsgi:application"
-            nssm set AMSBackend AppDirectory $appDir
-            nssm set AMSBackend AppEnvironmentExtra "PATH=$appDir\venv\Scripts;$env:PATH"
-            nssm set AMSBackend AppStdout "$appDir\logs\backend.log"
-            nssm set AMSBackend AppStderr "$appDir\logs\backend-error.log"
-            nssm set AMSBackend AppRotateFiles 1
-            nssm set AMSBackend AppRotateBytes 10485760
-            nssm set AMSBackend Start SERVICE_AUTO_START
+            nssm install AMSBackend $pythonExe $backendArgs
           } else {
             Write-Host "Updating existing AMSBackend service..."
-            nssm set AMSBackend Application $pythonExe
-            nssm set AMSBackend AppParameters "-m waitress --port=8000 --threads=4 ams.wsgi:application"
-            nssm set AMSBackend AppDirectory $appDir
           }
 
-          nssm start AMSBackend
+          nssm set AMSBackend Application $pythonExe
+          nssm set AMSBackend AppParameters $backendArgs
+          nssm set AMSBackend AppDirectory $appDir
+          nssm set AMSBackend AppEnvironmentExtra "PATH=$appDir\venv\Scripts;$env:PATH"
+          nssm set AMSBackend AppStdout "$appDir\logs\backend.log"
+          nssm set AMSBackend AppStderr "$appDir\logs\backend-error.log"
+          nssm set AMSBackend AppRotateFiles 1
+          nssm set AMSBackend AppRotateBytes 10485760
+          nssm set AMSBackend Start SERVICE_AUTO_START
+
+          & nssm start AMSBackend 2>&1 | ForEach-Object { Write-Host $_ }
+          $nssmStartExit = $LASTEXITCODE
+
+          $started = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            $backend = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
+            if ($backend -and $backend.Status -eq "Running") {
+              Write-Host "AMSBackend reached Running state on attempt $attempt."
+              $started = $true
+              break
+            }
+
+            if ($backend) {
+              Write-Host "AMSBackend state on attempt ${attempt}: $($backend.Status)"
+            } else {
+              Write-Host "AMSBackend service not found on attempt $attempt."
+            }
+
+            Start-Sleep -Seconds 2
+          }
+
+          if (-not $started) {
+            Write-Host "ERROR: AMSBackend did not reach Running state after start. NSSM exit code: $nssmStartExit"
+
+            if (Test-Path "$appDir\logs\backend.log") {
+              Write-Host "----- backend.log (tail) -----"
+              Get-Content "$appDir\logs\backend.log" -Tail 80
+            }
+
+            if (Test-Path "$appDir\logs\backend-error.log") {
+              Write-Host "----- backend-error.log (tail) -----"
+              Get-Content "$appDir\logs\backend-error.log" -Tail 80
+            }
+
+            exit 1
+          }
+
+          if ($nssmStartExit -ne 0) {
+            Write-Host "NSSM returned exit code $nssmStartExit, but the service is running. Continuing."
+            $global:LASTEXITCODE = 0
+          }
+
           Write-Host "AMSBackend started."
+
+      - name: Verify backend is running
+        run: |
+          $appDir = (Resolve-Path ".").Path
+          $healthy = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            $backend = Get-Service -Name AMSBackend -ErrorAction SilentlyContinue
+            if (-not $backend) {
+              Write-Host "Backend verification attempt ${attempt}: AMSBackend service does not exist yet."
+              Start-Sleep -Seconds 5
+              continue
+            }
+
+            if ($backend.Status -ne "Running") {
+              Write-Host "Backend verification attempt ${attempt}: service status is $($backend.Status)."
+              Start-Sleep -Seconds 5
+              continue
+            }
+
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8000/admin/login/" -TimeoutSec 10
+              if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                Write-Host "AMSBackend is serving traffic on attempt $attempt."
+                $healthy = $true
+                break
+              }
+            } catch {
+              Write-Host "Backend health check attempt $attempt failed: $($_.Exception.Message)"
+            }
+
+            Start-Sleep -Seconds 5
+          }
+
+          if (-not $healthy) {
+            Write-Host "ERROR: AMSBackend service is running but did not respond successfully on port 8000."
+
+            if (Test-Path "$appDir\logs\backend.log") {
+              Write-Host "----- backend.log (tail) -----"
+              Get-Content "$appDir\logs\backend.log" -Tail 80
+            }
+
+            if (Test-Path "$appDir\logs\backend-error.log") {
+              Write-Host "----- backend-error.log (tail) -----"
+              Get-Content "$appDir\logs\backend-error.log" -Tail 80
+            }
+
+            exit 1
+          }

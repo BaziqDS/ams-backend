@@ -18,7 +18,7 @@ REFRESH_COOKIE = 'ams_refresh'
 
 
 def _set_token_cookies(response, access_token: str, refresh_token: str | None = None):
-    secure = settings.IS_PRODUCTION
+    secure = settings.COOKIE_SECURE
     samesite = 'Lax'
 
     response.set_cookie(

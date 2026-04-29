@@ -2,8 +2,31 @@
 import json
 
 from django.contrib.auth.models import Group, Permission, User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
+from rest_framework.response import Response
+
+from ams.auth_views import ACCESS_COOKIE, REFRESH_COOKIE, _set_token_cookies
+
+
+class AuthCookieSettingsTests(SimpleTestCase):
+    @override_settings(COOKIE_SECURE=False)
+    def test_login_cookies_allow_http_when_cookie_secure_disabled(self):
+        response = Response()
+
+        _set_token_cookies(response, 'access-token', 'refresh-token')
+
+        self.assertFalse(response.cookies[ACCESS_COOKIE]['secure'])
+        self.assertFalse(response.cookies[REFRESH_COOKIE]['secure'])
+
+    @override_settings(COOKIE_SECURE=True)
+    def test_login_cookies_are_secure_when_cookie_secure_enabled(self):
+        response = Response()
+
+        _set_token_cookies(response, 'access-token', 'refresh-token')
+
+        self.assertTrue(response.cookies[ACCESS_COOKIE]['secure'])
+        self.assertTrue(response.cookies[REFRESH_COOKIE]['secure'])
 
 
 class CapabilitiesEndpointLocationsTests(TestCase):
