@@ -25,6 +25,15 @@ class StockEntry(models.Model):
         ('REJECTED', 'Rejected'),
         ('CANCELLED', 'Cancelled'),
     ]
+
+    REFERENCE_PURPOSE_CHOICES = [
+        ('AUTO_RECEIPT', 'Auto Receipt'),
+        ('REJECTION_RETURN', 'Rejection Return'),
+        ('REVERSAL', 'Reversal'),
+        ('ADDITIONAL_MOVEMENT', 'Additional Movement'),
+        ('REPLACEMENT', 'Replacement'),
+        ('ADJUSTMENT', 'Adjustment'),
+    ]
     
     entry_type = models.CharField(max_length=20, choices=ENTRY_TYPE_CHOICES, db_index=True)
     entry_number = models.CharField(max_length=50, unique=True, blank=True)
@@ -61,6 +70,14 @@ class StockEntry(models.Model):
         null=True, 
         blank=True, 
         related_name='correction_entries'
+    )
+    reference_purpose = models.CharField(
+        max_length=30,
+        choices=REFERENCE_PURPOSE_CHOICES,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Internal reason this entry references another entry."
     )
     
     inspection_certificate = models.ForeignKey(
@@ -176,6 +193,7 @@ class StockEntry(models.Model):
             ("edit_stock_entries", "Can edit stock entries module records"),
             ("delete_stock_entries", "Can delete stock entries module records"),
             ("acknowledge_stockentry", "Can acknowledge stock receipt entries"),
+            ("approve_stock_corrections", "Can approve stock entry corrections and reversals"),
         ]
 
     def save(self, *args, **kwargs):

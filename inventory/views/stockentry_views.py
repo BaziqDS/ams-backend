@@ -1,13 +1,22 @@
 from django.utils import timezone
 import logging
-from rest_framework import viewsets, permissions, filters
+from rest_framework import viewsets, permissions, filters, serializers
 
 logger = logging.getLogger(__name__)
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.person_model import Person
+from ..models.correction_model import CorrectionResolutionType, StockCorrectionRequest
 from ..models.stockentry_model import StockEntry
 from ..serializers.stockentry_serializer import PersonSerializer, StockEntrySerializer
+from ..services.stock_correction_service import (
+    apply_correction,
+    approve_correction,
+    build_correction_preview,
+    create_correction_request,
+    reject_correction,
+    serialize_correction,
+)
 from ams.permissions import StrictDjangoModelPermissions
 from ..permissions import StockEntryPermission
 
@@ -72,7 +81,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     Optimized with select_related and prefetch_related.
     """
     queryset = StockEntry.objects.select_related(
-        'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by'
+        'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by', 'reference_entry'
     ).prefetch_related(
         'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register', 'items__instances'
     ).order_by('-entry_date')
@@ -217,6 +226,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                     from_location=instance.to_location,
                     to_location=instance.from_location,
                     status='PENDING_ACK',
+                    reference_purpose='REJECTION_RETURN',
                     remarks=f"Automatic return for items rejected in {instance.entry_number}.",
                     reference_entry=instance,
                     created_by=user
@@ -243,6 +253,80 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+    def _correction_target_and_payload(self, instance, payload):
+        if not (
+            instance.entry_type == 'RECEIPT'
+            and instance.reference_entry_id
+            and instance.reference_purpose == 'AUTO_RECEIPT'
+            and instance.reference_entry.entry_type == 'ISSUE'
+        ):
+            return instance, payload, False
+
+        source_entry = instance.reference_entry
+        mapped_payload = dict(payload)
+        mapped_lines = []
+
+        for raw_line in payload.get('lines') or []:
+            try:
+                receipt_item_id = int(raw_line.get('id'))
+            except (TypeError, ValueError):
+                raise serializers.ValidationError({'lines': 'Each correction line must include a valid stock entry item id.'})
+
+            try:
+                receipt_item = instance.items.select_related('item', 'batch').get(id=receipt_item_id)
+            except instance.items.model.DoesNotExist:
+                raise serializers.ValidationError({'lines': f'Line {receipt_item_id} does not belong to this stock entry.'})
+
+            source_item = source_entry.items.filter(
+                item=receipt_item.item,
+                batch=receipt_item.batch,
+            ).order_by('id').first()
+            if not source_item:
+                raise serializers.ValidationError({'lines': f'Line {receipt_item_id} cannot be matched to the source issue.'})
+
+            mapped_line = dict(raw_line)
+            mapped_line['id'] = source_item.id
+            mapped_lines.append(mapped_line)
+
+        mapped_payload['lines'] = mapped_lines
+        return source_entry, mapped_payload, True
+
+    @action(detail=True, methods=['post'], url_path='correction-preview')
+    def correction_preview(self, request, pk=None):
+        instance = self.get_object()
+        correction_entry, correction_payload, _ = self._correction_target_and_payload(instance, request.data)
+        preview = build_correction_preview(correction_entry, correction_payload)
+        return Response({
+            'resolution_type': preview['resolution_type'],
+            'message': preview['message'],
+            'lines': [
+                {
+                    'id': line.entry_item.id,
+                    'item': line.entry_item.item_id,
+                    'item_name': line.entry_item.item.name,
+                    'original_quantity': line.original_quantity,
+                    'corrected_quantity': line.corrected_quantity,
+                    'delta': line.delta,
+                    'resolution_type': line.resolution_type,
+                    'message': line.message,
+                    'affected_instances': line.affected_instance_ids,
+                }
+                for line in preview['lines']
+            ],
+        })
+
+    @action(detail=True, methods=['post'], url_path='request-correction')
+    def request_correction(self, request, pk=None):
+        instance = self.get_object()
+        correction_entry, correction_payload, projected_from_receipt = self._correction_target_and_payload(instance, request.data)
+        correction = create_correction_request(
+            correction_entry,
+            correction_payload,
+            request.user,
+            auto_apply=not projected_from_receipt,
+        )
+        return Response(serialize_correction(correction), status=201)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
@@ -297,3 +381,70 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if entry_type:
             queryset = queryset.filter(entry_type=entry_type)
         return queryset
+
+
+class StockCorrectionViewSet(viewsets.GenericViewSet):
+    queryset = StockCorrectionRequest.objects.select_related(
+        'original_entry',
+        'original_entry__from_location',
+        'original_entry__to_location',
+        'requested_by',
+        'approved_by',
+        'rejected_by',
+    ).prefetch_related(
+        'lines__original_item__item', 'lines__affected_instances', 'generated_entries'
+    )
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _can_approve(self, request, correction=None):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser or user.groups.filter(name='Central Store Manager').exists():
+            return True
+        if not user.has_perm('inventory.approve_stock_corrections'):
+            return False
+
+        if correction and correction.resolution_type in {
+            CorrectionResolutionType.ADDITIONAL_MOVEMENT,
+            CorrectionResolutionType.REVERSAL,
+        }:
+            entry = correction.original_entry
+            if entry.entry_type == 'ISSUE' and entry.from_location_id and entry.to_location_id and getattr(entry.to_location, 'is_store', False):
+                approval_location = entry.to_location
+                if correction.resolution_type == CorrectionResolutionType.ADDITIONAL_MOVEMENT:
+                    approval_location = entry.from_location
+                return bool(
+                    hasattr(user, 'profile')
+                    and user.profile.has_location_access(approval_location)
+                )
+
+        return True
+
+    def retrieve(self, request, pk=None):
+        correction = self.get_object()
+        return Response(serialize_correction(correction))
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        correction = self.get_object()
+        if not self._can_approve(request, correction):
+            return Response({'detail': 'You do not have permission to approve stock corrections.'}, status=403)
+        correction = approve_correction(correction, request.user)
+        return Response(serialize_correction(correction))
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        correction = self.get_object()
+        if not self._can_approve(request, correction):
+            return Response({'detail': 'You do not have permission to reject stock corrections.'}, status=403)
+        correction = reject_correction(correction, request.user, request.data.get('reason') or '')
+        return Response(serialize_correction(correction))
+
+    @action(detail=True, methods=['post'])
+    def apply(self, request, pk=None):
+        correction = self.get_object()
+        if not self._can_approve(request, correction):
+            return Response({'detail': 'You do not have permission to apply stock corrections.'}, status=403)
+        correction = apply_correction(correction, user=request.user)
+        return Response(serialize_correction(correction))

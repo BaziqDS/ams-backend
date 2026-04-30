@@ -45,7 +45,7 @@ class StockEntryPermission(permissions.BasePermission):
             action = getattr(view, "action", None)
             if action == "acknowledge":
                 return _has_perm(user, "inventory.edit_stock_entries") or _has_perm(user, "inventory.acknowledge_stockentry")
-            if action == "cancel":
+            if action in {"cancel", "correction_preview", "request_correction"}:
                 return _has_perm(user, "inventory.edit_stock_entries")
             return _has_perm(user, "inventory.create_stock_entries")
 

@@ -5,6 +5,7 @@ from rest_framework import serializers
 from ..models.allocation_model import AllocationStatus, StockAllocation
 from ..models.person_model import Person
 from ..models.stockentry_model import StockEntry, StockEntryItem
+from ..models.correction_model import CorrectionStatus
 from ..models.item_model import Item
 from ..models.batch_model import ItemBatch
 from ..models.instance_model import ItemInstance
@@ -48,6 +49,13 @@ class StockEntrySerializer(serializers.ModelSerializer):
     acknowledged_by_name = serializers.CharField(source='acknowledged_by.username', read_only=True, allow_null=True)
     cancelled_by_name = serializers.CharField(source='cancelled_by.username', read_only=True, allow_null=True)
     can_acknowledge = serializers.SerializerMethodField()
+    can_cancel = serializers.SerializerMethodField()
+    can_correct = serializers.SerializerMethodField()
+    can_request_reversal = serializers.SerializerMethodField()
+    active_correction = serializers.SerializerMethodField()
+    correction_status = serializers.SerializerMethodField()
+    generated_correction_entries = serializers.SerializerMethodField()
+    replacement_entry = serializers.SerializerMethodField()
 
 
     class Meta:
@@ -59,10 +67,13 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'to_location', 'to_location_name',
             'issued_to', 'issued_to_name',
             'status', 'remarks', 'purpose', 'items', 'reference_entry',
+            'reference_purpose',
             'acknowledged_by', 'acknowledged_by_name', 'acknowledged_at',
             'cancellation_reason', 'cancelled_by', 'cancelled_by_name', 'cancelled_at',
             'created_by', 'created_by_name', 'created_at',
-            'can_acknowledge'
+            'can_acknowledge', 'can_cancel', 'can_correct', 'can_request_reversal',
+            'active_correction', 'correction_status', 'generated_correction_entries',
+            'replacement_entry',
         )
         read_only_fields = ('entry_number', 'created_by', 'created_at', 'acknowledged_by', 'acknowledged_at', 'cancelled_by', 'cancelled_at')
 
@@ -326,4 +337,93 @@ class StockEntrySerializer(serializers.ModelSerializer):
             return user.profile.has_location_access(obj.to_location)
 
         return False
+
+    def _user_can_edit_entries(self):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and (user.is_superuser or user.has_perm('inventory.edit_stock_entries')))
+
+    def get_can_cancel(self, obj):
+        return bool(obj.status == 'PENDING_ACK' and self._user_can_edit_entries())
+
+    def get_can_correct(self, obj):
+        return bool(obj.status == 'COMPLETED' and self._user_can_edit_entries())
+
+    def get_can_request_reversal(self, obj):
+        return bool(
+            obj.status == 'COMPLETED'
+            and obj.entry_type == 'ISSUE'
+            and obj.from_location_id
+            and obj.to_location_id
+            and getattr(obj.to_location, 'is_store', False)
+            and self._user_can_edit_entries()
+        )
+
+    def _correction_source_entry(self, obj):
+        if (
+            obj.entry_type == 'RECEIPT'
+            and obj.reference_entry_id
+            and obj.reference_purpose == 'AUTO_RECEIPT'
+        ):
+            return obj.reference_entry
+        return obj
+
+    def _latest_correction(self, obj):
+        correction_source = self._correction_source_entry(obj)
+        return correction_source.correction_requests.order_by('-requested_at').first()
+
+    def _serialize_correction_summary(self, correction):
+        if not correction:
+            return None
+        return {
+            'id': correction.id,
+            'original_entry': correction.original_entry_id,
+            'status': correction.status,
+            'resolution_type': correction.resolution_type,
+            'reason': correction.reason,
+            'message': correction.message,
+            'requested_at': correction.requested_at,
+            'applied_at': correction.applied_at,
+        }
+
+    def get_active_correction(self, obj):
+        correction_source = self._correction_source_entry(obj)
+        correction = correction_source.correction_requests.exclude(
+            status__in=[CorrectionStatus.APPLIED, CorrectionStatus.REJECTED]
+        ).order_by('-requested_at').first()
+        return self._serialize_correction_summary(correction)
+
+    def get_correction_status(self, obj):
+        correction = self._latest_correction(obj)
+        return correction.status if correction else None
+
+    def get_generated_correction_entries(self, obj):
+        correction_source = self._correction_source_entry(obj)
+        entries = StockEntry.objects.filter(
+            generated_by_correction_requests__original_entry=correction_source
+        ).distinct().order_by('id')
+        return [
+            {
+                'id': entry.id,
+                'entry_number': entry.entry_number,
+                'entry_type': entry.entry_type,
+                'status': entry.status,
+                'reference_purpose': entry.reference_purpose,
+            }
+            for entry in entries
+        ]
+
+    def get_replacement_entry(self, obj):
+        replacement = StockEntry.objects.filter(
+            reference_entry=obj,
+            reference_purpose='REPLACEMENT',
+        ).order_by('-created_at').first()
+        if not replacement:
+            return None
+        return {
+            'id': replacement.id,
+            'entry_number': replacement.entry_number,
+            'entry_type': replacement.entry_type,
+            'status': replacement.status,
+        }
 

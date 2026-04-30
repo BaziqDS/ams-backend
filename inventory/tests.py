@@ -81,6 +81,7 @@ class StockEntryDomainPermissionBootstrapTests(TestCase):
                 'create_stock_entries',
                 'edit_stock_entries',
                 'delete_stock_entries',
+                'approve_stock_corrections',
             }.issubset(perms)
         )
 
@@ -97,6 +98,10 @@ class StockEntryDomainPermissionBootstrapTests(TestCase):
         self.assertIn('inventory.view_stockregister', resolved)
         self.assertIn('inventory.view_stockallocation', resolved)
         self.assertNotIn('inventory.delete_stock_entries', resolved)
+        self.assertNotIn('inventory.approve_stock_corrections', resolved)
+
+        full_resolved = resolve_selections_to_codenames({'stock-entries': 'full'})
+        self.assertIn('inventory.approve_stock_corrections', full_resolved)
 
     def test_stock_entries_read_perm_declared(self):
         self.assertIn('stock-entries', MODULES)
@@ -106,6 +111,7 @@ class StockEntryDomainPermissionBootstrapTests(TestCase):
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('create_stock_entries'), ['view_stock_entries'])
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('edit_stock_entries'), ['view_stock_entries'])
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('delete_stock_entries'), ['view_stock_entries'])
+        self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('approve_stock_corrections'), ['view_stock_entries'])
 
 
 class InspectionCertificateSerializerContractTests(TestCase):
@@ -1624,6 +1630,18 @@ class ItemApiDomainPermissionTests(TestCase):
             parent_location=cls.csit,
             is_store=True,
         )
+        cls.ee = Location.objects.create(
+            name='Electrical Engineering',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.ee_store = Location.objects.create(
+            name='EE Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.ee,
+            is_store=True,
+        )
         cls.parent_category = Category.objects.create(
             name='Computing Hardware',
             category_type=CategoryType.FIXED_ASSET,
@@ -1655,6 +1673,13 @@ class ItemApiDomainPermissionTests(TestCase):
             location=cls.store,
             quantity=5,
             allocated_quantity=2,
+        )
+        StockRecord.objects.create(
+            item=cls.item,
+            batch=None,
+            location=cls.ee_store,
+            quantity=2,
+            allocated_quantity=0,
         )
 
     def setUp(self):
@@ -1724,7 +1749,7 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertEqual(resp.data['low_stock_threshold'], 4)
 
     def test_list_exposes_low_stock_threshold_and_flag(self):
-        self.item.low_stock_threshold = 5
+        self.item.low_stock_threshold = 10
         self.item.save(update_fields=['low_stock_threshold'])
         user = self._make_user('item_low_stock_view')
         user.user_permissions.add(self._perm('view_items'))
@@ -1734,8 +1759,9 @@ class ItemApiDomainPermissionTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         row = next(record for record in resp.data['results'] if record['id'] == self.item.id)
-        self.assertEqual(row['low_stock_threshold'], 5)
+        self.assertEqual(row['low_stock_threshold'], 10)
         self.assertTrue(row['is_low_stock'])
+        self.assertEqual(row['standalone_location_count'], 2)
 
     def test_update_allows_domain_edit_items_perm(self):
         user = self._make_user('item_domain_edit')
@@ -1993,6 +2019,94 @@ class StockEntryApiDomainPermissionTests(TestCase):
 
     def _register(self, store, number):
         return StockRegister.objects.create(register_number=number, store=store)
+
+    def _completed_transfer(self, user, *, quantity=4, purpose='Completed transfer'):
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+        ack_register = self._register(self.child_store, f'ACK-{purpose[:16].upper()}')
+        payload = self._payload(purpose)
+        payload['items'][0]['quantity'] = quantity
+
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        issue = StockEntry.objects.get(id=create_resp.data['id'])
+        receipt = StockEntry.objects.get(reference_entry=issue, entry_type='RECEIPT')
+        receipt_item = receipt.items.get()
+
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': receipt_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 1,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(ack_resp.status_code, 200)
+        issue.refresh_from_db()
+        return issue
+
+    def _completed_person_return(self, user, *, allocated_quantity=4, returned_quantity=2, purpose='Completed person return'):
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('acknowledge_stockentry'))
+
+        issue_payload = self._payload(f'{purpose} issue')
+        issue_payload['to_location'] = None
+        issue_payload['issued_to'] = self.person.id
+        issue_payload['items'][0]['quantity'] = allocated_quantity
+        issue_resp = self.client.post('/api/inventory/stock-entries/', issue_payload, format='json')
+        self.assertEqual(issue_resp.status_code, 201)
+
+        return_payload = {
+            'entry_type': 'RECEIPT',
+            'from_location': None,
+            'to_location': self.store.id,
+            'issued_to': self.person.id,
+            'status': 'DRAFT',
+            'purpose': purpose,
+            'remarks': '',
+            'items': [
+                {
+                    'item': self.item.id,
+                    'batch': self.batch.id,
+                    'quantity': returned_quantity,
+                    'instances': [],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+        return_resp = self.client.post('/api/inventory/stock-entries/', return_payload, format='json')
+        self.assertEqual(return_resp.status_code, 201)
+        return_entry = StockEntry.objects.get(id=return_resp.data['id'])
+        return_item = return_entry.items.get()
+        ack_register = self._register(self.store, f'ACK-RET-{return_entry.id}')
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': return_item.id,
+                        'quantity': return_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 1,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(ack_resp.status_code, 200)
+        return_entry.refresh_from_db()
+        return return_entry
 
     def _allocation(self, *, person=None, location=None, quantity=1, status=AllocationStatus.ALLOCATED):
         return StockAllocation.objects.create(
@@ -2504,6 +2618,552 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(return_entry.status, 'COMPLETED')
         self.assertEqual(return_item.accepted_quantity, 3)
         self.assertFalse(StockEntry.objects.filter(reference_entry=return_entry, entry_type='RETURN').exists())
+
+    def test_detail_exposes_contextual_correction_capabilities(self):
+        user = self._make_user('stock_entry_correction_detail')
+        user.user_permissions.add(self._perm('view_stock_entries'))
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+
+        issue = self._completed_transfer(user, quantity=4, purpose='Correction detail')
+        resp = self.client.get(f'/api/inventory/stock-entries/{issue.id}/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['can_cancel'], False)
+        self.assertEqual(resp.data['can_correct'], True)
+        self.assertEqual(resp.data['can_request_reversal'], True)
+        self.assertIsNone(resp.data['active_correction'])
+        self.assertEqual(resp.data['generated_correction_entries'], [])
+
+    def test_replacement_entry_can_be_created_as_normal_linked_entry(self):
+        user = self._make_user('stock_entry_replacement')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        self.client.force_authenticate(user=user)
+        source = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='CANCELLED',
+            cancellation_reason='Wrong destination.',
+        )
+        payload = self._payload('Replacement entry')
+        payload['reference_entry'] = source.id
+        payload['reference_purpose'] = 'REPLACEMENT'
+
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        replacement = StockEntry.objects.get(id=resp.data['id'])
+        self.assertEqual(replacement.reference_entry, source)
+        self.assertEqual(replacement.reference_purpose, 'REPLACEMENT')
+
+    def test_completed_transfer_correction_upward_creates_additional_linked_issue(self):
+        user = self._make_user('stock_entry_correction_upward')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Correction upward')
+        issue_item = issue.items.get()
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Two more units were physically sent and need to be recorded.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 6, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'APPLIED')
+        self.assertEqual(resp.data['resolution_type'], 'ADDITIONAL_MOVEMENT')
+        generated = StockEntry.objects.get(reference_entry=issue, reference_purpose='ADDITIONAL_MOVEMENT')
+        self.assertEqual(generated.entry_type, 'ISSUE')
+        self.assertEqual(generated.from_location, self.store)
+        self.assertEqual(generated.to_location, self.child_store)
+        self.assertEqual(generated.status, 'PENDING_ACK')
+        self.assertEqual(generated.items.get().quantity, 2)
+        linked_receipt = StockEntry.objects.get(reference_entry=generated, reference_purpose='AUTO_RECEIPT')
+        self.assertEqual(linked_receipt.status, 'PENDING_ACK')
+
+    def test_request_correction_rejects_no_changed_lines(self):
+        user = self._make_user('stock_entry_correction_no_change')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Correction no change')
+        issue_item = issue.items.get()
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'No line was actually changed.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 4, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Change at least one corrected quantity', resp.data['detail'])
+        self.assertFalse(issue.correction_requests.exists())
+
+    def test_linked_receipt_exposes_pending_correction_from_source_issue(self):
+        sender = self._make_user('stock_entry_correction_sender')
+        sender.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=sender)
+        issue = self._completed_transfer(sender, quantity=4, purpose='Correction receiver visibility')
+        issue_item = issue.items.get()
+        receipt = StockEntry.objects.get(reference_entry=issue, entry_type='RECEIPT')
+
+        request_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Only two units should have been sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(request_resp.status_code, 201)
+
+        receiver = self._make_user('stock_entry_correction_receiver')
+        receiver.profile.assigned_locations.clear()
+        receiver.profile.assigned_locations.add(self.child_store)
+        receiver.user_permissions.add(self._perm('view_stock_entries'))
+        receiver.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=receiver)
+
+        detail_resp = self.client.get(f'/api/inventory/stock-entries/{receipt.id}/')
+
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertEqual(detail_resp.data['active_correction']['id'], request_resp.data['id'])
+        self.assertEqual(detail_resp.data['active_correction']['original_entry'], issue.id)
+        self.assertEqual(detail_resp.data['active_correction']['status'], 'REQUESTED')
+        self.assertEqual(detail_resp.data['correction_status'], 'REQUESTED')
+
+        list_resp = self.client.get('/api/inventory/stock-entries/')
+
+        self.assertEqual(list_resp.status_code, 200)
+        rows = list_resp.data['results'] if isinstance(list_resp.data, dict) and 'results' in list_resp.data else list_resp.data
+        receipt_row = next(row for row in rows if row['id'] == receipt.id)
+        self.assertEqual(receipt_row['active_correction']['id'], request_resp.data['id'])
+        self.assertEqual(receipt_row['active_correction']['original_entry'], issue.id)
+        self.assertEqual(receipt_row['correction_status'], 'REQUESTED')
+
+    def test_auto_receipt_upward_correction_targets_source_issue_and_waits_for_source_approval(self):
+        sender = self._make_user('stock_entry_partial_sender')
+        sender.user_permissions.add(self._perm('create_stock_entries'))
+        sender.user_permissions.add(self._perm('acknowledge_stockentry'))
+        self.client.force_authenticate(user=sender)
+        dest_ack_register = self._register(self.child_store, 'ACK-RECEIPT-UPWARD')
+        source_ack_register = self._register(self.store, 'ACK-RETURN-UPWARD')
+        payload = self._payload('Partial receipt correction upward')
+        payload['items'][0]['quantity'] = 2
+
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        issue = StockEntry.objects.get(id=create_resp.data['id'])
+        issue_item = issue.items.get()
+        receipt = StockEntry.objects.get(reference_entry=issue, entry_type='RECEIPT')
+        receipt_item = receipt.items.get()
+
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': 1,
+                        'instances': [],
+                        'ack_stock_register': dest_ack_register.id,
+                        'ack_page_number': 8,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(ack_resp.status_code, 200)
+        receipt_item.refresh_from_db()
+        self.assertEqual(receipt_item.accepted_quantity, 1)
+
+        return_entry = StockEntry.objects.get(reference_entry=receipt, entry_type='RETURN')
+        return_item = return_entry.items.get()
+        return_ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': return_item.id,
+                        'quantity': return_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': source_ack_register.id,
+                        'ack_page_number': 12,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(return_ack_resp.status_code, 200)
+
+        receiver = self._make_user('stock_entry_partial_receiver')
+        receiver.profile.assigned_locations.clear()
+        receiver.profile.assigned_locations.add(self.child_store)
+        receiver.user_permissions.add(self._perm('view_stock_entries'))
+        receiver.user_permissions.add(self._perm('edit_stock_entries'))
+        receiver.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=receiver)
+
+        request_resp = self.client.post(
+            f'/api/inventory/stock-entries/{receipt.id}/request-correction/',
+            {
+                'reason': 'Receiver accepted one but now confirms two were required.',
+                'lines': [
+                    {'id': receipt_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(request_resp.status_code, 201)
+        self.assertEqual(request_resp.data['original_entry'], issue.id)
+        self.assertEqual(request_resp.data['status'], 'REQUESTED')
+        self.assertEqual(request_resp.data['resolution_type'], 'ADDITIONAL_MOVEMENT')
+        self.assertEqual(request_resp.data['generated_entries'], [])
+        self.assertFalse(receipt.correction_requests.exists())
+        correction = issue.correction_requests.get()
+        correction_line = correction.lines.get()
+        self.assertEqual(correction_line.original_item_id, issue_item.id)
+        self.assertEqual(correction_line.original_quantity, 1)
+        self.assertEqual(correction_line.corrected_quantity, 2)
+        self.assertEqual(correction_line.delta, 1)
+
+        detail_resp = self.client.get(f'/api/inventory/stock-entries/{receipt.id}/')
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertEqual(detail_resp.data['active_correction']['id'], correction.id)
+        self.assertEqual(detail_resp.data['active_correction']['original_entry'], issue.id)
+
+        blocked_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/approve/', {}, format='json')
+        self.assertEqual(blocked_resp.status_code, 403)
+
+        source_approver = self._make_user('stock_entry_partial_source_approver')
+        source_approver.profile.assigned_locations.clear()
+        source_approver.profile.assigned_locations.add(self.store)
+        source_approver.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=source_approver)
+
+        approve_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/approve/', {}, format='json')
+        self.assertEqual(approve_resp.status_code, 200)
+        self.assertEqual(approve_resp.data['status'], 'APPROVED')
+
+        apply_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/apply/', {}, format='json')
+        self.assertEqual(apply_resp.status_code, 200)
+        self.assertEqual(apply_resp.data['status'], 'APPLIED')
+        generated = StockEntry.objects.get(reference_entry=issue, reference_purpose='ADDITIONAL_MOVEMENT')
+        self.assertEqual(generated.entry_type, 'ISSUE')
+        self.assertEqual(generated.from_location, self.store)
+        self.assertEqual(generated.to_location, self.child_store)
+        self.assertEqual(generated.status, 'PENDING_ACK')
+        self.assertEqual(generated.items.get().quantity, 1)
+
+    def test_store_transfer_reversal_approval_requires_destination_access(self):
+        destination_store = Location.objects.create(
+            name='Stock Peer Receiving Store',
+            location_type=LocationType.STORE,
+            parent_location=self.csit,
+            is_store=True,
+        )
+        requester = self._make_user('stock_entry_correction_requester')
+        requester.user_permissions.add(self._perm('create_stock_entries'))
+        requester.user_permissions.add(self._perm('acknowledge_stockentry'))
+        requester.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=requester)
+        ack_register = self._register(destination_store, 'ACK-CORR-SCOPE')
+        payload = self._payload('Correction approval scope')
+        payload['to_location'] = destination_store.id
+        payload['items'][0]['quantity'] = 4
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        issue = StockEntry.objects.get(id=create_resp.data['id'])
+        receipt = StockEntry.objects.get(reference_entry=issue, entry_type='RECEIPT')
+        receipt_item = receipt.items.get()
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{receipt.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': receipt_item.id,
+                        'quantity': receipt_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 1,
+                    }
+                ]
+            },
+            format='json',
+        )
+        self.assertEqual(ack_resp.status_code, 200)
+        issue.refresh_from_db()
+        issue_item = issue.items.get()
+
+        request_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Only two units should have been sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(request_resp.status_code, 201)
+        correction = issue.correction_requests.get()
+
+        source_approver = self._make_user('stock_entry_source_approver')
+        source_approver.profile.assigned_locations.clear()
+        source_approver.profile.assigned_locations.add(self.store)
+        source_approver.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=source_approver)
+
+        blocked_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/approve/', {}, format='json')
+
+        self.assertEqual(blocked_resp.status_code, 403)
+
+        destination_approver = self._make_user('stock_entry_destination_approver')
+        destination_approver.profile.assigned_locations.clear()
+        destination_approver.profile.assigned_locations.add(destination_store)
+        destination_approver.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=destination_approver)
+
+        approved_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/approve/', {}, format='json')
+
+        self.assertEqual(approved_resp.status_code, 200)
+        self.assertEqual(approved_resp.data['status'], 'APPROVED')
+
+    def test_completed_transfer_correction_downward_waits_for_approval_then_creates_reversal(self):
+        user = self._make_user('stock_entry_correction_downward')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        user.user_permissions.add(self._perm('approve_stock_corrections'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Correction downward')
+        issue_item = issue.items.get()
+
+        request_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Only two units should have been sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(request_resp.status_code, 201)
+        self.assertEqual(request_resp.data['status'], 'REQUESTED')
+        self.assertEqual(request_resp.data['resolution_type'], 'REVERSAL')
+        self.assertEqual(request_resp.data['generated_entries'], [])
+        self.assertFalse(StockEntry.objects.filter(reference_entry=issue, reference_purpose='REVERSAL').exists())
+
+        correction = issue.correction_requests.get()
+        approve_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/approve/', {}, format='json')
+
+        self.assertEqual(approve_resp.status_code, 200)
+        self.assertEqual(approve_resp.data['status'], 'APPROVED')
+        self.assertEqual(approve_resp.data['generated_entries'], [])
+        self.assertFalse(StockEntry.objects.filter(reference_entry=issue, reference_purpose='REVERSAL').exists())
+
+        apply_resp = self.client.post(f'/api/inventory/stock-corrections/{correction.id}/apply/', {}, format='json')
+
+        self.assertEqual(apply_resp.status_code, 200)
+        self.assertEqual(apply_resp.data['status'], 'APPLIED')
+        generated = StockEntry.objects.get(reference_entry=issue, reference_purpose='REVERSAL')
+        self.assertEqual(generated.entry_type, 'ISSUE')
+        self.assertEqual(generated.from_location, self.child_store)
+        self.assertEqual(generated.to_location, self.store)
+        self.assertEqual(generated.status, 'PENDING_ACK')
+        self.assertEqual(generated.items.get().quantity, 2)
+        self.assertEqual(apply_resp.data['generated_entries'][0]['id'], generated.id)
+
+    def test_completed_transfer_correction_downward_blocks_when_destination_stock_unavailable(self):
+        user = self._make_user('stock_entry_correction_blocked')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Correction blocked')
+        issue_item = issue.items.get()
+        StockRecord.objects.filter(item=self.item, batch=self.batch, location=self.child_store).update(quantity=1)
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/correction-preview/',
+            {
+                'reason': 'Only two units should have been sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['resolution_type'], 'BLOCKED')
+        self.assertIn('moved onward', resp.data['message'])
+
+    def test_allocation_correction_downward_reduces_active_allocation(self):
+        user = self._make_user('stock_entry_correction_allocation')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+
+        payload = self._payload('Allocation correction')
+        payload['to_location'] = None
+        payload['issued_to'] = self.person.id
+        payload['items'][0]['quantity'] = 4
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201)
+        allocation_issue = StockEntry.objects.get(id=create_resp.data['id'])
+        allocation_item = allocation_issue.items.get()
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{allocation_issue.id}/request-correction/',
+            {
+                'reason': 'Only two units should remain allocated.',
+                'lines': [
+                    {'id': allocation_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'APPLIED')
+        self.assertEqual(resp.data['resolution_type'], 'ALLOCATION_REDUCTION')
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.allocated_quantity, 2)
+        allocation = StockAllocation.objects.get(stock_entry=allocation_issue)
+        self.assertEqual(allocation.quantity, 2)
+
+    def test_return_correction_under_recorded_creates_additional_return_receipt(self):
+        user = self._make_user('stock_entry_correction_return_more')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        return_entry = self._completed_person_return(
+            user,
+            allocated_quantity=4,
+            returned_quantity=2,
+            purpose='Return correction more',
+        )
+        return_item = return_entry.items.get()
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/request-correction/',
+            {
+                'reason': 'Three units were actually returned.',
+                'lines': [
+                    {'id': return_item.id, 'corrected_quantity': 3, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'APPLIED')
+        self.assertEqual(resp.data['resolution_type'], 'RETURN_INCREASE')
+        generated = StockEntry.objects.get(reference_entry=return_entry, reference_purpose='ADDITIONAL_MOVEMENT')
+        self.assertEqual(generated.entry_type, 'RECEIPT')
+        self.assertEqual(generated.status, 'PENDING_ACK')
+        self.assertEqual(generated.to_location, self.store)
+        self.assertEqual(generated.issued_to, self.person)
+        self.assertEqual(generated.items.get().quantity, 1)
+
+        generated_item = generated.items.get()
+        ack_register = self._register(self.store, f'ACK-GEN-{generated.id}')
+        ack_resp = self.client.post(
+            f'/api/inventory/stock-entries/{generated.id}/acknowledge/',
+            {
+                'items': [
+                    {
+                        'id': generated_item.id,
+                        'quantity': generated_item.quantity,
+                        'instances': [],
+                        'ack_stock_register': ack_register.id,
+                        'ack_page_number': 2,
+                    }
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(ack_resp.status_code, 200)
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.allocated_quantity, 1)
+
+    def test_return_correction_over_recorded_reallocates_when_store_stock_available(self):
+        user = self._make_user('stock_entry_correction_return_less')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        return_entry = self._completed_person_return(
+            user,
+            allocated_quantity=4,
+            returned_quantity=3,
+            purpose='Return correction less',
+        )
+        return_item = return_entry.items.get()
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/request-correction/',
+            {
+                'reason': 'Only two units were actually returned.',
+                'lines': [
+                    {'id': return_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'APPLIED')
+        self.assertEqual(resp.data['resolution_type'], 'RETURN_REDUCTION')
+        generated = StockEntry.objects.get(reference_entry=return_entry, reference_purpose='REVERSAL')
+        self.assertEqual(generated.entry_type, 'ISSUE')
+        self.assertEqual(generated.status, 'COMPLETED')
+        self.assertEqual(generated.from_location, self.store)
+        self.assertEqual(generated.issued_to, self.person)
+        self.assertEqual(generated.items.get().quantity, 1)
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.allocated_quantity, 2)
+
+    def test_return_correction_over_recorded_blocks_when_stock_moved_onward(self):
+        user = self._make_user('stock_entry_correction_return_blocked')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        return_entry = self._completed_person_return(
+            user,
+            allocated_quantity=4,
+            returned_quantity=3,
+            purpose='Return correction blocked',
+        )
+        return_item = return_entry.items.get()
+        StockRecord.objects.filter(item=self.item, batch=self.batch, location=self.store).update(
+            quantity=1,
+            allocated_quantity=1,
+        )
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{return_entry.id}/correction-preview/',
+            {
+                'reason': 'Only two units were actually returned.',
+                'lines': [
+                    {'id': return_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['resolution_type'], 'BLOCKED')
+        self.assertIn('stock is no longer available', resp.data['message'])
 
     def test_patch_requires_domain_edit_stock_entries_perm(self):
         user = self._make_user('stock_entry_legacy_change')

@@ -15,13 +15,23 @@ from .models.history_model import MovementHistory, MovementAction
 logger = logging.getLogger(__name__)
 
 
+def _should_create_linked_receipt_for_issue(stock_entry):
+    return (
+        stock_entry.entry_type == 'ISSUE'
+        and stock_entry.to_location
+        and stock_entry.to_location.is_store
+        and stock_entry.status != 'DRAFT'
+        and stock_entry.reference_purpose != 'AUTO_RECEIPT'
+    )
+
+
 def _inspection_tracking_lot_code(certificate, inspection_item):
     return f"{certificate.contract_no}-L{inspection_item.id}"
 
 
 def _sync_linked_receipt_item_instances(issue_item):
     stock_entry = issue_item.stock_entry
-    if stock_entry.entry_type != 'ISSUE' or stock_entry.status == 'DRAFT' or not stock_entry.to_location or stock_entry.reference_entry:
+    if not _should_create_linked_receipt_for_issue(stock_entry):
         return
 
     linked_receipt = StockEntry.objects.filter(reference_entry=stock_entry, entry_type='RECEIPT').first()
@@ -156,7 +166,7 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
     
     # 1. Linked RECEIPT creation (ISSUE -> RECEIPT bridge)
     # CRITICAL: Do NOT create receipts for DRAFT entries. Wait until finalized.
-    if stock_entry.entry_type == 'ISSUE' and stock_entry.to_location and not stock_entry.reference_entry and stock_entry.status != 'DRAFT':
+    if _should_create_linked_receipt_for_issue(stock_entry):
         with transaction.atomic():
             # INTER-STORE: Force PENDING_ACK regardless of Issue status
             # This ensures the Handshake is mandatory.
@@ -170,6 +180,7 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
                     'from_location': stock_entry.from_location,
                     'to_location': stock_entry.to_location,
                     'status': 'PENDING_ACK',
+                    'reference_purpose': 'AUTO_RECEIPT',
                     'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
                     'purpose': stock_entry.purpose,
                     'inspection_certificate': stock_entry.inspection_certificate,
@@ -216,7 +227,7 @@ def process_single_stock_item(instance):
         and entry.entry_type == 'ISSUE'
         and entry.to_location
         and entry.to_location.is_store
-        and not entry.reference_entry
+        and entry.reference_purpose != 'AUTO_RECEIPT'
     ):
         linked_receipt_item = StockEntryItem.objects.filter(
             stock_entry__reference_entry=entry,
@@ -464,7 +475,7 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
             
             # CRITICAL: If an ISSUE is moving out of DRAFT, we need to create the linked RECEIPT item
             # which was suppressed in process_stock_entry_item
-            if instance.status != 'DRAFT' and instance.entry_type == 'ISSUE' and instance.to_location and not instance.reference_entry:
+            if _should_create_linked_receipt_for_issue(instance):
                 # We reuse the logic from process_stock_entry_item implicitly by re-triggering the signal logic
                 # or we can explicitly call a helper. Let's just re-save the item to trigger the signal
                 # but wait, process_stock_entry_item is a post_save on StockEntryItem.
@@ -481,6 +492,7 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                         'from_location': instance.from_location,
                         'to_location': instance.to_location,
                         'status': 'PENDING_ACK',
+                        'reference_purpose': 'AUTO_RECEIPT',
                         'remarks': f"Auto-generated receipt for {instance.entry_number}. {instance.remarks or ''}",
                         'purpose': instance.purpose,
                         'inspection_certificate': instance.inspection_certificate,

@@ -177,6 +177,7 @@ MODULES: dict[str, ModuleSpec] = {
                 "inventory.edit_stock_entries",
                 "inventory.delete_stock_entries",
                 "inventory.acknowledge_stockentry",
+                "inventory.approve_stock_corrections",
             ],
             "reads": ["items", "locations", "persons", "stock-registers", "stock-allocations"],
         },

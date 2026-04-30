@@ -53,6 +53,7 @@ EXPLICIT_PERMISSION_IMPLICATIONS: dict[str, list[str]] = {
     "create_stock_entries": ["view_stock_entries"],
     "edit_stock_entries": ["view_stock_entries"],
     "delete_stock_entries": ["view_stock_entries"],
+    "approve_stock_corrections": ["view_stock_entries"],
     # Stock registers module
     "create_stock_registers": ["view_stock_registers"],
     "edit_stock_registers": ["view_stock_registers"],
