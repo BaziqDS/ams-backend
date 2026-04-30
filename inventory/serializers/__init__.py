@@ -9,5 +9,13 @@ from .stockentry_serializer import StockEntrySerializer
 from .inspection_serializer import InspectionCertificateSerializer
 from .allocation_serializer import StockAllocationSerializer
 from .stock_register_serializer import StockRegisterSerializer
-
+from .depreciation_serializer import (
+    AssetValueAdjustmentSerializer,
+    DepreciationAssetClassSerializer,
+    DepreciationEntrySerializer,
+    DepreciationPolicySerializer,
+    DepreciationRateVersionSerializer,
+    DepreciationRunSerializer,
+    FixedAssetRegisterEntrySerializer,
+)
 

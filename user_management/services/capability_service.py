@@ -45,6 +45,16 @@ def resolve_selections_to_codenames(
         for stage_key in inspection_stages:
             if stage_key in INSPECTION_STAGE_PERMS:
                 wanted.add(INSPECTION_STAGE_PERMS[stage_key])
+            if stage_key == "fill_central_register":
+                wanted.update(MODULES["items"]["manage"]["perms"])
+                for dep in MODULES["items"]["manage"]["reads"]:
+                    if dep in READ_PERMS:
+                        wanted.update(READ_PERMS[dep])
+            if stage_key == "review_finance":
+                wanted.update(MODULES["depreciation"]["manage"]["perms"])
+                for dep in MODULES["depreciation"]["manage"]["reads"]:
+                    if dep in READ_PERMS:
+                        wanted.update(READ_PERMS[dep])
 
     return wanted
 

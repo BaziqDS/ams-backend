@@ -172,6 +172,33 @@ class CapabilityManifestItemsTests(TestCase):
         self.assertIn('inventory.view_categories', resolved)
         self.assertNotIn('inventory.delete_items', resolved)
 
+    def test_inspections_stage_three_grants_items_manage_dependency(self):
+        resolved = resolve_selections_to_codenames(
+            {'inspections': 'manage', 'items': None},
+            inspection_stages=['fill_central_register'],
+        )
+
+        self.assertIn('inventory.fill_central_register', resolved)
+        self.assertIn('inventory.view_items', resolved)
+        self.assertIn('inventory.create_items', resolved)
+        self.assertIn('inventory.edit_items', resolved)
+        self.assertIn('inventory.view_categories', resolved)
+        self.assertNotIn('inventory.delete_items', resolved)
+
+    def test_inspections_stage_four_grants_depreciation_manage_dependency(self):
+        resolved = resolve_selections_to_codenames(
+            {'inspections': 'manage', 'depreciation': None},
+            inspection_stages=['review_finance'],
+        )
+
+        self.assertIn('inventory.review_finance', resolved)
+        self.assertIn('inventory.view_depreciation', resolved)
+        self.assertIn('inventory.manage_depreciation', resolved)
+        self.assertIn('inventory.view_items', resolved)
+        self.assertIn('inventory.view_categories', resolved)
+        self.assertIn('inventory.view_locations', resolved)
+        self.assertNotIn('inventory.post_depreciation', resolved)
+
     def test_items_module_declared_with_view_manage_full(self):
         self.assertIn('items', MODULES)
         self.assertIn('view', MODULES['items'])

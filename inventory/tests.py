@@ -8,6 +8,7 @@ from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import QueryDict
 from django.test import TestCase
 from django.utils import timezone
+from rest_framework import status
 from rest_framework.test import APIClient
 
 from inventory.models import (
@@ -351,6 +352,106 @@ class InspectionCertificateSerializerContractTests(TestCase):
 
         self.assertEqual(certificate.stage, InspectionStage.DRAFT)
         self.assertEqual(certificate.status, 'DRAFT')
+
+
+class InspectionWorkflowPermissionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.department = Location.objects.create(
+            name='Inspection Permission Department',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        self.user = User.objects.create_user(username='stage.one.initiator', password='pw')
+        self.user.profile.assigned_locations.add(self.department)
+        self.user.user_permissions.add(self._perm('initiate_inspection'))
+        self.client.force_authenticate(user=self.user)
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _payload(self, contract_no='IC-STAGE-ONE-001'):
+        today = timezone.now().date().isoformat()
+        return {
+            'date': today,
+            'contract_no': contract_no,
+            'contract_date': today,
+            'contractor_name': 'Stage One Supplier',
+            'contractor_address': 'Block S',
+            'indenter': 'Stage One Indenter',
+            'indent_no': f'IND-{contract_no}',
+            'department': self.department.id,
+            'date_of_delivery': today,
+            'delivery_type': 'FULL',
+            'remarks': '',
+            'inspected_by': 'Stage One Inspector',
+            'date_of_inspection': today,
+            'consignee_name': 'Stage One Consignee',
+            'consignee_designation': 'Manager',
+            'items': [
+                {
+                    'item': None,
+                    'item_description': 'Stage one line item',
+                    'item_specifications': '',
+                    'tendered_quantity': 1,
+                    'accepted_quantity': 1,
+                    'rejected_quantity': 0,
+                    'unit_price': '10.00',
+                    'remarks': '',
+                }
+            ],
+        }
+
+    def test_stage_one_permission_can_create_draft_without_generated_add_permission(self):
+        response = self.client.post('/api/inventory/inspections/', self._payload(), format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        certificate = InspectionCertificate.objects.get(contract_no='IC-STAGE-ONE-001')
+        self.assertEqual(certificate.stage, InspectionStage.DRAFT)
+
+    def test_stage_one_permission_can_patch_and_initiate_draft_without_generated_change_permission(self):
+        certificate = InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no='IC-STAGE-ONE-002',
+            contract_date=timezone.now().date(),
+            contractor_name='Stage One Supplier',
+            contractor_address='Block S',
+            indenter='Stage One Indenter',
+            indent_no='IND-STAGE-ONE-002',
+            department=self.department,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='Draft',
+            inspected_by='Stage One Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Stage One Consignee',
+            consignee_designation='Manager',
+        )
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=None,
+            item_description='Stage one line item',
+            item_specifications='',
+            tendered_quantity=1,
+            accepted_quantity=1,
+            rejected_quantity=0,
+            unit_price='10.00',
+            remarks='',
+        )
+
+        patch_response = self.client.patch(
+            f'/api/inventory/inspections/{certificate.id}/',
+            {'remarks': 'Reviewed draft'},
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK, patch_response.data)
+
+        initiate_response = self.client.post(f'/api/inventory/inspections/{certificate.id}/initiate/')
+
+        self.assertEqual(initiate_response.status_code, status.HTTP_200_OK, initiate_response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.CENTRAL_REGISTER)
+        self.assertEqual(certificate.initiated_by, self.user)
 
 
 class InspectionCertificateApiScopeTests(TestCase):

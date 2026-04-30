@@ -145,6 +145,23 @@ class InspectionItem(models.Model):
     manufactured_date = models.DateField(null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
 
+    # Stage 4: Finance capitalization details for fixed assets
+    depreciation_asset_class = models.ForeignKey(
+        'DepreciationAssetClass',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='inspection_items',
+    )
+    capitalization_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    capitalization_date = models.DateField(null=True, blank=True)
+
     def clean(self):
         if (self.accepted_quantity + self.rejected_quantity) > self.tendered_quantity:
             raise ValidationError("Accepted + Rejected quantity cannot exceed Tendered quantity.")

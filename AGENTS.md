@@ -21,7 +21,6 @@ backend/
 | Global config | `ams/settings.py` | env, DB, DRF, JWT, CORS |
 | Inventory rules | `inventory/` | see local AGENTS for hotspot details |
 | User/group API | `user_management/views.py`, `serializers.py`, `urls.py` | frontend contract source |
-| Role bootstrap | `user_management/management/commands/initialize_roles.py` | permission seeding/warnings |
 
 ## CONVENTIONS
 - Auth default is `IsAuthenticated` plus cookie JWT auth class in settings.
@@ -38,7 +37,7 @@ backend/
 
 ## UNIQUE STYLES
 - Custom auth is split: Djoser for user endpoints, custom cookie views for session-like JWT flow.
-- Management commands are used for system bootstrap instead of one unified seed pipeline.
+- Avoid reintroducing database seed/bootstrap scripts without an explicit project decision.
 - Tests are app-local `tests.py` modules, not a centralized pytest tree.
 
 ## COMMANDS
@@ -46,8 +45,6 @@ backend/
 python manage.py runserver
 python manage.py test
 python manage.py migrate
-python manage.py initialize_roles
-python manage.py initialize_hierarchy
 ```
 
 ## NOTES

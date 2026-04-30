@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.db import models
 from ..models.instance_model import ItemInstance
+from ..services.depreciation_service import depreciation_summary_for_asset, empty_depreciation_summary
 
 
 class ItemInstanceSerializer(serializers.ModelSerializer):
@@ -23,6 +24,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     allocated_to = serializers.SerializerMethodField()
     allocated_to_type = serializers.SerializerMethodField()
     stock_entry_ids = serializers.SerializerMethodField()
+    depreciation_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = ItemInstance
@@ -32,7 +34,7 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             'current_location', 'location_name', 'location_code', 'full_location_path',
             'status', 'in_charge', 'authority_store_name', 'authority_store_code',
             'inspection_certificate', 'inspection_certificate_id', 'allocated_to', 'allocated_to_type',
-            'stock_entry_ids', 'is_active', 'created_at', 'updated_at', 'created_by_name'
+            'stock_entry_ids', 'depreciation_summary', 'is_active', 'created_at', 'updated_at', 'created_by_name'
         ]
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
@@ -103,6 +105,10 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
 
     def get_stock_entry_ids(self, obj):
         return list(obj.stock_entry_items.values_list('stock_entry_id', flat=True).distinct())
+
+    def get_depreciation_summary(self, obj):
+        asset = getattr(obj, "fixed_asset_entry", None)
+        return depreciation_summary_for_asset(asset) or empty_depreciation_summary()
 
     def get_authority_store_name(self, obj):
         # Use prefetched parent_location relationship instead of method call

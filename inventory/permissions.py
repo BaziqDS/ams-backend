@@ -4,6 +4,11 @@ from rest_framework import permissions
 
 def _has_perm(user, codename: str) -> bool:
     dotted = codename if "." in codename else f"inventory.{codename}"
+    # Role editors and tests can mutate permissions on an authenticated user
+    # object during the same process. Avoid stale Django permission caches here.
+    for cache_name in ("_perm_cache", "_user_perm_cache", "_group_perm_cache"):
+        if hasattr(user, cache_name):
+            delattr(user, cache_name)
     return user.has_perm(dotted)
 
 
@@ -157,4 +162,30 @@ class StockRegisterPermission(permissions.BasePermission):
             return _has_perm(user, "inventory.edit_stock_registers")
         if request.method == "DELETE":
             return _has_perm(user, "inventory.delete_stock_registers")
+        return False
+
+
+class DepreciationPermission(permissions.BasePermission):
+    """Domain-permission gate for depreciation endpoints."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        action = getattr(view, "action", None)
+        if request.method in permissions.SAFE_METHODS or action in {"preview", "schedule", "uncapitalized"}:
+            return _has_perm(user, "inventory.view_depreciation")
+        if action in {"post", "reverse"}:
+            return _has_perm(user, "inventory.post_depreciation")
+        if view.__class__.__name__ in {
+            "DepreciationPolicyViewSet",
+            "DepreciationAssetClassViewSet",
+            "DepreciationRateVersionViewSet",
+        }:
+            return _has_perm(user, "inventory.post_depreciation")
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            return _has_perm(user, "inventory.manage_depreciation")
         return False

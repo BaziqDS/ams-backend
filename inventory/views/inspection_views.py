@@ -11,13 +11,38 @@ from ..models.batch_model import ItemBatch
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
 
+
+class InspectionWorkflowPermissions(StrictDjangoModelPermissions):
+    """Allow inspection stage permissions to drive inspection workflow actions."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        action_name = getattr(view, 'action', None)
+
+        if request.method == 'POST' and action_name == 'create':
+            if user.has_perm('inventory.initiate_inspection'):
+                return True
+
+        if request.method in ('PUT', 'PATCH') and action_name in ('update', 'partial_update'):
+            pk = getattr(view, 'kwargs', {}).get(getattr(view, 'lookup_url_kwarg', None) or view.lookup_field)
+            if pk and user.has_perm('inventory.initiate_inspection'):
+                if view.get_queryset().filter(pk=pk, stage=InspectionStage.DRAFT).exists():
+                    return True
+
+        if request.method == 'POST' and action_name == 'initiate':
+            if user.has_perm('inventory.initiate_inspection'):
+                return True
+
+        return super().has_permission(request, view)
+
+
 class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = InspectionCertificate.objects.all().select_related(
         'department', 'initiated_by', 'stock_filled_by', 
         'central_store_filled_by', 'finance_reviewed_by', 'rejected_by'
     ).prefetch_related('items__item', 'stock_entries')
     serializer_class = InspectionCertificateSerializer
-    permission_classes = [permissions.IsAuthenticated, StrictDjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, InspectionWorkflowPermissions]
     filter_backends = [filters.SearchFilter]
     search_fields = ['contract_no', 'contractor_name', 'indenter']
 

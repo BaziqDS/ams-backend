@@ -1,6 +1,14 @@
 from rest_framework import serializers
+from decimal import Decimal
+
 from ..models.item_model import Item
 from .category_serializer import CategorySerializer
+from ..models.category_model import CategoryType
+from ..services.depreciation_service import (
+    depreciation_summary_for_asset,
+    empty_depreciation_summary,
+    money,
+)
 
 class ItemSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='category.name', read_only=True)
@@ -12,6 +20,7 @@ class ItemSerializer(serializers.ModelSerializer):
     available_quantity = serializers.SerializerMethodField()
     is_low_stock = serializers.SerializerMethodField()
     standalone_location_count = serializers.SerializerMethodField()
+    depreciation_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
@@ -22,7 +31,7 @@ class ItemSerializer(serializers.ModelSerializer):
             'total_quantity', 
             'in_transit_quantity', 'available_quantity',
             'is_low_stock', 'standalone_location_count', 'is_active', 'created_at', 'updated_at',
-            'created_by_name'
+            'created_by_name', 'depreciation_summary'
         )
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
@@ -52,5 +61,42 @@ class ItemSerializer(serializers.ModelSerializer):
     def get_standalone_location_count(self, obj):
         counts = self.context.get('standalone_location_counts') or {}
         return counts.get(obj.id, 0)
+
+    def get_depreciation_summary(self, obj):
+        if not obj.category or obj.category.get_category_type() != CategoryType.FIXED_ASSET:
+            return empty_depreciation_summary()
+
+        asset_count = 0
+        original_cost = Decimal("0.00")
+        accumulated = Decimal("0.00")
+        current_wdv = Decimal("0.00")
+        latest_year = None
+        linked_entry_id = None
+
+        assets = obj.fixed_asset_entries.select_related("asset_class", "policy").prefetch_related("depreciation_entries")
+        for asset in assets:
+            summary = depreciation_summary_for_asset(asset)
+            if not summary:
+                continue
+            asset_count += 1
+            linked_entry_id = linked_entry_id or summary["asset_id"]
+            original_cost += Decimal(summary["original_cost"])
+            accumulated += Decimal(summary["accumulated_depreciation"])
+            current_wdv += Decimal(summary["current_wdv"])
+            if summary["latest_posted_fiscal_year"] is not None:
+                latest_year = max(latest_year or summary["latest_posted_fiscal_year"], summary["latest_posted_fiscal_year"])
+
+        return {
+            "capitalized": asset_count > 0,
+            "asset_id": linked_entry_id if asset_count == 1 else None,
+            "asset_count": asset_count,
+            "asset_number": None,
+            "target_type": None,
+            "original_cost": str(money(original_cost)),
+            "accumulated_depreciation": str(money(accumulated)),
+            "current_wdv": str(money(current_wdv)),
+            "latest_posted_fiscal_year": latest_year,
+            "status": None,
+        }
 
 

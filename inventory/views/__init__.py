@@ -9,5 +9,12 @@ from .instance_views import ItemInstanceViewSet
 from .batch_views import ItemBatchViewSet
 from .history_views import MovementHistoryViewSet
 from .stock_register_views import StockRegisterViewSet
-
+from .depreciation_views import (
+    AssetValueAdjustmentViewSet,
+    DepreciationAssetClassViewSet,
+    DepreciationPolicyViewSet,
+    DepreciationRateVersionViewSet,
+    DepreciationRunViewSet,
+    FixedAssetRegisterEntryViewSet,
+)
 

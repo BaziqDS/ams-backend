@@ -5,7 +5,10 @@ from .views import (
     StockRecordViewSet, StockEntryViewSet, PersonViewSet,
     StockCorrectionViewSet,
     StockAllocationViewSet, InspectionViewSet, ItemInstanceViewSet,
-    ItemBatchViewSet, MovementHistoryViewSet, StockRegisterViewSet
+    ItemBatchViewSet, MovementHistoryViewSet, StockRegisterViewSet,
+    AssetValueAdjustmentViewSet, DepreciationAssetClassViewSet,
+    DepreciationPolicyViewSet, DepreciationRateVersionViewSet,
+    DepreciationRunViewSet, FixedAssetRegisterEntryViewSet,
 )
 
 router = DefaultRouter()
@@ -22,6 +25,12 @@ router.register(r'item-instances', ItemInstanceViewSet, basename='item-instance'
 router.register(r'item-batches', ItemBatchViewSet, basename='item-batch')
 router.register(r'movement-history', MovementHistoryViewSet, basename='movement-history')
 router.register(r'stock-registers', StockRegisterViewSet, basename='stock-register')
+router.register(r'depreciation/policies', DepreciationPolicyViewSet, basename='depreciation-policy')
+router.register(r'depreciation/assets', FixedAssetRegisterEntryViewSet, basename='depreciation-asset')
+router.register(r'depreciation/asset-classes', DepreciationAssetClassViewSet, basename='depreciation-asset-class')
+router.register(r'depreciation/rates', DepreciationRateVersionViewSet, basename='depreciation-rate')
+router.register(r'depreciation/runs', DepreciationRunViewSet, basename='depreciation-run')
+router.register(r'depreciation/adjustments', AssetValueAdjustmentViewSet, basename='depreciation-adjustment')
 
 
 

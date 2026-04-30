@@ -11,7 +11,7 @@ inventory/
 ├── views/        # split DRF view modules + shared utils
 ├── signals.py    # cross-cutting side effects / auto-creation / movement history
 ├── urls.py       # mounts inventory endpoints
-└── management/commands/ # bootstrap commands
+└── management/commands/ # custom management commands, if any
 ```
 
 ## WHERE TO LOOK
@@ -20,7 +20,7 @@ inventory/
 | Row-level visibility | `views/utils.py` | `ScopedViewSetMixin` |
 | Root endpoint wiring | `urls.py` | API surface summary |
 | Auto side effects | `signals.py` | high-risk, high-coupling file |
-| Location hierarchy | `models/location_model.py`, `management/commands/initialize_hierarchy.py` | hierarchy logic |
+| Location hierarchy | `models/location_model.py` | hierarchy logic |
 | Movement / stock history | `signals.py`, `models/history_model.py`, `views/history_views.py` | side effects span files |
 
 ## CONVENTIONS
@@ -37,12 +37,11 @@ inventory/
 ## UNIQUE STYLES
 - Business rules live partly in model helpers, partly in signals, partly in view scoping.
 - Central-role bypasses exist in scoped query logic (`Central Store Manager`, specific perms).
-- Management commands are part of the domain lifecycle, not just dev tooling.
+- Avoid reintroducing database seed/bootstrap commands without an explicit project decision.
 
 ## COMMANDS
 ```bash
 python manage.py test inventory
-python manage.py initialize_hierarchy
 ```
 
 ## NOTES

@@ -59,6 +59,7 @@ class InspectionItemSerializer(serializers.ModelSerializer):
     item_tracking_type = serializers.CharField(source='item.category.get_tracking_type', read_only=True)
     central_register_name = serializers.CharField(source='central_register.register_number', read_only=True)
     stock_register_name = serializers.CharField(source='stock_register.register_number', read_only=True)
+    depreciation_asset_class_name = serializers.CharField(source='depreciation_asset_class.name', read_only=True, allow_null=True)
 
     class Meta:
         model = InspectionItem
@@ -71,9 +72,29 @@ class InspectionItemSerializer(serializers.ModelSerializer):
             'stock_register', 'stock_register_name', 'stock_register_no', 
             'stock_register_page_no', 'stock_entry_date',
             'central_register', 'central_register_name', 'central_register_no', 
-            'central_register_page_no', 'batch_number', 'manufactured_date', 'expiry_date'
+            'central_register_page_no', 'batch_number', 'manufactured_date', 'expiry_date',
+            'depreciation_asset_class', 'depreciation_asset_class_name',
+            'capitalization_cost', 'capitalization_date'
         )
         read_only_fields = ('inspection_certificate',)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        item = attrs.get('item') or getattr(self.instance, 'item', None)
+        has_depreciation_profile = any(
+            attrs.get(field) not in (None, '')
+            for field in ('depreciation_asset_class', 'capitalization_cost', 'capitalization_date')
+        )
+        if has_depreciation_profile:
+            if not item:
+                raise serializers.ValidationError({
+                    'item': 'A catalog item is required before fixed asset capitalization details can be set.'
+                })
+            if item.category.get_category_type() != 'FIXED_ASSET':
+                raise serializers.ValidationError({
+                    'depreciation_asset_class': 'Depreciation capitalization details are only allowed for fixed assets.'
+                })
+        return attrs
 
 class InspectionRelatedStockEntrySerializer(serializers.ModelSerializer):
     class Meta:
@@ -155,6 +176,10 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
         is_initiated = validated_data.pop('is_initiated', False)
         
         request = self.context.get('request')
+        if is_initiated and request and request.user and not request.user.has_perm('inventory.initiate_inspection'):
+            raise serializers.ValidationError({
+                'is_initiated': 'You do not have permission to initiate inspections.'
+            })
         if request and request.user:
             validated_data['initiated_by'] = request.user
         
@@ -190,6 +215,11 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
         is_initiated = validated_data.pop('is_initiated', False)
         
         request = self.context.get('request')
+        if is_initiated and instance.stage == InspectionStage.DRAFT:
+            if request and request.user and not request.user.has_perm('inventory.initiate_inspection'):
+                raise serializers.ValidationError({
+                    'is_initiated': 'You do not have permission to initiate inspections.'
+                })
         
         if is_initiated and instance.stage == InspectionStage.DRAFT:
              instance.status = 'IN_PROGRESS'
@@ -221,7 +251,12 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
 
             # Update nested items if provided
             if items_data is not None:
-                if instance.stage in [InspectionStage.DRAFT, InspectionStage.STOCK_DETAILS, InspectionStage.CENTRAL_REGISTER]:
+                if instance.stage in [
+                    InspectionStage.DRAFT,
+                    InspectionStage.STOCK_DETAILS,
+                    InspectionStage.CENTRAL_REGISTER,
+                    InspectionStage.FINANCE_REVIEW,
+                ]:
                     existing_items = {item.id: item for item in instance.items.all()}
                     
                     new_item_ids = []
@@ -234,12 +269,13 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
                                 setattr(item_instance, attr, value)
                             item_instance.save()
                             new_item_ids.append(item_id)
-                        else:
+                        elif instance.stage != InspectionStage.FINANCE_REVIEW:
                             # Create new
                             new_item = InspectionItem.objects.create(inspection_certificate=instance, **item_data)
                             new_item_ids.append(new_item.id)
                     
                     # Delete removed
-                    instance.items.exclude(id__in=new_item_ids).delete()
+                    if instance.stage != InspectionStage.FINANCE_REVIEW:
+                        instance.items.exclude(id__in=new_item_ids).delete()
         
         return instance

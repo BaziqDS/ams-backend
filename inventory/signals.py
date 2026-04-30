@@ -9,8 +9,9 @@ from .models.stock_record_model import StockRecord
 from .models.instance_model import ItemInstance
 from .models.inspection_model import InspectionCertificate, InspectionItem
 from .models.batch_model import ItemBatch
-from .models.category_model import TrackingType
+from .models.category_model import CategoryType, TrackingType
 from .models.history_model import MovementHistory, MovementAction
+from .services.depreciation_service import capitalize_inspection_item
 
 logger = logging.getLogger(__name__)
 
@@ -646,11 +647,18 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
         items_to_move = []
         for i_item in instance.items.filter(accepted_quantity__gt=0):
             tracking_type = i_item.item.category.get_tracking_type()
+            category_type = i_item.item.category.get_category_type()
             # Find or Create Batch
             batch = None
             if tracking_type == TrackingType.QUANTITY:
                 if not i_item.batch_number:
                     i_item.batch_number = _inspection_tracking_lot_code(instance, i_item)
+                    i_item.save(update_fields=['batch_number'])
+                elif category_type == CategoryType.FIXED_ASSET and ItemBatch.objects.filter(
+                    item=i_item.item,
+                    batch_number=i_item.batch_number,
+                ).exists():
+                    i_item.batch_number = f"{i_item.batch_number}-{instance.contract_no}-L{i_item.id}"
                     i_item.save(update_fields=['batch_number'])
 
             if tracking_type != TrackingType.INDIVIDUAL and i_item.batch_number:
@@ -682,8 +690,8 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
             )
 
             # 2.1 Handle Individual Tracking (Instance Generation)
+            instances = []
             if tracking_type == TrackingType.INDIVIDUAL:
-                instances = []
                 for idx in range(i_item.accepted_quantity):
                     # DO NOT auto-generate serial number - leave as NULL for store manager to assign later
                     instance_obj = ItemInstance.objects.create(
@@ -699,6 +707,8 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                 # Link instances to the entry item
                 sei.instances.set(instances)
                 sei.accepted_instances.set(instances)
+
+            capitalize_inspection_item(i_item, instances=instances, batch=batch, user=receipt.created_by)
 
             items_to_move.append((
                 i_item.item, 
