@@ -31,6 +31,7 @@ from inventory.serializers.depreciation_serializer import (
     FixedAssetRegisterEntrySerializer,
 )
 from inventory.services.depreciation_service import (
+    depreciation_category_for_item,
     get_default_policy,
     post_depreciation_run,
     preview_depreciation_run,
@@ -107,13 +108,27 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
         entries = asset.depreciation_entries.select_related("run", "rate_version", "rate_version__asset_class").order_by("fiscal_year_start")
         return Response(DepreciationEntrySerializer(entries, many=True).data)
 
+    def _uncapitalized_depreciation_context(self, item):
+        category = depreciation_category_for_item(item)
+        setup = DepreciationAssetClass.objects.filter(category=category).prefetch_related("rate_versions").order_by("id").first()
+        rate = setup.rate_versions.order_by("-effective_from", "-created_at").first() if setup else None
+        return {
+            "depreciation_category": category.id if category else None,
+            "depreciation_category_name": category.name if category else None,
+            "depreciation_category_code": category.code if category else None,
+            "depreciation_setup": setup.id if setup else None,
+            "depreciation_setup_name": setup.name if setup else None,
+            "depreciation_setup_code": setup.code if setup else None,
+            "depreciation_rate": str(rate.rate) if rate else None,
+        }
+
     @action(detail=False, methods=["get"], url_path="uncapitalized")
     def uncapitalized(self, request):
         rows = []
         fixed_asset_category_filter = Q(item__category__category_type=CategoryType.FIXED_ASSET) | Q(
             item__category__parent_category__category_type=CategoryType.FIXED_ASSET
         )
-        instances = ItemInstance.objects.select_related("item", "item__category").filter(
+        instances = ItemInstance.objects.select_related("item", "item__category", "item__category__parent_category").filter(
             fixed_asset_category_filter,
             fixed_asset_entry__isnull=True,
         )[:200]
@@ -127,9 +142,10 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
                 "batch": None,
                 "batch_number": None,
                 "quantity": 1,
+                **self._uncapitalized_depreciation_context(instance.item),
             })
 
-        batch_quantities = ItemBatch.objects.select_related("item", "item__category").filter(
+        batch_quantities = ItemBatch.objects.select_related("item", "item__category", "item__category__parent_category").filter(
             fixed_asset_category_filter,
             item__category__tracking_type=TrackingType.QUANTITY,
             fixed_asset_entry__isnull=True,
@@ -147,6 +163,7 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
                 "batch": batch.id,
                 "batch_number": batch.batch_number,
                 "quantity": quantity,
+                **self._uncapitalized_depreciation_context(batch.item),
             })
         return Response(rows)
 

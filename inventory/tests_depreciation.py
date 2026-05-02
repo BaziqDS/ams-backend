@@ -21,10 +21,15 @@ from inventory.models import (
     ItemBatch,
     Location,
     LocationType,
+    StockRecord,
     StockRegister,
     TrackingType,
 )
-from inventory.services.depreciation_service import post_depreciation_run, preview_depreciation_run
+from inventory.services.depreciation_service import (
+    get_or_create_asset_class_for_item,
+    post_depreciation_run,
+    preview_depreciation_run,
+)
 
 
 class DepreciationTestDataMixin:
@@ -145,6 +150,31 @@ class DepreciationTestDataMixin:
 
 
 class DepreciationInspectionCapitalizationTests(DepreciationTestDataMixin, TestCase):
+    def test_depreciation_profile_uses_parent_fixed_asset_category(self):
+        equipment = Category.objects.create(
+            name="IT Equipment",
+            code="IT",
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        laptop_subcategory = Category.objects.create(
+            name="Laptop",
+            code="LAP",
+            parent_category=equipment,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        item = Item.objects.create(
+            name="Dell Laptop",
+            category=laptop_subcategory,
+            acct_unit="unit",
+            created_by=self.user,
+        )
+
+        asset_class = get_or_create_asset_class_for_item(item, self.user)
+
+        self.assertEqual(asset_class.category_id, equipment.id)
+        self.assertEqual(asset_class.name, "IT Equipment")
+        self.assertEqual(asset_class.code, "DEP-IT")
+
     def test_completion_creates_register_entries_for_fixed_asset_instances_and_lots_only(self):
         certificate = self.make_certificate()
         self.add_inspection_item(certificate, self.laptop, 2, "100000")
@@ -299,6 +329,62 @@ class DepreciationRunCalculationTests(DepreciationTestDataMixin, TestCase):
 
 
 class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
+    def test_uncapitalized_payload_includes_depreciation_setup_context(self):
+        furniture = Category.objects.create(
+            name="Furniture Fixtures",
+            code="FURN-FIX",
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        chair_subcategory = Category.objects.create(
+            name="Chairs",
+            code="CHAIRS",
+            parent_category=furniture,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        chair = Item.objects.create(
+            name="Visitor Chair",
+            category=chair_subcategory,
+            acct_unit="unit",
+            created_by=self.user,
+        )
+        asset_class = DepreciationAssetClass.objects.create(
+            name="Furniture Fixtures",
+            code="DEP-FURN-FIX",
+            category=furniture,
+            created_by=self.user,
+        )
+        DepreciationRateVersion.objects.create(
+            asset_class=asset_class,
+            rate=Decimal("10.00"),
+            effective_from=date(2026, 7, 1),
+            source_reference="Finance setup",
+            created_by=self.user,
+            approved_by=self.user,
+        )
+        batch = ItemBatch.objects.create(item=chair, batch_number="VC-LOT-1", created_by=self.user)
+        StockRecord.objects.create(
+            item=chair,
+            batch=batch,
+            location=self.department.auto_created_store,
+            quantity=5,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        self.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="inventory", codename="view_depreciation")
+        )
+
+        response = client.get("/api/inventory/depreciation/assets/uncapitalized/")
+
+        self.assertEqual(response.status_code, 200)
+        row = next(item for item in response.data if item["batch"] == batch.id)
+        self.assertEqual(row["depreciation_category_name"], "Furniture Fixtures")
+        self.assertEqual(row["depreciation_category_code"], "FURN-FIX")
+        self.assertEqual(row["depreciation_setup_name"], "Furniture Fixtures")
+        self.assertEqual(row["depreciation_setup_code"], "DEP-FURN-FIX")
+        self.assertEqual(row["depreciation_rate"], "10.00")
+
     def test_depreciation_endpoints_require_depreciation_permission(self):
         client = APIClient()
         client.force_authenticate(user=self.user)
@@ -346,6 +432,77 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
             "source_reference": "Finance circular",
         }, format="json")
         self.assertEqual(allowed.status_code, 201)
+
+    def test_new_rate_closes_previous_rate_on_day_before_effective_from(self):
+        asset_class = DepreciationAssetClass.objects.create(
+            name="IT Equipment",
+            code="IT-EQ",
+            category=self.asset_individual_category,
+            created_by=self.user,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        self.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="inventory", codename="post_depreciation")
+        )
+
+        first = client.post("/api/inventory/depreciation/rates/", {
+            "asset_class": asset_class.id,
+            "rate": "25.00",
+            "effective_from": "2026-05-10",
+            "source_reference": "Initial finance setup",
+        }, format="json")
+        self.assertEqual(first.status_code, 201)
+
+        second = client.post("/api/inventory/depreciation/rates/", {
+            "asset_class": asset_class.id,
+            "rate": "30.00",
+            "effective_from": "2026-05-16",
+            "source_reference": "Updated finance setup",
+        }, format="json")
+
+        self.assertEqual(second.status_code, 201)
+        first_rate = DepreciationRateVersion.objects.get(pk=first.data["id"])
+        second_rate = DepreciationRateVersion.objects.get(pk=second.data["id"])
+        self.assertEqual(first_rate.effective_to, date(2026, 5, 15))
+        self.assertIsNone(second_rate.effective_to)
+
+    def test_open_ended_rate_cannot_overlap_a_future_rate(self):
+        asset_class = DepreciationAssetClass.objects.create(
+            name="IT Equipment",
+            code="IT-EQ",
+            category=self.asset_individual_category,
+            created_by=self.user,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        self.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="inventory", codename="post_depreciation")
+        )
+
+        first = client.post("/api/inventory/depreciation/rates/", {
+            "asset_class": asset_class.id,
+            "rate": "25.00",
+            "effective_from": "2026-05-10",
+        }, format="json")
+        self.assertEqual(first.status_code, 201)
+        future = client.post("/api/inventory/depreciation/rates/", {
+            "asset_class": asset_class.id,
+            "rate": "35.00",
+            "effective_from": "2026-06-01",
+        }, format="json")
+        self.assertEqual(future.status_code, 201)
+
+        overlapping = client.post("/api/inventory/depreciation/rates/", {
+            "asset_class": asset_class.id,
+            "rate": "30.00",
+            "effective_from": "2026-05-20",
+        }, format="json")
+
+        self.assertEqual(overlapping.status_code, 400)
+        self.assertIn("effective_to", overlapping.data)
+        first_rate = DepreciationRateVersion.objects.get(pk=first.data["id"])
+        self.assertEqual(first_rate.effective_to, date(2026, 5, 31))
 
     def test_draft_run_can_use_default_policy_when_policy_is_omitted(self):
         client = APIClient()

@@ -50,9 +50,16 @@ def default_asset_class_code(category) -> str:
     return f"DEP-{raw_code}"[:50]
 
 
+def depreciation_category_for_item(item):
+    category = item.category
+    if category.parent_category and category.parent_category.get_category_type() == CategoryType.FIXED_ASSET:
+        return category.parent_category
+    return category
+
+
 def get_or_create_asset_class_for_item(item, user=None) -> DepreciationAssetClass:
     policy = get_default_policy(user)
-    category = item.category
+    category = depreciation_category_for_item(item)
     asset_class, _ = DepreciationAssetClass.objects.get_or_create(
         category=category,
         defaults={

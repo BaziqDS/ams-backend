@@ -1,3 +1,7 @@
+from datetime import timedelta
+
+from django.db import transaction
+from django.db.models import Q
 from rest_framework import serializers
 
 from inventory.models import (
@@ -67,15 +71,60 @@ class DepreciationRateVersionSerializer(serializers.ModelSerializer):
             "id", "asset_class", "asset_class_name", "rate", "effective_from", "effective_to",
             "source_reference", "notes", "created_by", "approved_by", "created_at",
         ]
-        read_only_fields = ["created_by", "created_at"]
+        read_only_fields = ["created_by", "approved_by", "created_at"]
+
+    def _overlapping_rates(self, asset_class, effective_from, effective_to):
+        queryset = DepreciationRateVersion.objects.filter(asset_class=asset_class)
+        if self.instance is not None:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if effective_to is not None:
+            queryset = queryset.filter(effective_from__lte=effective_to)
+        return queryset.filter(Q(effective_to__isnull=True) | Q(effective_to__gte=effective_from))
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        asset_class = attrs.get("asset_class") or getattr(self.instance, "asset_class", None)
+        effective_from = attrs.get("effective_from") or getattr(self.instance, "effective_from", None)
+        effective_to = attrs.get("effective_to", getattr(self.instance, "effective_to", None))
+
+        if effective_to and effective_from and effective_to < effective_from:
+            raise serializers.ValidationError({
+                "effective_to": "Effective-to date cannot be before effective-from date."
+            })
+
+        if self.instance is not None and asset_class and effective_from:
+            if self._overlapping_rates(asset_class, effective_from, effective_to).exists():
+                raise serializers.ValidationError({
+                    "effective_to": "Rate period overlaps an existing rate for this depreciation category."
+                })
+        return attrs
 
     def create(self, validated_data):
         request = self.context.get("request")
-        if request and request.user:
-            validated_data["created_by"] = request.user
-            if not validated_data.get("approved_by"):
+        asset_class = validated_data["asset_class"]
+        effective_from = validated_data["effective_from"]
+        effective_to = validated_data.get("effective_to")
+
+        with transaction.atomic():
+            existing_rates = DepreciationRateVersion.objects.select_for_update().filter(asset_class=asset_class)
+            previous_rate = existing_rates.filter(effective_from__lt=effective_from).order_by("-effective_from", "-created_at").first()
+            if previous_rate and (previous_rate.effective_to is None or previous_rate.effective_to >= effective_from):
+                previous_rate.effective_to = effective_from - timedelta(days=1)
+                previous_rate.save(update_fields=["effective_to"])
+
+            overlapping_rates = DepreciationRateVersion.objects.select_for_update().filter(asset_class=asset_class)
+            if effective_to is not None:
+                overlapping_rates = overlapping_rates.filter(effective_from__lte=effective_to)
+            overlapping_rates = overlapping_rates.filter(Q(effective_to__isnull=True) | Q(effective_to__gte=effective_from))
+            if overlapping_rates.exists():
+                raise serializers.ValidationError({
+                    "effective_to": "Rate period overlaps an existing rate for this depreciation category."
+                })
+
+            if request and request.user:
+                validated_data["created_by"] = request.user
                 validated_data["approved_by"] = request.user
-        return super().create(validated_data)
+            return super().create(validated_data)
 
 
 class DepreciationEntrySerializer(serializers.ModelSerializer):
@@ -242,3 +291,10 @@ class UncapitalizedAssetSerializer(serializers.Serializer):
     batch = serializers.PrimaryKeyRelatedField(queryset=ItemBatch.objects.all(), allow_null=True)
     batch_number = serializers.CharField(allow_blank=True, allow_null=True)
     quantity = serializers.IntegerField()
+    depreciation_category = serializers.IntegerField(allow_null=True)
+    depreciation_category_name = serializers.CharField(allow_null=True)
+    depreciation_category_code = serializers.CharField(allow_null=True)
+    depreciation_setup = serializers.IntegerField(allow_null=True)
+    depreciation_setup_name = serializers.CharField(allow_null=True)
+    depreciation_setup_code = serializers.CharField(allow_null=True)
+    depreciation_rate = serializers.CharField(allow_null=True)
