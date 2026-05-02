@@ -35,6 +35,7 @@ urlpatterns = [
     # App endpoints
     path('api/users/', include('user_management.urls')),
     path('api/inventory/', include('inventory.urls')),
+    path('api/notifications/', include('notifications.urls')),
     path('silk/', include('silk.urls', namespace='silk')),
 ]
 

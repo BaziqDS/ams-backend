@@ -1,1 +1,2 @@
+from .report_service import build_inventory_position_report
 

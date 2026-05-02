@@ -143,3 +143,24 @@ class CapabilitiesEndpointStockRegistersTests(TestCase):
         body = resp.json() if hasattr(resp, 'json') else json.loads(resp.content.decode())
         self.assertEqual(body['dependencies']['stock-registers']['manage'], ['locations'])
         self.assertEqual(body['dependencies']['stock-registers']['full'], ['locations'])
+
+
+class CapabilitiesEndpointReportsTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_capabilities_reports_reports_view_level(self):
+        user = User.objects.create_user(username='reports_caps', password='pw')
+        role = Group.objects.create(name='Reports View Role')
+        role.permissions.add(self._perm('inventory.view_reports'))
+        user.groups.add(role)
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/auth/capabilities/')
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json() if hasattr(resp, 'json') else json.loads(resp.content.decode())
+        self.assertEqual(body['modules']['reports'], 'view')
+        self.assertEqual(body['manifest']['reports'], ['view'])

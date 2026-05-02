@@ -2,6 +2,7 @@
 import json
 from datetime import timedelta
 
+import fitz
 from django.contrib.auth.models import Group, Permission, User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import TemporaryUploadedFile
@@ -113,6 +114,15 @@ class StockEntryDomainPermissionBootstrapTests(TestCase):
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('edit_stock_entries'), ['view_stock_entries'])
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('delete_stock_entries'), ['view_stock_entries'])
         self.assertEqual(EXPLICIT_PERMISSION_IMPLICATIONS.get('approve_stock_corrections'), ['view_stock_entries'])
+
+
+class ReportsDomainPermissionBootstrapTests(TestCase):
+    def test_reports_view_permission_exists(self):
+        perms = set(
+            Permission.objects.filter(content_type__app_label='inventory').values_list('codename', flat=True)
+        )
+
+        self.assertIn('view_reports', perms)
 
 
 class InspectionCertificateSerializerContractTests(TestCase):
@@ -3709,3 +3719,448 @@ class StockRegisterApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(StockRegister.objects.filter(id=register.id).exists())
+
+
+class InventoryPositionReportAccessTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Inventory Position Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.ee = Location.objects.create(
+            name='EE',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.csit_store = cls.csit.auto_created_store
+        cls.ee_store = cls.ee.auto_created_store
+        cls.csit_lab = Location.objects.create(
+            name='CSIT Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.csit,
+            is_standalone=False,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username, assigned_location):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(assigned_location)
+        user.user_permissions.add(self._perm('view_reports'))
+        return user
+
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and 'results' in data:
+            return data['results']
+        return data
+
+    def test_store_list_returns_only_accessible_stores(self):
+        user = self._make_user('inventory_position_store_scope', self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/reports/inventory-position/stores/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.csit_store.id, returned_ids)
+        self.assertNotIn(self.ee_store.id, returned_ids)
+
+    def test_store_list_excludes_non_store_locations(self):
+        user = self._make_user('inventory_position_store_only', self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/reports/inventory-position/stores/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertNotIn(self.csit_lab.id, returned_ids)
+
+    def test_store_list_requires_view_reports_permission(self):
+        user = User.objects.create_user(username='inventory_position_no_reports', password='pw')
+        user.profile.assigned_locations.add(self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/reports/inventory-position/stores/')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_pdf_endpoint_rejects_missing_store(self):
+        user = self._make_user('inventory_position_pdf_missing_store', self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/reports/inventory-position/pdf/')
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_pdf_endpoint_rejects_out_of_scope_store(self):
+        user = self._make_user('inventory_position_pdf_oos_store', self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/reports/inventory-position/pdf/?store={self.ee_store.id}')
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_pdf_endpoint_rejects_non_store_location(self):
+        user = self._make_user('inventory_position_pdf_non_store', self.csit)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/reports/inventory-position/pdf/?store={self.csit_lab.id}')
+
+        self.assertEqual(resp.status_code, 400)
+
+
+class InventoryPositionReportPdfTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Inventory Position PDF Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='Inventory Position PDF CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.csit_store = cls.csit.auto_created_store
+
+        consumable_parent = Category.objects.create(
+            name='Inventory Position PDF Consumables',
+            category_type=CategoryType.CONSUMABLE,
+        )
+        cls.quantity_category = Category.objects.create(
+            name='Inventory Position PDF Paper',
+            parent_category=consumable_parent,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        cls.item = Item.objects.create(
+            name='Inventory Position PDF Ream',
+            category=cls.quantity_category,
+            acct_unit='Ream',
+        )
+        StockRecord.objects.create(
+            item=cls.item,
+            location=cls.csit_store,
+            quantity=1,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _make_user(self, username):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(self.csit)
+        user.user_permissions.add(self._perm('view_reports'))
+        return user
+
+    def _get_pdf_bytes(self):
+        user = self._make_user('inventory_position_pdf_bytes')
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(f'/api/inventory/reports/inventory-position/pdf/?store={self.csit_store.id}')
+
+        self.assertEqual(response.status_code, 200)
+        if getattr(response, 'streaming', False):
+            return b''.join(response.streaming_content)
+        return response.content
+
+    def _extract_pdf_text(self):
+        pdf_bytes = self._get_pdf_bytes()
+        document = fitz.open(stream=pdf_bytes, filetype='pdf')
+
+        try:
+            return '\n'.join(page.get_text() for page in document)
+        finally:
+            document.close()
+
+    def test_pdf_endpoint_returns_pdf_content_type_for_valid_store(self):
+        user = self._make_user('inventory_position_pdf_content_type')
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/reports/inventory-position/pdf/?store={self.csit_store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp['Content-Type'].startswith('application/pdf'))
+
+    def test_pdf_endpoint_returns_inline_content_disposition_for_valid_store(self):
+        user = self._make_user('inventory_position_pdf_inline')
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/reports/inventory-position/pdf/?store={self.csit_store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('inline', resp.headers.get('Content-Disposition', ''))
+
+    def test_pdf_contains_summary_first_language_for_selected_store(self):
+        pdf_text = self._extract_pdf_text()
+
+        self.assertIn('Inventory Position Report', pdf_text)
+        self.assertIn(self.csit_store.name, pdf_text)
+        self.assertIn('Available', pdf_text)
+        self.assertIn('Allocated', pdf_text)
+        self.assertIn('In Transit', pdf_text)
+
+    def test_pdf_contains_detail_section_headings_for_instances_and_batches(self):
+        pdf_text = self._extract_pdf_text()
+
+        self.assertIn('Individual Instance Distribution', pdf_text)
+        self.assertIn('Batch Distribution', pdf_text)
+
+
+class InventoryPositionReportDataTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.root = Location.objects.create(
+            name='Inventory Position Data Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        cls.csit = Location.objects.create(
+            name='CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=cls.root,
+            is_standalone=True,
+        )
+        cls.csit_store = cls.csit.auto_created_store
+        cls.csit_lab = Location.objects.create(
+            name='CSIT Lab',
+            location_type=LocationType.LAB,
+            parent_location=cls.csit,
+            is_standalone=False,
+        )
+        cls.person = Person.objects.create(
+            name='Ayesha Khan',
+            designation='Lab Engineer',
+            department=cls.csit.name,
+        )
+        cls.person.standalone_locations.add(cls.csit)
+
+        fixed_asset_parent = Category.objects.create(
+            name='Fixed Assets',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        cls.individual_category = Category.objects.create(
+            name='Computers',
+            parent_category=fixed_asset_parent,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        consumable_parent = Category.objects.create(
+            name='Consumables',
+            category_type=CategoryType.CONSUMABLE,
+        )
+        cls.quantity_category = Category.objects.create(
+            name='Paper Supplies',
+            parent_category=consumable_parent,
+            tracking_type=TrackingType.QUANTITY,
+        )
+
+        cls.desktop_item = Item.objects.create(
+            name='Desktop Computer',
+            category=cls.individual_category,
+            acct_unit='Each',
+        )
+        cls.paper_item = Item.objects.create(
+            name='Printer Paper',
+            category=cls.quantity_category,
+            acct_unit='Ream',
+        )
+
+        cls.in_store_instance = ItemInstance.objects.create(
+            item=cls.desktop_item,
+            current_location=cls.csit_store,
+            status='AVAILABLE',
+            serial_number='DC-STORE-001',
+        )
+        cls.allocated_instance = ItemInstance.objects.create(
+            item=cls.desktop_item,
+            current_location=cls.csit_store,
+            status='ALLOCATED',
+            serial_number='DC-ALLOC-001',
+        )
+
+        cls.person_allocation_entry = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=cls.csit_store,
+            issued_to=cls.person,
+            status='COMPLETED',
+            purpose='Person allocation for desktop',
+        )
+        cls.person_allocation_entry_item = StockEntryItem.objects.create(
+            stock_entry=cls.person_allocation_entry,
+            item=cls.desktop_item,
+            quantity=1,
+        )
+        cls.person_allocation_entry_item.instances.add(cls.allocated_instance)
+        cls.person_allocation = StockAllocation.objects.create(
+            item=cls.desktop_item,
+            batch=None,
+            source_location=cls.csit_store,
+            allocated_to_person=cls.person,
+            stock_entry=cls.person_allocation_entry,
+            quantity=1,
+            status=AllocationStatus.ALLOCATED,
+        )
+
+        cls.paper_batch = ItemBatch.objects.create(
+            item=cls.paper_item,
+            batch_number='PAPER-BATCH-001',
+        )
+        cls.paper_stock = StockRecord.objects.create(
+            item=cls.paper_item,
+            batch=cls.paper_batch,
+            location=cls.csit_store,
+            quantity=10,
+            allocated_quantity=3,
+            in_transit_quantity=0,
+        )
+        cls.location_allocation_entry = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=cls.csit_store,
+            to_location=cls.csit_lab,
+            status='COMPLETED',
+            purpose='Location allocation for printer paper',
+        )
+        cls.location_allocation = StockAllocation.objects.create(
+            item=cls.paper_item,
+            batch=cls.paper_batch,
+            source_location=cls.csit_store,
+            allocated_to_location=cls.csit_lab,
+            stock_entry=cls.location_allocation_entry,
+            quantity=3,
+            status=AllocationStatus.ALLOCATED,
+        )
+
+    def _build_report(self):
+        from inventory.services.report_service import build_inventory_position_report
+
+        return build_inventory_position_report(self.csit_store)
+
+    def _summary_rows(self):
+        report = self._build_report()
+        self.assertIn('summary_rows', report)
+        return report['summary_rows']
+
+    def _instance_rows(self):
+        report = self._build_report()
+        self.assertIn('instance_rows', report)
+        return report['instance_rows']
+
+    def _batch_rows(self):
+        report = self._build_report()
+        self.assertIn('batch_rows', report)
+        return report['batch_rows']
+
+    def _find_summary_row(self, item_name):
+        return next(
+            candidate
+            for candidate in self._summary_rows()
+            if candidate['item_name'] == item_name
+        )
+
+    def test_build_inventory_position_report_exposes_structured_sections(self):
+        report = self._build_report()
+
+        self.assertIn('totals', report)
+        self.assertIn('summary_rows', report)
+        self.assertIn('instance_rows', report)
+        self.assertIn('batch_rows', report)
+
+    def test_build_inventory_position_report_includes_in_store_individual_instance_row(self):
+        rows = self._instance_rows()
+
+        row = next(
+            candidate
+            for candidate in rows
+            if candidate['item_name'] == self.desktop_item.name
+            and candidate['status'] == 'In Store'
+            and candidate['instance_id'] == self.in_store_instance.id
+        )
+
+        self.assertEqual(row['holder_type'], 'Store')
+
+    def test_build_inventory_position_report_includes_allocated_individual_person_row(self):
+        rows = self._instance_rows()
+
+        row = next(
+            candidate
+            for candidate in rows
+            if candidate['item_name'] == self.desktop_item.name
+            and candidate['status'] == 'Allocated'
+            and candidate['instance_id'] == self.allocated_instance.id
+        )
+
+        self.assertEqual(row['holder_type'], 'PERSON')
+        self.assertEqual(row['holder_name'], self.person.name)
+        self.assertEqual(row['stock_entry_number'], self.person_allocation_entry.entry_number)
+
+    def test_build_inventory_position_report_includes_in_store_quantity_row(self):
+        rows = self._batch_rows()
+
+        row = next(
+            candidate
+            for candidate in rows
+            if candidate['item_name'] == self.paper_item.name
+            and candidate['status'] == 'In Store'
+            and candidate['batch_number'] == self.paper_batch.batch_number
+        )
+
+        self.assertEqual(row['holder_type'], 'Store')
+        self.assertEqual(row['quantity'], self.paper_stock.available_quantity)
+
+    def test_build_inventory_position_report_includes_allocated_non_store_location_row(self):
+        rows = self._batch_rows()
+
+        row = next(
+            candidate
+            for candidate in rows
+            if candidate['item_name'] == self.paper_item.name
+            and candidate['status'] == 'Allocated'
+            and candidate['batch_number'] == self.paper_batch.batch_number
+            and candidate['holder_name'] == self.csit_lab.name
+        )
+
+        self.assertEqual(row['holder_type'], 'LOCATION')
+        self.assertEqual(row['stock_entry_number'], self.location_allocation_entry.entry_number)
+
+    def test_build_inventory_position_report_summary_row_includes_individual_item_totals(self):
+        row = self._find_summary_row(self.desktop_item.name)
+
+        self.assertEqual(row['total'], 2)
+        self.assertEqual(row['available'], 1)
+        self.assertEqual(row['allocated'], 1)
+        self.assertEqual(row['in_transit'], 0)
+
+    def test_build_inventory_position_report_summary_row_includes_quantity_item_totals(self):
+        row = self._find_summary_row(self.paper_item.name)
+
+        self.assertEqual(row['total'], 10)
+        self.assertEqual(row['available'], 7)
+        self.assertEqual(row['allocated'], 3)
+        self.assertEqual(row['in_transit'], 0)
+
+    def test_build_inventory_position_report_totals_include_page_one_metrics(self):
+        report = self._build_report()
+
+        self.assertIn('totals', report)
+        self.assertEqual(report['totals']['item_lines'], 2)
+        self.assertEqual(report['totals']['available_quantity'], 8)
+        self.assertEqual(report['totals']['allocated_quantity'], 4)
+        self.assertEqual(report['totals']['in_transit_quantity'], 0)

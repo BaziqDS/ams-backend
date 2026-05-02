@@ -205,6 +205,12 @@ MODULES: dict[str, ModuleSpec] = {
             "reads": ["locations"],
         },
     },
+    "reports": {
+        "view": {
+            "perms": ["inventory.view_reports"],
+            "reads": [],
+        },
+    },
     "inspections": {
         "view": {
             "perms": ["inventory.view_inspectioncertificate"],
@@ -270,6 +276,7 @@ READ_PERMS: dict[str, list[str]] = {
     "stock-entries": ["inventory.view_stock_entries"],
     "persons": ["inventory.view_person"],
     "stock-registers": ["inventory.view_stock_registers", "inventory.view_stockregister"],
+    "reports": ["inventory.view_reports"],
     "stock-allocations": ["inventory.view_stockallocation"],
     "inspections": ["inventory.view_inspectioncertificate"],
     "depreciation": ["inventory.view_depreciation"],

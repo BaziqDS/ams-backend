@@ -19,6 +19,13 @@ from ..services.stock_correction_service import (
 )
 from ams.permissions import StrictDjangoModelPermissions
 from ..permissions import StockEntryPermission
+from notifications.services import (
+    notify_correction_applied,
+    notify_correction_approved,
+    notify_correction_rejected,
+    notify_correction_requested,
+    notify_stock_entry_acknowledged,
+)
 
 from .utils import ScopedViewSetMixin
 
@@ -252,6 +259,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.save()
         
         serializer = self.get_serializer(instance)
+        notify_stock_entry_acknowledged(instance, user)
         return Response(serializer.data)
 
     def _correction_target_and_payload(self, instance, payload):
@@ -326,6 +334,10 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             request.user,
             auto_apply=not projected_from_receipt,
         )
+        if correction.status == 'REQUESTED':
+            notify_correction_requested(correction, request.user)
+        elif correction.status == 'APPLIED':
+            notify_correction_applied(correction, request.user)
         return Response(serialize_correction(correction), status=201)
 
     @action(detail=True, methods=['post'])
@@ -431,6 +443,7 @@ class StockCorrectionViewSet(viewsets.GenericViewSet):
         if not self._can_approve(request, correction):
             return Response({'detail': 'You do not have permission to approve stock corrections.'}, status=403)
         correction = approve_correction(correction, request.user)
+        notify_correction_approved(correction, request.user)
         return Response(serialize_correction(correction))
 
     @action(detail=True, methods=['post'])
@@ -439,6 +452,7 @@ class StockCorrectionViewSet(viewsets.GenericViewSet):
         if not self._can_approve(request, correction):
             return Response({'detail': 'You do not have permission to reject stock corrections.'}, status=403)
         correction = reject_correction(correction, request.user, request.data.get('reason') or '')
+        notify_correction_rejected(correction, request.user)
         return Response(serialize_correction(correction))
 
     @action(detail=True, methods=['post'])
@@ -447,4 +461,5 @@ class StockCorrectionViewSet(viewsets.GenericViewSet):
         if not self._can_approve(request, correction):
             return Response({'detail': 'You do not have permission to apply stock corrections.'}, status=403)
         correction = apply_correction(correction, user=request.user)
+        notify_correction_applied(correction, request.user)
         return Response(serialize_correction(correction))

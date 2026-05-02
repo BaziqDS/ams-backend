@@ -37,6 +37,13 @@ from inventory.services.depreciation_service import (
     preview_depreciation_run,
     reverse_depreciation_run,
 )
+from notifications.services import (
+    notify_asset_adjustment_created,
+    notify_depreciation_run_created,
+    notify_depreciation_run_posted,
+    notify_depreciation_run_reversed,
+    notify_fixed_asset_capitalized,
+)
 
 
 class DepreciationPolicyViewSet(viewsets.ModelViewSet):
@@ -78,6 +85,10 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
     permission_classes = [DepreciationPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ["asset_number", "item__name", "item__code", "batch__batch_number", "instance__serial_number"]
+
+    def perform_create(self, serializer):
+        asset = serializer.save(created_by=self.request.user)
+        notify_fixed_asset_capitalized(asset, self.request.user)
 
     def get_queryset(self):
         queryset = FixedAssetRegisterEntry.objects.select_related(
@@ -206,6 +217,7 @@ class DepreciationRunViewSet(viewsets.ModelViewSet):
             posted = post_depreciation_run(run.fiscal_year_start, request.user, run.policy)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        notify_depreciation_run_posted(posted, request.user)
         return Response(self.get_serializer(posted).data)
 
     @action(detail=True, methods=["post"])
@@ -215,11 +227,13 @@ class DepreciationRunViewSet(viewsets.ModelViewSet):
             reversed_run = reverse_depreciation_run(run, request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        notify_depreciation_run_reversed(reversed_run, request.user)
         return Response(self.get_serializer(reversed_run).data)
 
     def perform_create(self, serializer):
         policy = serializer.validated_data.get("policy") or get_default_policy(self.request.user)
-        serializer.save(policy=policy, created_by=self.request.user)
+        run = serializer.save(policy=policy, created_by=self.request.user)
+        notify_depreciation_run_created(run, self.request.user)
 
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -239,6 +253,10 @@ class AssetValueAdjustmentViewSet(viewsets.ModelViewSet):
     permission_classes = [DepreciationPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ["asset__asset_number", "asset__item__name", "reason"]
+
+    def perform_create(self, serializer):
+        adjustment = serializer.save(created_by=self.request.user)
+        notify_asset_adjustment_created(adjustment, self.request.user)
 
     def get_queryset(self):
         queryset = AssetValueAdjustment.objects.select_related("asset", "asset__item", "created_by").order_by("-effective_date", "-created_at")

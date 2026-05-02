@@ -9,6 +9,7 @@ from .views import (
     AssetValueAdjustmentViewSet, DepreciationAssetClassViewSet,
     DepreciationPolicyViewSet, DepreciationRateVersionViewSet,
     DepreciationRunViewSet, FixedAssetRegisterEntryViewSet,
+    ReportViewSet,
 )
 
 router = DefaultRouter()
@@ -36,5 +37,15 @@ router.register(r'depreciation/adjustments', AssetValueAdjustmentViewSet, basena
 
 
 urlpatterns = [
+    path(
+        'reports/inventory-position/stores/',
+        ReportViewSet.as_view({'get': 'stores'}),
+        name='inventory-position-report-stores',
+    ),
+    path(
+        'reports/inventory-position/pdf/',
+        ReportViewSet.as_view({'get': 'inventory_position_pdf'}),
+        name='inventory-position-report-pdf',
+    ),
     path('', include(router.urls)),
 ]

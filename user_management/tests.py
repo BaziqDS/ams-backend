@@ -303,6 +303,30 @@ class CapabilityManifestStockRegistersImplicationTests(TestCase):
         self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
 
 
+class CapabilityManifestReportsTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_reports_module_declared_view_only(self):
+        self.assertIn('reports', MODULES)
+        self.assertEqual(list(MODULES['reports'].keys()), ['view'])
+
+    def test_resolve_reports_view_includes_domain_perm(self):
+        resolved = resolve_selections_to_codenames({'reports': 'view'})
+
+        self.assertIn('inventory.view_reports', resolved)
+
+    def test_compute_capabilities_reports_reports_level(self):
+        user = User.objects.create_user(username='cap_reports', password='x')
+        group = Group.objects.create(name='Reports View')
+        group.permissions.add(self._perm('inventory.view_reports'))
+        user.groups.add(group)
+
+        caps = compute_capabilities_for_user(user)
+        self.assertEqual(caps['reports'], 'view')
+
+
 class CapabilityManifestItemsImplicationTests(TestCase):
     def _perm(self, dotted):
         app_label, codename = dotted.split('.', 1)

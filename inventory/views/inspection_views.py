@@ -10,6 +10,13 @@ from ..models.inspection_model import InspectionCertificate, InspectionItem, Ins
 from ..models.batch_model import ItemBatch
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
+from notifications.services import (
+    notify_inspection_completed,
+    notify_inspection_initiated,
+    notify_inspection_rejected,
+    notify_inspection_submitted_to_central_register,
+    notify_inspection_submitted_to_finance_review,
+)
 
 
 class InspectionWorkflowPermissions(StrictDjangoModelPermissions):
@@ -45,6 +52,17 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, InspectionWorkflowPermissions]
     filter_backends = [filters.SearchFilter]
     search_fields = ['contract_no', 'contractor_name', 'indenter']
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        if instance.stage != InspectionStage.DRAFT:
+            transaction.on_commit(lambda: notify_inspection_initiated(instance, self.request.user))
+
+    def perform_update(self, serializer):
+        previous_stage = serializer.instance.stage
+        instance = serializer.save()
+        if previous_stage == InspectionStage.DRAFT and instance.stage != InspectionStage.DRAFT:
+            transaction.on_commit(lambda: notify_inspection_initiated(instance, self.request.user))
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -84,6 +102,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.status = 'IN_PROGRESS'
             instance.initiated_by = request.user
             instance.save()
+            transaction.on_commit(lambda: notify_inspection_initiated(instance, request.user))
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
@@ -127,6 +146,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.stock_filled_by = request.user
             instance.stock_filled_at = timezone.now()
             instance.save()
+            transaction.on_commit(lambda: notify_inspection_submitted_to_central_register(instance, request.user))
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
@@ -180,6 +200,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.central_store_filled_by = request.user
             instance.central_store_filled_at = timezone.now()
             instance.save()
+            transaction.on_commit(lambda: notify_inspection_submitted_to_finance_review(instance, request.user))
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
@@ -222,6 +243,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.finance_reviewed_by = request.user
             instance.finance_reviewed_at = timezone.now()
             instance.save()
+            transaction.on_commit(lambda: notify_inspection_completed(instance, request.user))
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
@@ -242,6 +264,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             instance.rejected_by = request.user
             instance.rejected_at = timezone.now()
             instance.save()
+            transaction.on_commit(lambda: notify_inspection_rejected(instance, request.user))
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['get'], url_path=r'items/(?P<item_id>[^/.]+)/distribution')

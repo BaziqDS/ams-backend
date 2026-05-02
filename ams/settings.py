@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'silk',
     'inventory',
     'user_management',
+    'notifications',
 ]
 
 MIDDLEWARE = [

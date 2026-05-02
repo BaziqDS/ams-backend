@@ -17,4 +17,4 @@ from .depreciation_views import (
     DepreciationRunViewSet,
     FixedAssetRegisterEntryViewSet,
 )
-
+from .report_views import ReportViewSet

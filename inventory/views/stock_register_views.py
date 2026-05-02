@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from ..models.stock_register_model import StockRegister
 from ..serializers.stock_register_serializer import StockRegisterSerializer
 from ..permissions import StockRegisterPermission
+from notifications.services import notify_stock_register_closed, notify_stock_register_reopened
 
 
 class StockRegisterViewSet(viewsets.ModelViewSet):
@@ -51,6 +52,7 @@ class StockRegisterViewSet(viewsets.ModelViewSet):
         register.closed_by = request.user
         register.closed_reason = reason
         register.save(update_fields=['is_active', 'closed_at', 'closed_by', 'closed_reason', 'updated_at'])
+        notify_stock_register_closed(register, request.user)
         serializer = self.get_serializer(register)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -63,5 +65,6 @@ class StockRegisterViewSet(viewsets.ModelViewSet):
         register.reopened_by = request.user
         register.reopened_reason = reason
         register.save(update_fields=['is_active', 'reopened_at', 'reopened_by', 'reopened_reason', 'updated_at'])
+        notify_stock_register_reopened(register, request.user)
         serializer = self.get_serializer(register)
         return Response(serializer.data, status=status.HTTP_200_OK)
