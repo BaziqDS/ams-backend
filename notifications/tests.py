@@ -165,6 +165,68 @@ class NotificationsApiTests(TestCase):
         self.assertIn("items-expiring-batches", alert_keys)
         self.assertIn("depreciation-uncapitalized", alert_keys)
 
+    def test_items_alert_summary_counts_alert_groups_and_deep_links_into_matching_focus(self):
+        user = self._make_user("items.alerts.user", "inventory.view_items")
+
+        consumable_category = self._make_leaf_category(
+            name="Items Alert Consumables",
+            category_type=CategoryType.CONSUMABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        Item.objects.create(
+            name="Out of Stock Item 1",
+            category=consumable_category,
+            acct_unit="pcs",
+            low_stock_threshold=5,
+        )
+        Item.objects.create(
+            name="Out of Stock Item 2",
+            category=consumable_category,
+            acct_unit="pcs",
+            low_stock_threshold=3,
+        )
+
+        perishable_category = self._make_leaf_category(
+            name="Items Alert Perishables",
+            category_type=CategoryType.PERISHABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        batch_item = Item.objects.create(
+            name="Expired Batch Item",
+            category=perishable_category,
+            acct_unit="boxes",
+            low_stock_threshold=0,
+        )
+        first_expired_batch = ItemBatch.objects.create(
+            item=batch_item,
+            batch_number="EXP-001",
+            expiry_date=timezone.now().date() - timedelta(days=2),
+        )
+        second_expired_batch = ItemBatch.objects.create(
+            item=batch_item,
+            batch_number="EXP-002",
+            expiry_date=timezone.now().date() - timedelta(days=1),
+        )
+        StockRecord.objects.create(item=batch_item, batch=first_expired_batch, location=self.department_store, quantity=4)
+        StockRecord.objects.create(item=batch_item, batch=second_expired_batch, location=self.department_store, quantity=6)
+
+        self.client.force_authenticate(user=user)
+
+        summary_response = self.client.get("/api/notifications/summary/")
+        self.assertEqual(summary_response.status_code, 200)
+        self.assertEqual(summary_response.data["open_alerts"], 2)
+        self.assertEqual(summary_response.data["modules"]["items"]["count"], 2)
+        self.assertEqual(summary_response.data["modules"]["items"]["critical"], 2)
+
+        alerts_response = self.client.get("/api/notifications/alerts/")
+        self.assertEqual(alerts_response.status_code, 200)
+        alerts_by_key = {row["key"]: row for row in alerts_response.data}
+
+        self.assertEqual(alerts_by_key["items-out-of-stock"]["count"], 2)
+        self.assertEqual(alerts_by_key["items-out-of-stock"]["href"], "/items?stock=out&focus=out-of-stock")
+        self.assertEqual(alerts_by_key["items-expired-batches"]["count"], 2)
+        self.assertEqual(alerts_by_key["items-expired-batches"]["href"], "/items?tracking=perishable&focus=expired-batches")
+
     def test_pending_ack_stock_entry_creation_notifies_receiver_scope(self):
         receiver = self._make_user("receiver.user", "inventory.acknowledge_stockentry")
 
@@ -181,7 +243,7 @@ class NotificationsApiTests(TestCase):
         self.assertEqual(notification.event.entity_id, entry.id)
         self.assertFalse(notification.is_read)
 
-    def test_feed_read_and_read_all_endpoints_update_user_state(self):
+    def test_feed_read_read_all_and_clear_endpoints_update_user_state(self):
         user = self._make_user("feed.user")
         event_one = NotificationEvent.objects.create(
             module="inspections",
@@ -220,6 +282,11 @@ class NotificationsApiTests(TestCase):
         second.refresh_from_db()
         self.assertTrue(second.is_read)
         self.assertIsNotNone(second.read_at)
+
+        clear_response = self.client.post("/api/notifications/feed/clear/", {}, format="json")
+        self.assertEqual(clear_response.status_code, 200)
+        self.assertEqual(clear_response.data["deleted"], 2)
+        self.assertFalse(UserNotification.objects.filter(user=user).exists())
 
     def test_rejecting_inspection_generates_notification_for_visible_watchers(self):
         actor = self._make_user(

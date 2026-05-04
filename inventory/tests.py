@@ -183,6 +183,7 @@ class InspectionCertificateSerializerContractTests(TestCase):
         central_user = User.objects.create_user(username='central.actor', password='pw')
         finance_user = User.objects.create_user(username='finance.actor', password='pw')
         initiated_user = User.objects.create_user(username='initiated.actor', password='pw')
+        revision_user = User.objects.create_user(username='revision.actor', password='pw')
 
         certificate = InspectionCertificate.objects.create(
             date=timezone.now().date(),
@@ -206,6 +207,10 @@ class InspectionCertificateSerializerContractTests(TestCase):
             stock_filled_by=stock_user,
             central_store_filled_by=central_user,
             finance_reviewed_by=finance_user,
+            revision_requested_by=revision_user,
+            revision_requested_at=timezone.now(),
+            revision_requested_reason='Please revise the stock details before resubmission.',
+            revision_requested_from_stage=InspectionStage.CENTRAL_REGISTER,
         )
 
         StockEntry.objects.create(
@@ -221,6 +226,9 @@ class InspectionCertificateSerializerContractTests(TestCase):
         self.assertEqual(data['stock_filled_by_name'], 'stock.actor')
         self.assertEqual(data['central_store_filled_by_name'], 'central.actor')
         self.assertEqual(data['finance_reviewed_by_name'], 'finance.actor')
+        self.assertEqual(data['revision_requested_by_name'], 'revision.actor')
+        self.assertEqual(data['revision_requested_reason'], 'Please revise the stock details before resubmission.')
+        self.assertEqual(data['revision_requested_from_stage'], InspectionStage.CENTRAL_REGISTER)
         self.assertIsNone(data['rejected_by_name'])
         self.assertEqual(len(data['stock_entries']), 1)
         self.assertEqual(data['stock_entries'][0]['entry_type'], 'RECEIPT')
@@ -536,6 +544,23 @@ class InspectionCertificateApiScopeTests(TestCase):
         self.assertIn(self.electrical_certificate.id, returned_ids)
         self.assertIn(self.csit_certificate.id, returned_ids)
 
+    def test_root_assigned_user_can_filter_inspections_by_multiple_standalones(self):
+        user = self._make_user('inspection_root_multi_filter', self.root)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/inspections/?location={self.electrical.id}&location={self.csit.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.electrical_certificate.id, returned_ids)
+        self.assertIn(self.csit_certificate.id, returned_ids)
+
+        single_resp = self.client.get(f'/api/inventory/inspections/?location={self.electrical.id}')
+        self.assertEqual(single_resp.status_code, 200)
+        single_ids = {row['id'] for row in self._rows(single_resp)}
+        self.assertIn(self.electrical_certificate.id, single_ids)
+        self.assertNotIn(self.csit_certificate.id, single_ids)
+
     def test_standalone_assigned_user_sees_only_own_location_inspections(self):
         user = self._make_user('inspection_standalone_scope', self.electrical)
 
@@ -546,6 +571,92 @@ class InspectionCertificateApiScopeTests(TestCase):
         returned_ids = {row['id'] for row in self._rows(resp)}
         self.assertIn(self.electrical_certificate.id, returned_ids)
         self.assertNotIn(self.csit_certificate.id, returned_ids)
+
+    def test_root_assigned_user_cannot_create_for_unassigned_standalones(self):
+        user = self._make_user('inspection_root_create_limited', self.root)
+        user.user_permissions.add(self._perm('initiate_inspection'))
+        today = timezone.now().date().isoformat()
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/inspections/',
+            {
+                'date': today,
+                'contract_no': 'IC-SCOPE-ROOT-BLOCKED',
+                'contract_date': today,
+                'contractor_name': 'Scope Supplier',
+                'contractor_address': 'Block A',
+                'indenter': 'Scope Indenter',
+                'indent_no': 'IND-SCOPE-ROOT-BLOCKED',
+                'department': self.electrical.id,
+                'date_of_delivery': today,
+                'delivery_type': 'FULL',
+                'remarks': '',
+                'inspected_by': 'Scope Inspector',
+                'date_of_inspection': today,
+                'consignee_name': 'Scope Consignee',
+                'consignee_designation': 'Manager',
+                'items': [
+                    {
+                        'item': None,
+                        'item_description': 'Scoped line item',
+                        'item_specifications': '',
+                        'tendered_quantity': 1,
+                        'accepted_quantity': 1,
+                        'rejected_quantity': 0,
+                        'unit_price': '10.00',
+                        'remarks': '',
+                    }
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('department', resp.data)
+
+    def test_create_rejects_out_of_scope_inspection_department(self):
+        user = self._make_user('inspection_create_out_of_scope', self.electrical)
+        user.user_permissions.add(self._perm('initiate_inspection'))
+        today = timezone.now().date().isoformat()
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/inspections/',
+            {
+                'date': today,
+                'contract_no': 'IC-SCOPE-BLOCKED',
+                'contract_date': today,
+                'contractor_name': 'Scope Supplier',
+                'contractor_address': 'Block A',
+                'indenter': 'Scope Indenter',
+                'indent_no': 'IND-SCOPE-BLOCKED',
+                'department': self.csit.id,
+                'date_of_delivery': today,
+                'delivery_type': 'FULL',
+                'remarks': '',
+                'inspected_by': 'Scope Inspector',
+                'date_of_inspection': today,
+                'consignee_name': 'Scope Consignee',
+                'consignee_designation': 'Manager',
+                'items': [
+                    {
+                        'item': None,
+                        'item_description': 'Scoped line item',
+                        'item_specifications': '',
+                        'tendered_quantity': 1,
+                        'accepted_quantity': 1,
+                        'rejected_quantity': 0,
+                        'unit_price': '10.00',
+                        'remarks': '',
+                    }
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('department', resp.data)
 
 
 class InspectionRootWorkflowTests(TestCase):
@@ -658,6 +769,373 @@ class InspectionRootWorkflowTests(TestCase):
         certificate.refresh_from_db()
         self.assertEqual(certificate.stage, InspectionStage.COMPLETED)
         self.assertEqual(certificate.status, 'COMPLETED')
+
+
+class InspectionWorkflowReturnAndCancellationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(username='inspection.workflow.owner', password='pw')
+        self.root = Location.objects.create(
+            name='Workflow Return Root',
+            code='WF-ROOT',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+            created_by=self.owner,
+        )
+        self.department = Location.objects.create(
+            name='Workflow Return Department',
+            code='WF-DEPT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+            created_by=self.owner,
+        )
+        self.root_register = StockRegister.objects.create(
+            register_number='WF-ROOT-CSR',
+            store=self.root.auto_created_store,
+            register_type='CSR',
+            created_by=self.owner,
+        )
+        self.department_register = StockRegister.objects.create(
+            register_number='WF-DEPT-DSR',
+            store=self.department.auto_created_store,
+            register_type='DSR',
+            created_by=self.owner,
+        )
+        self.parent_category = Category.objects.create(
+            name='Workflow Supplies',
+            code='WF-SUP',
+            category_type=CategoryType.CONSUMABLE,
+        )
+        self.child_category = Category.objects.create(
+            name='Workflow Stationery',
+            code='WF-STAT',
+            parent_category=self.parent_category,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        self.existing_item = Item.objects.create(
+            name='Workflow Existing Item',
+            code='WF-ITEM-001',
+            category=self.child_category,
+            acct_unit='unit',
+            created_by=self.owner,
+        )
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='inventory', codename=codename)
+
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and 'results' in data:
+            return data['results']
+        return data
+
+    def _make_user(self, username, *perm_codenames, assigned_location=None):
+        user = User.objects.create_user(username=username, password='pw')
+        user.profile.assigned_locations.add(assigned_location or self.root)
+        for codename in perm_codenames:
+            user.user_permissions.add(self._perm(codename))
+        return user
+
+    def _make_certificate(self, contract_no, department, stage, *, item=None):
+        now = timezone.now()
+        item = item or self.existing_item
+        certificate = InspectionCertificate.objects.create(
+            date=now.date(),
+            contract_no=contract_no,
+            contract_date=now.date(),
+            contractor_name='Workflow Supplier',
+            contractor_address='Workflow Block',
+            indenter='Workflow Indenter',
+            indent_no=f'IND-{contract_no}',
+            department=department,
+            date_of_delivery=now.date(),
+            delivery_type='FULL',
+            remarks='Workflow fixture',
+            inspected_by='Workflow Inspector',
+            date_of_inspection=now.date(),
+            consignee_name='Workflow Consignee',
+            consignee_designation='Manager',
+            stage=stage,
+            status='IN_PROGRESS',
+            initiated_by=self.owner,
+            stock_filled_by=self.owner if department != self.root and stage in {InspectionStage.CENTRAL_REGISTER, InspectionStage.FINANCE_REVIEW, InspectionStage.COMPLETED} else None,
+            stock_filled_at=now - timedelta(hours=2) if department != self.root and stage in {InspectionStage.CENTRAL_REGISTER, InspectionStage.FINANCE_REVIEW, InspectionStage.COMPLETED} else None,
+            central_store_filled_by=self.owner if stage in {InspectionStage.FINANCE_REVIEW, InspectionStage.COMPLETED} else None,
+            central_store_filled_at=now - timedelta(hours=1) if stage in {InspectionStage.FINANCE_REVIEW, InspectionStage.COMPLETED} else None,
+        )
+        inspection_item = InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=item,
+            item_description=item.name,
+            tendered_quantity=1,
+            accepted_quantity=1,
+            rejected_quantity=0,
+            unit_price='10.00',
+            central_register=self.root_register,
+            central_register_no=self.root_register.register_number,
+            central_register_page_no='11',
+            stock_register=None if department == self.root else self.department_register,
+            stock_register_no='' if department == self.root else self.department_register.register_number,
+            stock_register_page_no='' if department == self.root else '7',
+        )
+        return certificate, inspection_item
+
+    def test_return_to_previous_stage_requires_reason(self):
+        certificate, _ = self._make_certificate('IC-RET-REQ-001', self.department, InspectionStage.CENTRAL_REGISTER)
+        user = self._make_user(
+            'workflow.central.return.missing.reason',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_central_register',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/return_to_previous_stage/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 'Return reason is required.')
+
+    def test_return_from_finance_review_preserves_finance_inputs_and_records_revision_request(self):
+        certificate, inspection_item = self._make_certificate('IC-RET-FIN-001', self.department, InspectionStage.FINANCE_REVIEW)
+        finance_reviewed_at = timezone.now()
+        certificate.finance_check_date = timezone.localdate()
+        certificate.finance_reviewed_by = self.owner
+        certificate.finance_reviewed_at = finance_reviewed_at
+        certificate.save(update_fields=['finance_check_date', 'finance_reviewed_by', 'finance_reviewed_at'])
+        inspection_item.capitalization_cost = '1250.00'
+        inspection_item.capitalization_date = timezone.localdate()
+        inspection_item.save(update_fields=['capitalization_cost', 'capitalization_date'])
+        user = self._make_user(
+            'workflow.finance.return',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'review_finance',
+        )
+        reason = 'Please revise the central registry mapping before finance review.'
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/return_to_previous_stage/',
+            {'reason': reason},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        inspection_item.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.CENTRAL_REGISTER)
+        self.assertEqual(certificate.finance_check_date, timezone.localdate())
+        self.assertIsNone(certificate.finance_reviewed_by)
+        self.assertIsNone(certificate.finance_reviewed_at)
+        self.assertIsNone(certificate.central_store_filled_by)
+        self.assertIsNone(certificate.central_store_filled_at)
+        self.assertEqual(str(inspection_item.capitalization_cost), '1250.00')
+        self.assertEqual(certificate.revision_requested_reason, reason)
+        self.assertEqual(certificate.revision_requested_from_stage, InspectionStage.FINANCE_REVIEW)
+        self.assertEqual(certificate.revision_requested_by, user)
+        self.assertIsNotNone(certificate.revision_requested_at)
+        self.assertEqual(certificate.status, 'IN_PROGRESS')
+
+    def test_return_from_central_register_moves_departmental_certificate_back_to_stock_details_without_unlinking_items(self):
+        certificate, inspection_item = self._make_certificate('IC-RET-CENT-001', self.department, InspectionStage.CENTRAL_REGISTER)
+        user = self._make_user(
+            'workflow.central.return',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_central_register',
+        )
+        reason = 'Correct the department stock register page reference.'
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/return_to_previous_stage/',
+            {'reason': reason},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        inspection_item.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.STOCK_DETAILS)
+        self.assertIsNone(certificate.stock_filled_by)
+        self.assertIsNone(certificate.stock_filled_at)
+        self.assertIsNone(certificate.central_store_filled_by)
+        self.assertIsNone(certificate.central_store_filled_at)
+        self.assertEqual(inspection_item.item_id, self.existing_item.id)
+        self.assertEqual(inspection_item.central_register_id, self.root_register.id)
+        self.assertEqual(inspection_item.central_register_page_no, '11')
+        self.assertEqual(certificate.revision_requested_reason, reason)
+
+    def test_return_from_stock_details_moves_back_to_draft_without_clearing_saved_register_fields(self):
+        certificate, inspection_item = self._make_certificate('IC-RET-STOCK-001', self.department, InspectionStage.STOCK_DETAILS)
+        user = self._make_user(
+            'workflow.stock.return',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_stock_details',
+        )
+        reason = 'Update the certificate line details before re-submission.'
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/return_to_previous_stage/',
+            {'reason': reason},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        inspection_item.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.DRAFT)
+        self.assertIsNone(certificate.stock_filled_by)
+        self.assertIsNone(certificate.stock_filled_at)
+        self.assertEqual(inspection_item.stock_register_id, self.department_register.id)
+        self.assertEqual(inspection_item.stock_register_page_no, '7')
+        self.assertEqual(certificate.revision_requested_reason, reason)
+
+    def test_return_from_root_central_register_moves_back_to_draft_and_marks_revision_requested(self):
+        certificate, _ = self._make_certificate('IC-RET-ROOT-001', self.root, InspectionStage.CENTRAL_REGISTER)
+        user = self._make_user(
+            'workflow.root.central.return',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_central_register',
+            assigned_location=self.root,
+        )
+        reason = 'Please re-check the root inspection details.'
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/return_to_previous_stage/',
+            {'reason': reason},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.DRAFT)
+        self.assertEqual(certificate.status, 'DRAFT')
+        self.assertEqual(certificate.revision_requested_reason, reason)
+        self.assertEqual(certificate.revision_requested_from_stage, InspectionStage.CENTRAL_REGISTER)
+
+    def test_complete_defaults_missing_finance_check_date_to_today(self):
+        certificate, _ = self._make_certificate('IC-FIN-DATE-001', self.root, InspectionStage.FINANCE_REVIEW)
+        user = self._make_user(
+            'workflow.finance.complete',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'review_finance',
+            assigned_location=self.root,
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.COMPLETED)
+        self.assertEqual(certificate.status, 'COMPLETED')
+        self.assertEqual(certificate.finance_check_date, timezone.localdate())
+
+    def test_cancel_marks_certificate_cancelled_and_removes_provisional_items(self):
+        certificate, inspection_item = self._make_certificate('IC-CANCEL-001', self.department, InspectionStage.FINANCE_REVIEW)
+        provisional_item = Item.objects.create(
+            name='Workflow Provisional Item',
+            code='WF-PROV-001',
+            category=self.child_category,
+            acct_unit='unit',
+            created_by=self.owner,
+            is_provisional=True,
+            provisional_inspection=certificate,
+        )
+        inspection_item.item = provisional_item
+        inspection_item.item_description = provisional_item.name
+        inspection_item.save(update_fields=['item', 'item_description'])
+
+        user = self._make_user(
+            'workflow.finance.cancel',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'review_finance',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/cancel/',
+            {'reason': 'Finance cancelled this inspection.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        inspection_item.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.REJECTED)
+        self.assertEqual(certificate.status, 'CANCELLED')
+        self.assertEqual(certificate.rejection_reason, 'Finance cancelled this inspection.')
+        self.assertIsNone(inspection_item.item_id)
+        self.assertFalse(Item.objects.filter(pk=provisional_item.pk).exists())
+
+    def test_provisional_items_stay_hidden_until_certificate_completion(self):
+        certificate, inspection_item = self._make_certificate('IC-PROV-001', self.root, InspectionStage.CENTRAL_REGISTER, item=self.existing_item)
+        user = self._make_user(
+            'workflow.provisional.creator',
+            'view_items',
+            'create_items',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_central_register',
+            'review_finance',
+            assigned_location=self.root,
+        )
+
+        self.client.force_authenticate(user=user)
+        create_response = self.client.post(
+            '/api/inventory/items/',
+            {
+                'name': 'Workflow Provisional API Item',
+                'category': self.child_category.id,
+                'acct_unit': 'unit',
+                'low_stock_threshold': 1,
+                'description': 'Inspection-created provisional item',
+                'specifications': 'Temporary until inspection completes',
+                'is_active': True,
+                'is_provisional': True,
+                'provisional_inspection': certificate.id,
+            },
+            format='json',
+        )
+
+        self.assertEqual(create_response.status_code, 201, create_response.data)
+        provisional_item_id = create_response.data['id']
+
+        hidden_response = self.client.get('/api/inventory/items/')
+        hidden_ids = {row['id'] for row in self._rows(hidden_response)}
+        self.assertNotIn(provisional_item_id, hidden_ids)
+
+        inspection_item.item_id = provisional_item_id
+        inspection_item.item_description = 'Workflow Provisional API Item'
+        inspection_item.save(update_fields=['item', 'item_description'])
+        certificate.stage = InspectionStage.FINANCE_REVIEW
+        certificate.central_store_filled_by = user
+        certificate.central_store_filled_at = timezone.now()
+        certificate.save(update_fields=['stage', 'central_store_filled_by', 'central_store_filled_at'])
+
+        complete_response = self.client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
+
+        self.assertEqual(complete_response.status_code, 200, complete_response.data)
+        certificate.refresh_from_db()
+        provisional_item = Item.objects.get(pk=provisional_item_id)
+        self.assertFalse(provisional_item.is_provisional)
+        self.assertIsNone(provisional_item.provisional_inspection_id)
+
+        visible_response = self.client.get('/api/inventory/items/')
+        visible_ids = {row['id'] for row in self._rows(visible_response)}
+        self.assertIn(provisional_item_id, visible_ids)
 
 
 class InspectionTrackingIntakeTests(TestCase):
@@ -1070,6 +1548,19 @@ class StockEntryStoreHierarchyRulesTests(TestCase):
         cls.csit.refresh_from_db()
         cls.csit_main_store = cls.csit.auto_created_store
 
+        cls.root_regular_store = Location.objects.create(
+            name='Hierarchy White House Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.root,
+            is_store=True,
+        )
+        cls.root_regular_annex_store = Location.objects.create(
+            name='Hierarchy Admin Store',
+            location_type=LocationType.STORE,
+            parent_location=cls.root,
+            is_store=True,
+        )
+
         cls.electrical = Location.objects.create(
             name='Hierarchy Electrical',
             location_type=LocationType.DEPARTMENT,
@@ -1109,12 +1600,26 @@ class StockEntryStoreHierarchyRulesTests(TestCase):
     def transferrable_ids(self, source):
         return set(self.user.profile.get_transferrable_locations(source).values_list('id', flat=True))
 
-    def test_central_store_transfers_only_to_standalone_main_stores(self):
+    def test_central_store_transfers_to_root_level_stores_and_standalone_main_stores(self):
         ids = self.transferrable_ids(self.central_store)
 
+        self.assertIn(self.root_regular_store.id, ids)
+        self.assertIn(self.root_regular_annex_store.id, ids)
         self.assertIn(self.csit_main_store.id, ids)
         self.assertIn(self.electrical_main_store.id, ids)
+        self.assertNotIn(self.central_store.id, ids)
         self.assertNotIn(self.csit_lab_store.id, ids)
+
+    def test_model_validation_allows_central_store_to_root_level_regular_store(self):
+        entry = StockEntry(
+            entry_type='ISSUE',
+            from_location=self.central_store,
+            to_location=self.root_regular_store,
+            status='DRAFT',
+            created_by=self.user,
+        )
+
+        entry.clean()
 
     def test_standalone_main_store_transfers_to_central_and_same_scope_regular_stores(self):
         ids = self.transferrable_ids(self.csit_main_store)
@@ -1125,13 +1630,21 @@ class StockEntryStoreHierarchyRulesTests(TestCase):
         self.assertNotIn(self.electrical_main_store.id, ids)
         self.assertNotIn(self.electrical_lab_store.id, ids)
 
-    def test_regular_store_transfers_to_own_main_store_and_peer_regular_stores(self):
+    def test_regular_store_transfers_to_own_main_store_and_same_scope_peer_regular_stores(self):
         ids = self.transferrable_ids(self.csit_lab_store)
 
         self.assertIn(self.csit_main_store.id, ids)
         self.assertIn(self.csit_lab_two_store.id, ids)
         self.assertNotIn(self.central_store.id, ids)
         self.assertNotIn(self.electrical_lab_store.id, ids)
+
+    def test_root_regular_store_transfers_to_central_and_peer_root_regular_stores(self):
+        ids = self.transferrable_ids(self.root_regular_store)
+
+        self.assertIn(self.central_store.id, ids)
+        self.assertIn(self.root_regular_annex_store.id, ids)
+        self.assertNotIn(self.csit_main_store.id, ids)
+        self.assertNotIn(self.csit_lab_store.id, ids)
 
     def test_model_validation_allows_main_store_to_same_scope_regular_store(self):
         entry = StockEntry(
@@ -1155,6 +1668,28 @@ class StockEntryStoreHierarchyRulesTests(TestCase):
 
         with self.assertRaises(ValidationError):
             entry.clean()
+
+    def test_model_validation_allows_regular_store_to_peer_regular_store(self):
+        entry = StockEntry(
+            entry_type='ISSUE',
+            from_location=self.csit_lab_store,
+            to_location=self.csit_lab_two_store,
+            status='DRAFT',
+            created_by=self.user,
+        )
+
+        entry.clean()
+
+    def test_model_validation_allows_root_regular_store_to_peer_root_regular_store(self):
+        entry = StockEntry(
+            entry_type='ISSUE',
+            from_location=self.root_regular_store,
+            to_location=self.root_regular_annex_store,
+            status='DRAFT',
+            created_by=self.user,
+        )
+
+        entry.clean()
 
 
 class LocationApiPermissionAndScopeTests(TestCase):
@@ -1218,7 +1753,7 @@ class LocationApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
-    def test_scoped_list_keeps_get_accessible_locations_semantics(self):
+    def test_scoped_list_returns_assigned_standalone_and_descendants_only(self):
         user = self._make_user('scoped_viewer')
         user.user_permissions.add(self._perm('view_locations'))
         user.user_permissions.add(self._perm('view_location'))
@@ -1231,6 +1766,24 @@ class LocationApiPermissionAndScopeTests(TestCase):
         returned_ids = {row['id'] for row in self._rows(resp)}
         self.assertIn(self.dept_a.id, returned_ids)
         self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertNotIn(self.dept_b.id, returned_ids)
+
+    def test_store_assigned_user_views_parent_standalone_and_descendants_only(self):
+        user = self._make_user('store_scoped_viewer')
+        user.user_permissions.add(self._perm('view_locations'))
+        dept_a_store = self.dept_a.auto_created_store
+        user.profile.assigned_locations.add(dept_a_store)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/locations/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.dept_a.id, returned_ids)
+        self.assertIn(dept_a_store.id, returned_ids)
+        self.assertIn(self.dept_a_room.id, returned_ids)
+        self.assertIn(self.dept_a_lab.id, returned_ids)
+        self.assertNotIn(self.root.id, returned_ids)
         self.assertNotIn(self.dept_b.id, returned_ids)
 
     def test_create_requires_domain_create_locations_perm(self):
@@ -1801,7 +2354,7 @@ class ItemApiDomainPermissionTests(TestCase):
 
     def _make_user(self, username):
         user = User.objects.create_user(username=username, password='pw')
-        user.profile.assigned_locations.add(self.root)
+        user.profile.assigned_locations.add(self.root, self.store)
         user.user_permissions.add(self._perm('view_scoped_distribution'))
         return user
 
@@ -1874,6 +2427,46 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertTrue(row['is_low_stock'])
         self.assertEqual(row['standalone_location_count'], 2)
 
+    def test_root_assigned_user_sees_university_wide_item_aggregates_without_distribution_permission(self):
+        user = User.objects.create_user(username='item_root_scope_no_distribution', password='pw')
+        user.profile.assigned_locations.add(self.root)
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(resp.status_code, 200)
+        row = next(record for record in resp.data['results'] if record['id'] == self.item.id)
+        self.assertEqual(row['total_quantity'], 7)
+        self.assertEqual(row['available_quantity'], 5)
+
+    def test_level_one_standalone_user_sees_only_own_item_aggregates(self):
+        user = User.objects.create_user(username='item_level_one_scope', password='pw')
+        user.profile.assigned_locations.add(self.csit)
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/items/')
+
+        self.assertEqual(resp.status_code, 200)
+        row = next(record for record in resp.data['results'] if record['id'] == self.item.id)
+        self.assertEqual(row['total_quantity'], 5)
+        self.assertEqual(row['available_quantity'], 3)
+        self.assertEqual(row['standalone_location_count'], 1)
+
+    def test_item_scope_filter_limits_aggregates_to_selected_assigned_store(self):
+        user = User.objects.create_user(username='item_store_filter_scope', password='pw')
+        user.profile.assigned_locations.add(self.csit, self.store)
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/items/?scope=store:{self.store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        row = next(record for record in resp.data['results'] if record['id'] == self.item.id)
+        self.assertEqual(row['total_quantity'], 5)
+        self.assertEqual(row['available_quantity'], 3)
+
     def test_update_allows_domain_edit_items_perm(self):
         user = self._make_user('item_domain_edit')
         user.user_permissions.add(self._perm('edit_items'))
@@ -1924,14 +2517,34 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertEqual(unit['availableQuantity'], 5)
         self.assertEqual(unit['allocatedQuantity'], 3)
         self.assertEqual(unit['inTransitQuantity'], 1)
-        self.assertEqual(len(unit['stores']), 1)
-        self.assertEqual(unit['stores'][0]['locationId'], self.store.id)
-        self.assertEqual(unit['stores'][0]['quantity'], 9)
-        self.assertEqual(unit['stores'][0]['availableQuantity'], 5)
-        self.assertEqual(unit['stores'][0]['allocatedTotal'], 3)
-        self.assertEqual(unit['stores'][0]['inTransitQuantity'], 1)
-        self.assertIsNone(unit['stores'][0]['batchId'])
-        self.assertIsNone(unit['stores'][0]['batchNumber'])
+
+    def test_distribution_hierarchical_respects_selected_scope_filter(self):
+        user = User.objects.create_user(username='item_distribution_store_filter', password='pw')
+        user.profile.assigned_locations.add(self.root, self.store)
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/distribution/hierarchical/?item={self.item.id}&scope=store:{self.store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in resp.data}
+        self.assertIn(self.csit.id, returned_ids)
+        self.assertNotIn(self.ee.id, returned_ids)
+
+    def test_distribution_scope_options_expose_default_and_assigned_store_filters(self):
+        user = User.objects.create_user(username='item_distribution_scope_options', password='pw')
+        user.profile.assigned_locations.add(self.csit, self.store)
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/distribution/scope-options/')
+
+        self.assertEqual(resp.status_code, 200)
+        option_ids = {row['id'] for row in resp.data['options']}
+        self.assertEqual(resp.data['default'], [f'standalone:{self.csit.id}'])
+        self.assertIn(f'standalone:{self.csit.id}', option_ids)
+        self.assertIn(f'store:{self.store.id}', option_ids)
+        self.assertNotIn(f'standalone:{self.ee.id}', option_ids)
 
     def test_batches_allow_domain_view_items_perm(self):
         user = self._make_user('item_batch_view')
@@ -2079,7 +2692,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
 
     def _make_user(self, username):
         user = User.objects.create_user(username=username, password='pw')
-        user.profile.assigned_locations.add(self.root)
+        user.profile.assigned_locations.add(self.root, self.store)
         user.user_permissions.add(self._perm('view_scoped_distribution'))
         return user
 
@@ -2248,6 +2861,42 @@ class StockEntryApiDomainPermissionTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
 
+    def test_scope_stores_returns_only_directly_assigned_source_stores(self):
+        user = User.objects.create_user(username='stock_entry_source_store_options', password='pw')
+        user.profile.assigned_locations.add(self.csit, self.child_store)
+        user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-entries/scope-stores/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in resp.data}
+        self.assertEqual(returned_ids, {self.child_store.id})
+
+    def test_create_rejects_source_store_derived_only_from_assigned_standalone(self):
+        user = User.objects.create_user(username='stock_entry_standalone_source_blocked', password='pw')
+        user.profile.assigned_locations.add(self.csit)
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Standalone without direct store')
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('from_location', resp.data)
+        self.assertFalse(StockEntry.objects.filter(purpose='Standalone without direct store').exists())
+
+    def test_create_allows_directly_assigned_source_store(self):
+        user = User.objects.create_user(username='stock_entry_direct_store_source', password='pw')
+        user.profile.assigned_locations.add(self.store)
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Direct source store')
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+
     def test_list_scopes_entries_by_stock_entry_workflow_without_distribution_permission(self):
         issue_to_child = StockEntry.objects.create(
             entry_type='ISSUE',
@@ -2296,10 +2945,10 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(store_resp.status_code, 200)
         store_numbers = {row['entry_number'] for row in store_resp.data['results']}
         self.assertIn(issue_to_child.entry_number, store_numbers)
+        self.assertIn(receipt_to_child.entry_number, store_numbers)
+        self.assertIn(issue_to_store.entry_number, store_numbers)
         self.assertIn(receipt_to_store.entry_number, store_numbers)
         self.assertIn(return_to_store.entry_number, store_numbers)
-        self.assertNotIn(receipt_to_child.entry_number, store_numbers)
-        self.assertNotIn(issue_to_store.entry_number, store_numbers)
 
         self.client.force_authenticate(user=child_store_user)
         child_resp = self.client.get('/api/inventory/stock-entries/')
@@ -2310,6 +2959,203 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertNotIn(issue_to_child.entry_number, child_numbers)
         self.assertNotIn(receipt_to_store.entry_number, child_numbers)
         self.assertNotIn(return_to_store.entry_number, child_numbers)
+
+    def test_main_store_assigned_user_sees_workflow_entries_for_entire_standalone(self):
+        peer_store = Location.objects.create(
+            name='Stock CSIT Peer Store',
+            location_type=LocationType.STORE,
+            parent_location=self.csit,
+            is_store=True,
+        )
+        ee = Location.objects.create(
+            name='Stock EE Scope',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        ee_store = ee.auto_created_store
+        issue_from_peer = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=peer_store,
+            to_location=self.child_store,
+            status='COMPLETED',
+        )
+        receipt_to_child = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=peer_store,
+            to_location=self.child_store,
+            status='PENDING_ACK',
+            reference_entry=issue_from_peer,
+        )
+        outside_issue = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=ee_store,
+            to_location=self.store,
+            status='COMPLETED',
+        )
+        user = User.objects.create_user(username='stock_entry_main_store_scope', password='pw')
+        user.profile.assigned_locations.add(self.store)
+        user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-entries/')
+
+        self.assertEqual(resp.status_code, 200)
+        entry_numbers = {row['entry_number'] for row in resp.data['results']}
+        self.assertIn(issue_from_peer.entry_number, entry_numbers)
+        self.assertIn(receipt_to_child.entry_number, entry_numbers)
+        self.assertNotIn(outside_issue.entry_number, entry_numbers)
+
+    def test_central_manager_role_does_not_leak_source_issue_to_destination_store_user(self):
+        central_store = Location.objects.create(
+            name='Stock Central Store',
+            location_type=LocationType.STORE,
+            parent_location=self.root,
+            is_store=True,
+            is_main_store=True,
+        )
+        white_house_store = Location.objects.create(
+            name='Stock White House Store',
+            location_type=LocationType.STORE,
+            parent_location=self.root,
+            is_store=True,
+        )
+        issue_to_white_house = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=central_store,
+            to_location=white_house_store,
+            status='COMPLETED',
+        )
+        receipt_for_white_house = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=central_store,
+            to_location=white_house_store,
+            status='PENDING_ACK',
+            reference_entry=issue_to_white_house,
+        )
+        central_group = Group.objects.create(name='Central Store Manager')
+        destination_user = User.objects.create_user(username='stock_entry_white_house_scope', password='pw')
+        destination_user.groups.add(central_group)
+        destination_user.profile.assigned_locations.add(white_house_store)
+        destination_user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=destination_user)
+        resp = self.client.get('/api/inventory/stock-entries/')
+
+        self.assertEqual(resp.status_code, 200)
+        entry_numbers = {row['entry_number'] for row in resp.data['results']}
+        self.assertIn(receipt_for_white_house.entry_number, entry_numbers)
+        self.assertNotIn(issue_to_white_house.entry_number, entry_numbers)
+
+    def test_central_store_manager_defaults_to_assigned_main_store_standalone_and_can_filter_store(self):
+        central_store = Location.objects.create(
+            name='Stock Root Central Store',
+            location_type=LocationType.STORE,
+            parent_location=self.root,
+            is_store=True,
+            is_main_store=True,
+        )
+        white_house_store = Location.objects.create(
+            name='Stock Root White House Store',
+            location_type=LocationType.STORE,
+            parent_location=self.root,
+            is_store=True,
+        )
+        central_issue = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=central_store,
+            to_location=white_house_store,
+            status='COMPLETED',
+        )
+        white_house_receipt = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=central_store,
+            to_location=white_house_store,
+            status='PENDING_ACK',
+            reference_entry=central_issue,
+        )
+        unrelated_issue = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='COMPLETED',
+        )
+        central_group = Group.objects.create(name='Central Store Manager')
+        central_user = User.objects.create_user(username='stock_entry_central_scope', password='pw')
+        central_user.groups.add(central_group)
+        central_user.profile.assigned_locations.add(central_store)
+        central_user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=central_user)
+        default_resp = self.client.get('/api/inventory/stock-entries/')
+        self.assertEqual(default_resp.status_code, 200)
+        default_numbers = {row['entry_number'] for row in default_resp.data['results']}
+        self.assertIn(central_issue.entry_number, default_numbers)
+        self.assertIn(white_house_receipt.entry_number, default_numbers)
+        self.assertNotIn(unrelated_issue.entry_number, default_numbers)
+
+        central_store_resp = self.client.get(f'/api/inventory/stock-entries/?store={central_store.id}')
+        self.assertEqual(central_store_resp.status_code, 200)
+        central_store_numbers = {row['entry_number'] for row in central_store_resp.data['results']}
+        self.assertIn(central_issue.entry_number, central_store_numbers)
+        self.assertNotIn(white_house_receipt.entry_number, central_store_numbers)
+        self.assertNotIn(unrelated_issue.entry_number, central_store_numbers)
+
+    def test_multi_store_user_defaults_to_all_assigned_stores_and_can_filter_one_store(self):
+        issue_to_child = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='COMPLETED',
+        )
+        receipt_to_child = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='PENDING_ACK',
+            reference_entry=issue_to_child,
+        )
+        issue_to_store = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='COMPLETED',
+        )
+        receipt_to_store = StockEntry.objects.create(
+            entry_type='RECEIPT',
+            from_location=self.child_store,
+            to_location=self.store,
+            status='PENDING_ACK',
+            reference_entry=issue_to_store,
+        )
+        user = User.objects.create_user(username='stock_entry_multi_store_scope', password='pw')
+        user.profile.assigned_locations.add(self.store, self.child_store)
+        user.user_permissions.add(self._perm('view_stock_entries'))
+
+        self.client.force_authenticate(user=user)
+        default_resp = self.client.get('/api/inventory/stock-entries/')
+        self.assertEqual(default_resp.status_code, 200)
+        default_numbers = {row['entry_number'] for row in default_resp.data['results']}
+        self.assertIn(issue_to_child.entry_number, default_numbers)
+        self.assertIn(receipt_to_child.entry_number, default_numbers)
+        self.assertIn(issue_to_store.entry_number, default_numbers)
+        self.assertIn(receipt_to_store.entry_number, default_numbers)
+
+        store_resp = self.client.get(f'/api/inventory/stock-entries/?store={self.store.id}')
+        self.assertEqual(store_resp.status_code, 200)
+        store_numbers = {row['entry_number'] for row in store_resp.data['results']}
+        self.assertIn(issue_to_child.entry_number, store_numbers)
+        self.assertIn(receipt_to_store.entry_number, store_numbers)
+        self.assertNotIn(receipt_to_child.entry_number, store_numbers)
+        self.assertNotIn(issue_to_store.entry_number, store_numbers)
+
+        child_store_resp = self.client.get(f'/api/inventory/stock-entries/?store={self.child_store.id}')
+        self.assertEqual(child_store_resp.status_code, 200)
+        child_store_numbers = {row['entry_number'] for row in child_store_resp.data['results']}
+        self.assertIn(receipt_to_child.entry_number, child_store_numbers)
+        self.assertIn(issue_to_store.entry_number, child_store_numbers)
+        self.assertNotIn(issue_to_child.entry_number, child_store_numbers)
+        self.assertNotIn(receipt_to_store.entry_number, child_store_numbers)
 
     def test_create_requires_domain_create_stock_entries_perm(self):
         user = self._make_user('stock_entry_legacy_add')
@@ -2327,7 +3173,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.client.force_authenticate(user=user)
         resp = self.client.post('/api/inventory/stock-entries/', self._payload(), format='json')
 
-        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.status_code, 201, resp.data)
 
     def test_create_issue_auto_splits_consumable_quantity_across_internal_batches(self):
         user = self._make_user('stock_entry_consumable_batchless_transfer')
@@ -3599,6 +4445,42 @@ class StockRegisterApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn('store', resp.data)
+
+    def test_create_rejects_root_standalone_user_without_direct_store_assignment(self):
+        user = self._make_user('stock_register_root_scope_only', self.root)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/stock-registers/',
+            self._payload(register_number='CSR-ROOT-NO-STORE', store=self.central_store.id),
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('store', resp.data)
+
+    def test_create_root_standalone_user_only_allows_directly_assigned_stores(self):
+        user = User.objects.create_user(username='stock_register_root_direct_store', password='pw')
+        user.profile.assigned_locations.add(self.root, self.central_store)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        ok_resp = self.client.post(
+            '/api/inventory/stock-registers/',
+            self._payload(register_number='CSR-ROOT-DIRECT-OK', store=self.central_store.id),
+            format='json',
+        )
+        blocked_resp = self.client.post(
+            '/api/inventory/stock-registers/',
+            self._payload(register_number='CSR-ROOT-DIRECT-BLOCKED', store=self.root_lab_store.id),
+            format='json',
+        )
+
+        self.assertEqual(ok_resp.status_code, 201, ok_resp.data)
+        self.assertEqual(ok_resp.data['store'], self.central_store.id)
+        self.assertEqual(blocked_resp.status_code, 400)
+        self.assertIn('store', blocked_resp.data)
 
     def test_update_requires_domain_edit_stock_registers_perm(self):
         user = self._make_user('stock_register_view_patch', self.csit)

@@ -399,7 +399,7 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         allowed = client.get("/api/inventory/depreciation/assets/")
         self.assertEqual(allowed.status_code, 200)
 
-    def test_rate_configuration_requires_full_depreciation_permission(self):
+    def test_rate_configuration_uses_manage_depreciation_permission(self):
         asset_class = DepreciationAssetClass.objects.create(
             name="Computers",
             code="COMP",
@@ -409,8 +409,7 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         client = APIClient()
         client.force_authenticate(user=self.user)
         self.user.user_permissions.add(
-            Permission.objects.get(content_type__app_label="inventory", codename="view_depreciation"),
-            Permission.objects.get(content_type__app_label="inventory", codename="manage_depreciation"),
+            Permission.objects.get(content_type__app_label="inventory", codename="view_depreciation")
         )
 
         denied = client.post("/api/inventory/depreciation/rates/", {
@@ -422,7 +421,7 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         self.assertEqual(denied.status_code, 403)
 
         self.user.user_permissions.add(
-            Permission.objects.get(content_type__app_label="inventory", codename="post_depreciation")
+            Permission.objects.get(content_type__app_label="inventory", codename="manage_depreciation")
         )
 
         allowed = client.post("/api/inventory/depreciation/rates/", {
@@ -443,7 +442,7 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         client = APIClient()
         client.force_authenticate(user=self.user)
         self.user.user_permissions.add(
-            Permission.objects.get(content_type__app_label="inventory", codename="post_depreciation")
+            Permission.objects.get(content_type__app_label="inventory", codename="manage_depreciation")
         )
 
         first = client.post("/api/inventory/depreciation/rates/", {
@@ -477,7 +476,7 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         client = APIClient()
         client.force_authenticate(user=self.user)
         self.user.user_permissions.add(
-            Permission.objects.get(content_type__app_label="inventory", codename="post_depreciation")
+            Permission.objects.get(content_type__app_label="inventory", codename="manage_depreciation")
         )
 
         first = client.post("/api/inventory/depreciation/rates/", {

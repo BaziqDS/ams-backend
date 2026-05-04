@@ -8,6 +8,7 @@ from .distribution_views import build_hierarchical_distribution
 from ..models.category_model import CategoryType, TrackingType
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage
 from ..models.batch_model import ItemBatch
+from ..models.item_model import Item
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
 from ams.permissions import StrictDjangoModelPermissions
 from notifications.services import (
@@ -17,6 +18,64 @@ from notifications.services import (
     notify_inspection_submitted_to_central_register,
     notify_inspection_submitted_to_finance_review,
 )
+
+
+def previous_stage_for_inspection(instance: InspectionCertificate):
+    if instance.stage == InspectionStage.FINANCE_REVIEW:
+        return InspectionStage.CENTRAL_REGISTER
+    if instance.stage == InspectionStage.CENTRAL_REGISTER:
+        return InspectionStage.DRAFT if instance.department and instance.department.hierarchy_level == 0 else InspectionStage.STOCK_DETAILS
+    if instance.stage == InspectionStage.STOCK_DETAILS:
+        return InspectionStage.DRAFT
+    return None
+
+
+def finalize_provisional_items_for_completion(instance: InspectionCertificate):
+    linked_item_ids = list(
+        instance.items.filter(
+            item__isnull=False,
+            item__is_provisional=True,
+            item__provisional_inspection=instance,
+        ).values_list('item_id', flat=True).distinct()
+    )
+    if linked_item_ids:
+        Item.objects.filter(
+            id__in=linked_item_ids,
+            is_provisional=True,
+            provisional_inspection=instance,
+        ).update(
+            is_provisional=False,
+            provisional_inspection=None,
+            updated_at=timezone.now(),
+        )
+
+    orphaned_items = Item.objects.filter(
+        is_provisional=True,
+        provisional_inspection=instance,
+    ).exclude(id__in=linked_item_ids)
+    for item in orphaned_items:
+        if item.inspection_items.exclude(inspection_certificate=instance).exists():
+            continue
+        item.delete()
+
+
+def cleanup_provisional_items_for_cancellation(instance: InspectionCertificate):
+    provisional_items = Item.objects.filter(
+        is_provisional=True,
+        provisional_inspection=instance,
+    )
+    for item in provisional_items:
+        has_external_links = (
+            item.inspection_items.exclude(inspection_certificate=instance).exists()
+            or item.stock_records.exists()
+            or item.instances.exists()
+            or item.batches.exists()
+            or item.fixed_asset_entries.exists()
+        )
+        if has_external_links:
+            continue
+        instance.items.filter(item=item).update(item=None)
+        item.delete()
 
 
 class InspectionWorkflowPermissions(StrictDjangoModelPermissions):
@@ -45,8 +104,8 @@ class InspectionWorkflowPermissions(StrictDjangoModelPermissions):
 
 class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = InspectionCertificate.objects.all().select_related(
-        'department', 'initiated_by', 'stock_filled_by', 
-        'central_store_filled_by', 'finance_reviewed_by', 'rejected_by'
+        'department', 'initiated_by', 'stock_filled_by',
+        'central_store_filled_by', 'finance_reviewed_by', 'revision_requested_by', 'rejected_by'
     ).prefetch_related('items__item', 'stock_entries')
     serializer_class = InspectionCertificateSerializer
     permission_classes = [permissions.IsAuthenticated, InspectionWorkflowPermissions]
@@ -80,8 +139,47 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if not hasattr(user, 'profile'):
             return queryset.none()
 
-        accessible_locations = user.profile.get_user_management_locations()
-        return queryset.filter(department__in=accessible_locations).distinct()
+        accessible_locations = user.profile.get_inspection_department_locations()
+        queryset = queryset.filter(department__in=accessible_locations).distinct()
+
+        raw_location_ids = self.request.query_params.getlist('location') or self.request.query_params.getlist('location_id')
+        selected_ids = []
+        for raw in raw_location_ids:
+            for piece in str(raw).split(','):
+                try:
+                    selected_ids.append(int(piece))
+                except (TypeError, ValueError):
+                    continue
+
+        if selected_ids and user.profile.has_root_inspection_scope():
+            queryset = queryset.filter(
+                department_id__in=accessible_locations.filter(id__in=selected_ids).values_list('id', flat=True)
+            )
+
+        return queryset
+
+    def _apply_terminal_state(self, instance, *, actor, reason, status_value):
+        if not reason:
+            return Response({'detail': 'A reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if instance.stage == InspectionStage.COMPLETED:
+            return Response({'detail': 'Completed inspections cannot be cancelled or rejected.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if instance.stage == InspectionStage.REJECTED:
+            return Response({'detail': 'Inspection is already closed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if status_value == 'CANCELLED':
+            cleanup_provisional_items_for_cancellation(instance)
+
+        instance.rejection_stage = instance.stage
+        instance.stage = InspectionStage.REJECTED
+        instance.status = status_value
+        instance.rejection_reason = reason
+        instance.rejected_by = actor
+        instance.rejected_at = timezone.now()
+        instance.save()
+        transaction.on_commit(lambda: notify_inspection_rejected(instance, actor))
+        return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
     def initiate(self, request, pk=None):
@@ -238,6 +336,10 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 ).exists():
                     return Response({'detail': 'All accepted items must have Departmental Stock Register and Page Number recorded before completion.'}, status=status.HTTP_400_BAD_REQUEST)
             
+            if not instance.finance_check_date:
+                instance.finance_check_date = timezone.localdate()
+
+            finalize_provisional_items_for_completion(instance)
             instance.stage = InspectionStage.COMPLETED
             instance.status = 'COMPLETED'
             instance.finance_reviewed_by = request.user
@@ -247,25 +349,85 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             return Response(self.get_serializer(instance).data)
 
     @action(detail=True, methods=['post'])
+    def return_to_previous_stage(self, request, pk=None):
+        with transaction.atomic():
+            instance = self.get_object()
+            reason = str(request.data.get('reason') or '').strip()
+            if not reason:
+                return Response({'detail': 'Return reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            target_stage = previous_stage_for_inspection(instance)
+            if not target_stage:
+                return Response({'detail': 'This inspection cannot be returned to a previous stage.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if instance.stage == InspectionStage.FINANCE_REVIEW and not request.user.has_perm('inventory.review_finance'):
+                return Response({'detail': 'You do not have permission to return finance reviews.'}, status=status.HTTP_403_FORBIDDEN)
+
+            if instance.stage == InspectionStage.CENTRAL_REGISTER and not request.user.has_perm('inventory.fill_central_register'):
+                return Response({'detail': 'You do not have permission to return central-register inspections.'}, status=status.HTTP_403_FORBIDDEN)
+
+            if instance.stage == InspectionStage.STOCK_DETAILS and not request.user.has_perm('inventory.fill_stock_details'):
+                return Response({'detail': 'You do not have permission to return stock-detail inspections.'}, status=status.HTTP_403_FORBIDDEN)
+
+            if instance.stage == InspectionStage.FINANCE_REVIEW:
+                instance.finance_reviewed_by = None
+                instance.finance_reviewed_at = None
+                instance.central_store_filled_by = None
+                instance.central_store_filled_at = None
+            elif instance.stage == InspectionStage.CENTRAL_REGISTER:
+                instance.central_store_filled_by = None
+                instance.central_store_filled_at = None
+                if target_stage == InspectionStage.STOCK_DETAILS:
+                    instance.stock_filled_by = None
+                    instance.stock_filled_at = None
+            elif instance.stage == InspectionStage.STOCK_DETAILS:
+                instance.stock_filled_by = None
+                instance.stock_filled_at = None
+
+            instance.revision_requested_from_stage = instance.stage
+            instance.revision_requested_reason = reason
+            instance.revision_requested_by = request.user
+            instance.revision_requested_at = timezone.now()
+            instance.stage = target_stage
+            instance.status = 'DRAFT' if target_stage == InspectionStage.DRAFT else 'IN_PROGRESS'
+            instance.save()
+            return Response(self.get_serializer(instance).data)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        with transaction.atomic():
+            instance = self.get_object()
+            reason = request.data.get('reason')
+            if not reason:
+                return Response({'detail': 'Cancellation reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if instance.stage == InspectionStage.DRAFT:
+                return Response({'detail': 'Draft inspections should be deleted instead of cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not request.user.is_superuser and not request.user.has_perm('inventory.review_finance'):
+                return Response({'detail': 'You do not have permission to cancel inspections.'}, status=status.HTTP_403_FORBIDDEN)
+
+            return self._apply_terminal_state(
+                instance,
+                actor=request.user,
+                reason=reason,
+                status_value='CANCELLED',
+            )
+
+    @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         with transaction.atomic():
             instance = self.get_object()
             reason = request.data.get('reason')
             if not reason:
                 return Response({'detail': 'Rejection reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            if instance.stage in [InspectionStage.COMPLETED, InspectionStage.REJECTED]:
-                return Response({'detail': 'Cannot reject a completed or already rejected inspection.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            instance.rejection_stage = instance.stage
-            instance.stage = InspectionStage.REJECTED
-            instance.status = 'REJECTED'
-            instance.rejection_reason = reason
-            instance.rejected_by = request.user
-            instance.rejected_at = timezone.now()
-            instance.save()
-            transaction.on_commit(lambda: notify_inspection_rejected(instance, request.user))
-            return Response(self.get_serializer(instance).data)
+            return self._apply_terminal_state(
+                instance,
+                actor=request.user,
+                reason=reason,
+                status_value='REJECTED',
+            )
 
     @action(detail=True, methods=['get'], url_path=r'items/(?P<item_id>[^/.]+)/distribution')
     def item_distribution(self, request, pk=None, item_id=None):

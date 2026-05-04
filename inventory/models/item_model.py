@@ -39,6 +39,18 @@ class Item(models.Model):
     # - Maintenance: Now tracked per instance in ItemInstance model (vendor-specific)
 
     is_active = models.BooleanField(default=True)
+    is_provisional = models.BooleanField(
+        default=False,
+        help_text="Hidden from the catalog until the owning inspection certificate is completed.",
+    )
+    provisional_inspection = models.ForeignKey(
+        'InspectionCertificate',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='provisional_items',
+        help_text="Inspection workflow that owns this provisional item until completion.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(

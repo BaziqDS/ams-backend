@@ -1,7 +1,21 @@
 from django.db import models
-from django.contrib.auth.models import User, Permission
+from django.contrib.auth.models import Group, User, Permission
 from django.core.exceptions import ValidationError
 from django.db.models import Q
+
+class RoleMetadata(models.Model):
+    group = models.OneToOneField(Group, on_delete=models.CASCADE, related_name='role_metadata')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_role_metadata')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Role Metadata'
+        verbose_name_plural = 'Role Metadata'
+
+    def __str__(self):
+        return f"{self.group.name} metadata"
+
 
 class UserProfile(models.Model):
     """
@@ -141,35 +155,132 @@ class UserProfile(models.Model):
                             hierarchy_path__startswith=standalone.hierarchy_path
                         )
                         location_ids.update(department_locs.values_list('id', flat=True))
-        
+
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
+
+    def get_location_view_locations(self):
+        """
+        Locations visible in the Locations module.
+
+        Visibility is based on the user's assigned standalone boundary:
+        the assigned standalone itself and every sub-location below it. Store
+        assignments inherit the parent standalone as the boundary.
+        """
+        from inventory.models import Location
+
+        if self.user.is_superuser:
+            return Location.objects.filter(is_active=True)
+
+        location_ids = set()
+        for loc in self.assigned_locations.filter(is_active=True):
+            standalone = loc if loc.is_standalone else loc.get_parent_standalone()
+            if not standalone:
+                continue
+            location_ids.update(
+                standalone.get_descendants(include_self=True).values_list('id', flat=True)
+            )
+
+        return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
+
+    def get_inspection_department_locations(self):
+        """
+        Standalone departments visible in the inspections module.
+
+        A root-level standalone assignment exposes every standalone in the
+        university. Non-root assignments expose only the user's assigned
+        standalone units; store assignments resolve to their parent standalone.
+        """
+        from inventory.models import Location
+
+        if self.user.is_superuser:
+            return Location.objects.filter(is_standalone=True, is_store=False, is_active=True)
+
+        assigned = self.assigned_locations.filter(is_active=True)
+        if assigned.filter(parent_location__isnull=True, is_standalone=True).exists():
+            return Location.objects.filter(is_standalone=True, is_store=False, is_active=True)
+
+        standalone_ids = set()
+        for loc in assigned:
+            standalone = loc if loc.is_standalone else loc.get_parent_standalone()
+            if standalone:
+                standalone_ids.add(standalone.id)
+
+        return Location.objects.filter(
+            id__in=standalone_ids,
+            is_standalone=True,
+            is_store=False,
+            is_active=True,
+        ).distinct()
+
+    def get_creatable_inspection_department_locations(self):
+        """
+        Standalone departments the user may choose when creating an inspection.
+
+        Creation is limited to directly assigned standalone units. Store or
+        child-location assignments resolve upward to their owning standalone.
+        A root-level standalone assignment counts only as that standalone and
+        does not unlock every university department.
+        """
+        from inventory.models import Location
+
+        if self.user.is_superuser:
+            return Location.objects.filter(is_standalone=True, is_store=False, is_active=True)
+
+        standalone_ids = set()
+        for loc in self.assigned_locations.filter(is_active=True):
+            standalone = loc if loc.is_standalone else loc.get_parent_standalone()
+            if standalone and not standalone.is_store and standalone.is_active:
+                standalone_ids.add(standalone.id)
+
+        return Location.objects.filter(
+            id__in=standalone_ids,
+            is_standalone=True,
+            is_store=False,
+            is_active=True,
+        ).distinct()
+
+    def has_root_inspection_scope(self):
+        if self.user.is_superuser:
+            return True
+        return self.assigned_locations.filter(
+            parent_location__isnull=True,
+            is_standalone=True,
+            is_active=True,
+        ).exists()
 
     def get_stock_entry_scope_locations(self):
         """
         Returns the location boundary used for stock-entry visibility.
 
-        Stock entries should scope to the user's assigned locations
-        themselves for store-assigned users, while non-store assignments
-        retain subtree visibility. This keeps store workflows exact without
-        breaking higher-level operational scopes.
+        Main-store assignments see the whole standalone unit. Non-main store
+        assignments see only that store. Standalone assignments behave like
+        the standalone's main-store scope.
         """
         from inventory.models import Location
 
-        if (
-            self.user.is_superuser
-            or self.user.groups.filter(name='System Admin').exists()
-            or self.user.has_perm('inventory.view_global_distribution')
-            or self.user.has_perm('inventory.manage_all_locations')
-        ):
+        if self.user.is_superuser or self.user.groups.filter(name='System Admin').exists():
             return Location.objects.filter(is_active=True)
 
         location_ids = set()
         for loc in self.assigned_locations.filter(is_active=True):
             if loc.is_store:
-                location_ids.add(loc.id)
-            else:
-                descendants = loc.get_descendants(include_self=True)
-                location_ids.update(descendants.values_list('id', flat=True))
+                if loc.is_main_store:
+                    standalone = loc.get_parent_standalone()
+                    if standalone:
+                        location_ids.update(self._get_same_standalone_location_ids(standalone))
+                    else:
+                        location_ids.add(loc.id)
+                else:
+                    location_ids.add(loc.id)
+                continue
+
+            standalone = loc if loc.is_standalone else loc.get_parent_standalone()
+            if standalone and standalone.parent_location_id is None and loc.is_standalone:
+                location_ids.update(
+                    standalone.get_descendants(include_self=True).values_list('id', flat=True)
+                )
+            elif standalone:
+                location_ids.update(self._get_same_standalone_location_ids(standalone))
 
         return Location.objects.filter(id__in=location_ids, is_active=True).distinct()
 
@@ -210,6 +321,53 @@ class UserProfile(models.Model):
             )
 
         return Location.objects.filter(id__in=location_ids, is_store=True, is_active=True).distinct()
+
+    def get_creatable_stock_register_stores(self):
+        """
+        Stores available when creating or reassigning stock registers.
+
+        Root-standalone assignments are creation-sensitive: they do not unlock
+        every descendant store. Those users may only create registers for
+        directly assigned stores. Non-root scopes retain the existing
+        standalone-boundary behavior.
+        """
+        from inventory.models import Location
+
+        if (
+            self.user.is_superuser
+            or self.user.groups.filter(name='System Admin').exists()
+        ):
+            return Location.objects.filter(is_store=True, is_active=True)
+
+        assigned = self.assigned_locations.filter(is_active=True)
+        has_root_standalone = assigned.filter(
+            parent_location__isnull=True,
+            is_standalone=True,
+        ).exists()
+        if not has_root_standalone:
+            return self.get_stock_register_scope_locations()
+
+        return assigned.filter(is_store=True, is_active=True).distinct()
+
+    def _get_same_standalone_location_ids(self, standalone):
+        """
+        Location ids that belong to the standalone unit itself, excluding any
+        nested child standalone units and their descendants.
+        """
+        from inventory.models import Location
+
+        scoped_locations = Location.objects.filter(
+            hierarchy_path__startswith=standalone.hierarchy_path,
+            is_active=True,
+        )
+
+        nested_units = standalone.get_descendants(include_self=False).filter(is_standalone=True)
+        for child_unit in nested_units:
+            scoped_locations = scoped_locations.exclude(
+                hierarchy_path__startswith=child_unit.hierarchy_path,
+            )
+
+        return scoped_locations.values_list('id', flat=True)
 
     def _get_same_standalone_store_ids(self, standalone):
         """
@@ -312,21 +470,22 @@ class UserProfile(models.Model):
     def get_transferrable_locations(self, from_location):
         """
         Enforces strict directional flow based on Store Hierarchy.
-        Central store -> standalone main stores.
+        Central store -> root-level regular stores or standalone main stores.
         Standalone main store -> central store or regular stores in the same standalone.
-        Regular store -> own standalone main store or peer regular stores in the same standalone.
+        Regular store -> own standalone main store.
         """
         from inventory.models import Location
         
         if not from_location.is_store:
             return Location.objects.none()
 
-        if from_location.hierarchy_level == 1:
+        if from_location.hierarchy_level == 1 and from_location.is_main_store:
             return Location.objects.filter(
-                is_store=True,
-                hierarchy_level=2,
-                is_main_store=True,
                 is_active=True,
+                is_store=True,
+            ).filter(
+                Q(hierarchy_level=2, is_main_store=True) |
+                Q(hierarchy_level=1, is_main_store=False)
             ).exclude(id=from_location.id)
 
         standalone = from_location.get_parent_standalone()
@@ -334,19 +493,21 @@ class UserProfile(models.Model):
             return Location.objects.none()
 
         same_scope_stores = Location.objects.filter(
-            hierarchy_path__startswith=f"{standalone.hierarchy_path}/",
+            id__in=self._get_same_standalone_store_ids(standalone),
             is_store=True,
             is_active=True,
         ).exclude(id=from_location.id)
-        main_store = standalone.get_main_store()
-        is_source_main_store = bool(main_store and main_store.id == from_location.id)
+        main_store = from_location.get_containing_main_store()
+        is_source_main_store = bool(from_location.is_main_store)
 
         if is_source_main_store:
-            central_stores = Location.objects.filter(is_store=True, hierarchy_level=1, is_active=True)
+            central_stores = Location.objects.filter(is_store=True, hierarchy_level=1, is_main_store=True, is_active=True)
             peer_regular_stores = same_scope_stores.filter(is_main_store=False)
             return (central_stores | peer_regular_stores).distinct()
 
-        return same_scope_stores.filter(Q(id=getattr(main_store, 'id', None)) | Q(is_main_store=False)).distinct()
+        peer_regular_stores = same_scope_stores.filter(is_main_store=False)
+        own_main_store = same_scope_stores.filter(id=getattr(main_store, 'id', None))
+        return (own_main_store | peer_regular_stores).distinct()
 
         return Location.objects.none()
 

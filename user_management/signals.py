@@ -20,7 +20,7 @@ from django.db import transaction
 from django.db.models.signals import m2m_changed, post_save
 from django.dispatch import receiver
 
-from .models import UserProfile
+from .models import RoleMetadata, UserProfile
 
 
 # codename -> [implied codenames, ...] within the SAME content_type
@@ -97,6 +97,12 @@ def _add_implied_permissions(target, relation_name: str, pk_set) -> None:
 def create_user_profile(sender, instance, created, **kwargs):
     if created:
         UserProfile.objects.get_or_create(user=instance)
+
+
+@receiver(post_save, sender=Group)
+def ensure_role_metadata(sender, instance, created, **kwargs):
+    if created:
+        RoleMetadata.objects.get_or_create(group=instance)
 
 
 @receiver(post_save, sender=User)

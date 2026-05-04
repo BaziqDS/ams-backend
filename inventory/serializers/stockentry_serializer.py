@@ -153,6 +153,38 @@ class StockEntrySerializer(serializers.ModelSerializer):
 
         return expanded_items
 
+    def _validate_assigned_creation_store(self, errors, entry_type, from_location, to_location):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated or user.is_superuser:
+            return
+
+        if not hasattr(user, 'profile'):
+            errors['from_location' if entry_type == 'ISSUE' else 'to_location'] = (
+                'A directly assigned store is required to create stock entries.'
+            )
+            return
+
+        if entry_type == 'ISSUE':
+            store = from_location
+            field = 'from_location'
+        elif entry_type == 'RECEIPT':
+            store = to_location
+            field = 'to_location'
+        else:
+            return
+
+        if not store or not getattr(store, 'is_store', False):
+            return
+
+        assigned_store_ids = set(
+            user.profile.assigned_locations.filter(
+                is_active=True,
+                is_store=True,
+            ).values_list('id', flat=True)
+        )
+        if store.id not in assigned_store_ids:
+            errors[field] = 'Select a store directly assigned to this user.'
 
     def validate(self, attrs):
         candidate = self.instance or StockEntry()
@@ -230,6 +262,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
 
         if from_location and to_location and from_location.pk == to_location.pk:
             errors['to_location'] = 'Destination cannot be the same as the source store.'
+        self._validate_assigned_creation_store(errors, entry_type, from_location, to_location)
         if errors:
             raise serializers.ValidationError(errors)
 
@@ -347,7 +380,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
         return bool(obj.status == 'PENDING_ACK' and self._user_can_edit_entries())
 
     def get_can_correct(self, obj):
-        return bool(obj.status == 'COMPLETED' and self._user_can_edit_entries())
+        return bool(obj.status == 'COMPLETED' and obj.from_location_id and self._user_can_edit_entries())
 
     def get_can_request_reversal(self, obj):
         return bool(

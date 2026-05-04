@@ -6,7 +6,7 @@ from ..models.stock_record_model import StockRecord
 from ..models.allocation_model import StockAllocation, AllocationStatus
 from ..serializers.item_serializer import ItemSerializer
 from ..permissions import ItemPermission
-from .utils import get_item_scope_locations
+from .utils import get_item_scope_locations, get_scope_tokens_from_request
 
 class ItemViewSet(viewsets.ModelViewSet):
     queryset = Item.objects.all().select_related('category__parent_category', 'created_by').order_by('name', 'id')
@@ -19,8 +19,9 @@ class ItemViewSet(viewsets.ModelViewSet):
         if not item_ids:
             return {}
 
+        scope_tokens = get_scope_tokens_from_request(self.request)
         accessible_loc_ids = list(
-            get_item_scope_locations(self.request.user).values_list('id', flat=True)
+            get_item_scope_locations(self.request.user, scope_tokens).values_list('id', flat=True)
         )
         if not accessible_loc_ids:
             return {}
@@ -90,21 +91,29 @@ class ItemViewSet(viewsets.ModelViewSet):
         # Tiers 0, 1, 2 can see all items for browsing/requesting
 
         # 2. Scoped Stock Annotations
-        accessible_locs = get_item_scope_locations(user)
+        scope_tokens = get_scope_tokens_from_request(self.request)
+        accessible_locs = get_item_scope_locations(user, scope_tokens)
         # If level 0 (Central), they see global totals. 
         # But get_descendant_locations for level 0 already returns all active locations.
         
         filter_q = Q(stock_records__location__in=accessible_locs)
+        restricted_total = Coalesce(Sum(
+            'stock_records__quantity',
+            filter=filter_q
+        ), Value(0))
+        restricted_in_transit = Coalesce(Sum(
+            'stock_records__in_transit_quantity',
+            filter=filter_q
+        ), Value(0))
+        restricted_allocated = Coalesce(Sum(
+            'stock_records__allocated_quantity',
+            filter=filter_q
+        ), Value(0))
         
         queryset = queryset.annotate(
-            restricted_total=Coalesce(Sum(
-                'stock_records__quantity',
-                filter=filter_q
-            ), Value(0)),
-            restricted_in_transit=Coalesce(Sum(
-                'stock_records__in_transit_quantity',
-                filter=filter_q
-            ), Value(0))
+            restricted_total=restricted_total,
+            restricted_in_transit=restricted_in_transit,
+            restricted_available=restricted_total - restricted_in_transit - restricted_allocated,
         )
 
         category_id = self.request.query_params.get('category')

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage, InspectionDocument
 from ..models.stockentry_model import StockEntry
@@ -111,6 +111,7 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
     stock_filled_by_name = serializers.CharField(source='stock_filled_by.username', read_only=True, allow_null=True)
     central_store_filled_by_name = serializers.CharField(source='central_store_filled_by.username', read_only=True, allow_null=True)
     finance_reviewed_by_name = serializers.CharField(source='finance_reviewed_by.username', read_only=True, allow_null=True)
+    revision_requested_by_name = serializers.CharField(source='revision_requested_by.username', read_only=True, allow_null=True)
     rejected_by_name = serializers.CharField(source='rejected_by.username', read_only=True, allow_null=True)
     is_initiated = serializers.BooleanField(write_only=True, required=False, default=False)
     
@@ -129,6 +130,7 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             'stock_filled_by', 'stock_filled_by_name', 'stock_filled_at',
             'central_store_filled_by', 'central_store_filled_by_name', 'central_store_filled_at',
             'finance_reviewed_at', 'finance_reviewed_by', 'finance_reviewed_by_name', 'finance_check_date',
+            'revision_requested_by', 'revision_requested_by_name', 'revision_requested_at', 'revision_requested_reason', 'revision_requested_from_stage',
             'rejected_by', 'rejected_by_name', 'rejected_at', 'rejection_reason', 'rejection_stage',
             'created_at', 'updated_at'
         )
@@ -137,9 +139,46 @@ class InspectionCertificateSerializer(serializers.ModelSerializer):
             'stock_filled_by', 'stock_filled_at',
             'central_store_filled_by', 'central_store_filled_at',
             'finance_reviewed_at', 'finance_reviewed_by',
+            'revision_requested_by', 'revision_requested_at', 'revision_requested_reason', 'revision_requested_from_stage',
             'rejected_by', 'rejected_at', 'rejection_reason', 'rejection_stage',
             'created_at', 'updated_at'
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request is None:
+            return
+        if not request.user or not request.user.is_authenticated:
+            self.fields['department'].queryset = self.fields['department'].queryset.none()
+            return
+        if request.user.is_superuser:
+            return
+        if hasattr(request.user, 'profile'):
+            queryset = request.user.profile.get_creatable_inspection_department_locations()
+            if self.instance and getattr(self.instance, 'department_id', None):
+                queryset = queryset.model.objects.filter(
+                    models.Q(id__in=queryset.values_list('id', flat=True))
+                    | models.Q(id=self.instance.department_id)
+                ).distinct()
+            self.fields['department'].queryset = queryset
+        else:
+            self.fields['department'].queryset = self.fields['department'].queryset.none()
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        current_inspection_id = self.instance.id if self.instance else None
+        for item_data in attrs.get('items', []) or []:
+            catalog_item = item_data.get('item')
+            if not catalog_item or not getattr(catalog_item, 'is_provisional', False):
+                continue
+            if catalog_item.provisional_inspection_id != current_inspection_id:
+                raise serializers.ValidationError({
+                    'items': (
+                        f"Item '{catalog_item.name}' is reserved for another inspection workflow and cannot be linked here."
+                    )
+                })
+        return attrs
 
     def to_internal_value(self, data):
         # When using FormData (multipart/form-data), nested lists/dicts like 'items'

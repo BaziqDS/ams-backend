@@ -1,3 +1,4 @@
+from django.db import models
 from rest_framework import serializers
 from ..models.stock_register_model import StockRegister
 from ..models.location_model import Location
@@ -24,8 +25,16 @@ class StockRegisterSerializer(serializers.ModelSerializer):
             self.fields['store'].queryset = Location.objects.none()
             return
 
-        accessible_locations = request.user.profile.get_stock_register_scope_locations()
-        self.fields['store'].queryset = accessible_locations.filter(is_store=True, is_active=True)
+        creatable_stores = request.user.profile.get_creatable_stock_register_stores()
+        current_store_id = getattr(self.instance, 'store_id', None)
+        if current_store_id:
+            creatable_stores = Location.objects.filter(
+                models.Q(id__in=creatable_stores.values_list('id', flat=True))
+                | models.Q(id=current_store_id),
+                is_store=True,
+                is_active=True,
+            ).distinct()
+        self.fields['store'].queryset = creatable_stores.filter(is_store=True, is_active=True)
 
     class Meta:
         model = StockRegister

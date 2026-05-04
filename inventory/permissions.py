@@ -180,12 +180,6 @@ class DepreciationPermission(permissions.BasePermission):
             return _has_perm(user, "inventory.view_depreciation")
         if action in {"post", "reverse"}:
             return _has_perm(user, "inventory.post_depreciation")
-        if view.__class__.__name__ in {
-            "DepreciationPolicyViewSet",
-            "DepreciationAssetClassViewSet",
-            "DepreciationRateVersionViewSet",
-        }:
-            return _has_perm(user, "inventory.post_depreciation")
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             return _has_perm(user, "inventory.manage_depreciation")
         return False

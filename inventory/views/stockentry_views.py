@@ -97,6 +97,83 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter]
     search_fields = ['entry_number', 'remarks']
 
+    def _workflow_scope_filter(self, locations):
+        from django.db.models import Q
+
+        return (
+            Q(entry_type='ISSUE', from_location__in=locations) |
+            Q(entry_type='RECEIPT', to_location__in=locations) |
+            Q(entry_type='RETURN', to_location__in=locations)
+        )
+
+    def _assigned_central_stores(self, user):
+        from ..models.location_model import Location
+
+        if not hasattr(user, 'profile'):
+            return Location.objects.none()
+
+        return user.profile.assigned_locations.filter(
+            is_active=True,
+            is_store=True,
+            is_main_store=True,
+            hierarchy_level=1,
+        )
+
+    def _can_use_all_stock_entry_scope(self, user, central_stores):
+        return (
+            central_stores.exists()
+            and (
+                user.groups.filter(name='Central Store Manager').exists()
+                or user.has_perm('inventory.view_global_distribution')
+                or user.has_perm('inventory.manage_all_locations')
+            )
+        )
+
+    def _requested_store_scope(self, user):
+        from ..models.location_model import Location
+
+        raw_store_id = self.request.query_params.get('store') or self.request.query_params.get('store_id')
+        if not raw_store_id or raw_store_id == 'all':
+            return None
+
+        try:
+            store_id = int(raw_store_id)
+        except (TypeError, ValueError):
+            return Location.objects.none()
+
+        stores = Location.objects.filter(id=store_id, is_store=True, is_active=True)
+        if user.is_superuser or user.groups.filter(name='System Admin').exists():
+            return stores
+        if not hasattr(user, 'profile'):
+            return Location.objects.none()
+
+        scoped_store_ids = user.profile.get_stock_entry_scope_locations().filter(
+            is_store=True,
+        ).values_list('id', flat=True)
+        return stores.filter(id__in=scoped_store_ids)
+
+    @action(detail=False, methods=['get'], url_path='scope-stores')
+    def scope_stores(self, request):
+        from ..models.location_model import Location
+
+        user = request.user
+        if user.is_superuser or user.groups.filter(name='System Admin').exists():
+            stores = Location.objects.filter(is_store=True, is_active=True)
+        elif hasattr(user, 'profile'):
+            stores = user.profile.assigned_locations.filter(is_store=True, is_active=True)
+        else:
+            stores = Location.objects.none()
+
+        return Response([
+            {
+                'id': store.id,
+                'name': store.name,
+                'code': store.code,
+                'is_central': store.hierarchy_level == 1 and store.is_main_store,
+            }
+            for store in stores.order_by('name')
+        ])
+
     @action(detail=True, methods=['post'])
     def acknowledge(self, request, pk=None):
         from django.db import transaction
@@ -367,12 +444,13 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def get_queryset(self):
-        from django.db.models import Q
         user = self.request.user
         queryset = super().get_queryset()
+        requested_stores = self._requested_store_scope(user)
 
-        if user.is_superuser or user.groups.filter(name='Central Store Manager').exists():
-            # Global/Central managers see everything
+        if requested_stores is not None:
+            queryset = queryset.filter(self._workflow_scope_filter(requested_stores)).distinct()
+        elif user.is_superuser or user.groups.filter(name='System Admin').exists():
             pass 
         elif hasattr(user, 'profile'):
             accessible_locations = user.profile.get_stock_entry_scope_locations()
@@ -381,11 +459,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             # 1. ISSUE rows only to the source location
             # 2. RECEIPT rows only to the destination location
             # 3. RETURN rows only to the destination location
-            queryset = queryset.filter(
-                Q(entry_type='ISSUE', from_location__in=accessible_locations) |
-                Q(entry_type='RECEIPT', to_location__in=accessible_locations) |
-                Q(entry_type='RETURN', to_location__in=accessible_locations)
-            ).distinct()
+            queryset = queryset.filter(self._workflow_scope_filter(accessible_locations)).distinct()
         else:
             return queryset.none()
 

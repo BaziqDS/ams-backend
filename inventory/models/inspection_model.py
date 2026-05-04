@@ -71,6 +71,11 @@ class InspectionCertificate(models.Model):
     finance_reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='finance_reviewed_inspections')
     finance_check_date = models.DateField(null=True, blank=True)
 
+    revision_requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='revision_requested_inspections')
+    revision_requested_at = models.DateTimeField(null=True, blank=True)
+    revision_requested_reason = models.TextField(blank=True, null=True)
+    revision_requested_from_stage = models.CharField(max_length=20, choices=InspectionStage.choices, null=True, blank=True)
+
     rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_inspections')
     rejected_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True, null=True)

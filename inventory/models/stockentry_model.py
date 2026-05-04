@@ -133,20 +133,22 @@ class StockEntry(models.Model):
             if self.from_location_id == self.to_location_id:
                 raise ValidationError("Destination cannot be the same as the source store.")
 
-            if self.from_location.hierarchy_level == 1:
-                if self.to_location.hierarchy_level != 2 or not self.to_location.is_main_store:
-                    raise ValidationError("Central Store can only issue to standalone main stores.")
+            if self.from_location.hierarchy_level == 1 and self.from_location.is_main_store:
+                is_standalone_main_store = self.to_location.hierarchy_level == 2 and self.to_location.is_main_store
+                is_root_level_regular_store = self.to_location.hierarchy_level == 1 and not self.to_location.is_main_store
+                if not (is_standalone_main_store or is_root_level_regular_store):
+                    raise ValidationError("Central Store can only issue to root-level stores or standalone main stores.")
             else:
                 source_standalone = self.from_location.get_parent_standalone()
                 target_standalone = self.to_location.get_parent_standalone()
-                source_main_store = source_standalone.get_main_store() if source_standalone else None
-                is_source_main_store = bool(source_main_store and source_main_store.id == self.from_location_id)
+                source_main_store = self.from_location.get_containing_main_store()
+                is_source_main_store = bool(self.from_location.is_main_store)
 
                 if not source_standalone or not target_standalone:
                     raise ValidationError("Store transfers must stay within a valid standalone scope.")
 
                 if is_source_main_store:
-                    is_to_central = self.to_location.hierarchy_level == 1
+                    is_to_central = self.to_location.hierarchy_level == 1 and self.to_location.is_main_store
                     is_same_scope_regular_store = target_standalone == source_standalone and not self.to_location.is_main_store
                     if not (is_to_central or is_same_scope_regular_store):
                         raise ValidationError("Main stores can only issue to Central Store or regular stores in their own standalone location.")

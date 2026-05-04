@@ -8,6 +8,8 @@ class LocationSerializer(serializers.ModelSerializer):
     main_store_id = serializers.SerializerMethodField()
     main_store_display = serializers.SerializerMethodField()
     main_store_code = serializers.SerializerMethodField()
+    root_main_store_id = serializers.SerializerMethodField()
+    root_main_store_display = serializers.SerializerMethodField()
 
     def get_main_store_id(self, obj):
         return obj.auto_created_store_id
@@ -17,6 +19,20 @@ class LocationSerializer(serializers.ModelSerializer):
 
     def get_main_store_code(self, obj):
         return obj.auto_created_store.code if obj.auto_created_store else None
+
+    def _get_root_location(self, obj):
+        current = obj
+        while getattr(current, 'parent_location', None) is not None:
+            current = current.parent_location
+        return current
+
+    def get_root_main_store_id(self, obj):
+        root = self._get_root_location(obj)
+        return root.auto_created_store_id if root and root.auto_created_store_id else None
+
+    def get_root_main_store_display(self, obj):
+        root = self._get_root_location(obj)
+        return root.auto_created_store.name if root and root.auto_created_store else None
 
     def validate(self, attrs):
         if 'location_type' in attrs:

@@ -2,6 +2,7 @@ from rest_framework import serializers
 from decimal import Decimal
 
 from ..models.item_model import Item
+from ..models.inspection_model import InspectionCertificate, InspectionStage
 from .category_serializer import CategorySerializer
 from ..models.category_model import CategoryType
 from ..services.depreciation_service import (
@@ -15,6 +16,13 @@ class ItemSerializer(serializers.ModelSerializer):
     category_type = serializers.CharField(source='category.get_category_type', read_only=True)
     tracking_type = serializers.CharField(source='category.get_tracking_type', read_only=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    provisional_inspection = serializers.PrimaryKeyRelatedField(
+        queryset=InspectionCertificate.objects.all(),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    is_provisional = serializers.BooleanField(required=False, write_only=True)
     total_quantity = serializers.SerializerMethodField()
     in_transit_quantity = serializers.SerializerMethodField()
     available_quantity = serializers.SerializerMethodField()
@@ -30,11 +38,57 @@ class ItemSerializer(serializers.ModelSerializer):
             'acct_unit', 'specifications', 'low_stock_threshold',
             'total_quantity', 
             'in_transit_quantity', 'available_quantity',
-            'is_low_stock', 'standalone_location_count', 'is_active', 'created_at', 'updated_at',
+            'is_low_stock', 'standalone_location_count', 'is_active',
+            'is_provisional', 'provisional_inspection',
+            'created_at', 'updated_at',
             'created_by_name', 'depreciation_summary'
         )
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        provisional_inspection = attrs.get('provisional_inspection')
+        wants_provisional = bool(provisional_inspection or attrs.get('is_provisional'))
+        if not wants_provisional:
+            attrs['is_provisional'] = False
+            return attrs
+
+        if self.instance is not None:
+            raise serializers.ValidationError({
+                'provisional_inspection': 'Provisional inspection ownership can only be set when creating an item.'
+            })
+
+        if provisional_inspection is None:
+            raise serializers.ValidationError({
+                'provisional_inspection': 'Select the inspection certificate that owns this provisional item.'
+            })
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            raise serializers.ValidationError({
+                'provisional_inspection': 'Authentication is required to create provisional inspection items.'
+            })
+
+        if not user.is_superuser and not user.has_perm('inventory.fill_central_register'):
+            raise serializers.ValidationError({
+                'provisional_inspection': 'Only central-register users can create provisional inspection items.'
+            })
+
+        if provisional_inspection.stage != InspectionStage.CENTRAL_REGISTER:
+            raise serializers.ValidationError({
+                'provisional_inspection': 'Provisional items can only be created while the inspection is at the Central Register stage.'
+            })
+
+        if not user.is_superuser:
+            if not hasattr(user, 'profile') or not user.profile.get_inspection_department_locations().filter(id=provisional_inspection.department_id).exists():
+                raise serializers.ValidationError({
+                    'provisional_inspection': 'You do not have access to this inspection certificate.'
+                })
+
+        attrs['is_provisional'] = True
+        return attrs
 
     def create(self, validated_data):
         request = self.context.get('request')
@@ -49,9 +103,7 @@ class ItemSerializer(serializers.ModelSerializer):
         return getattr(obj, 'restricted_in_transit', 0)
 
     def get_available_quantity(self, obj):
-        total = getattr(obj, 'restricted_total', 0)
-        in_transit = getattr(obj, 'restricted_in_transit', 0)
-        return max(0, total - in_transit)
+        return max(0, getattr(obj, 'restricted_available', 0))
 
     def get_is_low_stock(self, obj):
         total = getattr(obj, 'restricted_total', 0)

@@ -8,14 +8,19 @@ from ..models.location_model import Location
 from ..serializers.distribution_serializer import StockRecordSerializer
 from ..permissions import ItemReadPermission
 
-from .utils import ScopedViewSetMixin, get_item_scope_locations
+from .utils import (
+    ScopedViewSetMixin,
+    get_item_scope_locations,
+    get_item_scope_options,
+    get_scope_tokens_from_request,
+)
 
 
-def build_hierarchical_distribution(user, item_id, batch_id=None):
+def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=None):
     if not hasattr(user, 'profile'):
         return []
 
-    accessible_locs = get_item_scope_locations(user)
+    accessible_locs = get_item_scope_locations(user, scope_tokens)
 
     records = StockRecord.objects.filter(
         item_id=item_id,
@@ -217,7 +222,9 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(location_id=location_id)
             
         user = self.request.user
-        return queryset.filter(location__in=get_item_scope_locations(user)).distinct()
+        return queryset.filter(
+            location__in=get_item_scope_locations(user, get_scope_tokens_from_request(self.request))
+        ).distinct()
 
     @action(detail=False, methods=['get'])
     def hierarchical(self, request):
@@ -230,5 +237,10 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
                 request.user,
                 item_id,
                 batch_id=batch_id,
+                scope_tokens=get_scope_tokens_from_request(request),
             )
         )
+
+    @action(detail=False, methods=['get'], url_path='scope-options')
+    def scope_options(self, request):
+        return Response(get_item_scope_options(request.user))

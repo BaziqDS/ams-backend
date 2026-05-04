@@ -31,8 +31,7 @@ class LocationViewSet(viewsets.ModelViewSet):
         
         try:
             profile = user.profile
-            # Strict enforcement: You MUST have the view_location permission to see the list/detail
-            return profile.get_accessible_locations('inventory.view_location')
+            return profile.get_location_view_locations()
         except (AttributeError, UserProfile.DoesNotExist):
             return Location.objects.none()
 

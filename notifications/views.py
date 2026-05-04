@@ -55,3 +55,13 @@ class NotificationReadAllView(APIView):
         now = timezone.now()
         updated = UserNotification.objects.filter(user=request.user, is_read=False).update(is_read=True, read_at=now)
         return Response({"updated": updated})
+
+
+class NotificationClearFeedView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        queryset = UserNotification.objects.filter(user=request.user)
+        deleted = queryset.count()
+        queryset.delete()
+        return Response({"deleted": deleted})

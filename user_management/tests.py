@@ -360,6 +360,62 @@ class CapabilityManifestItemsImplicationTests(TestCase):
         self.assertTrue(group.permissions.filter(pk=view_perm.pk).exists())
 
 
+class RoleManagementMetadataApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='role.creator', password='pw')
+        self.user.user_permissions.add(
+            self._perm('view_roles'),
+            self._perm('create_roles'),
+            self._perm('assign_permissions_to_roles'),
+        )
+
+    def _perm(self, codename):
+        return Permission.objects.get(content_type__app_label='user_management', codename=codename)
+
+    def test_role_list_exposes_created_timestamp_creator_and_counts(self):
+        self.client.force_authenticate(user=self.user)
+
+        create_response = self.client.post(
+            '/api/users/groups/',
+            {
+                'name': 'Inventory Viewer',
+                'module_selections': {
+                    'items': 'view',
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(create_response.status_code, 201, create_response.data)
+        group_id = create_response.data['id']
+
+        list_response = self.client.get('/api/users/groups/')
+        self.assertEqual(list_response.status_code, 200)
+        rows = list_response.data['results'] if isinstance(list_response.data, dict) and 'results' in list_response.data else list_response.data
+        row = next(item for item in rows if item['id'] == group_id)
+
+        self.assertIsNotNone(row['created_at'])
+        self.assertEqual(row['created_by_name'], 'role.creator')
+        self.assertEqual(row['user_count'], 0)
+        self.assertGreaterEqual(row['permission_count'], 1)
+
+    def test_role_list_reports_assigned_user_count(self):
+        group = Group.objects.create(name='Assigned Role')
+        first = User.objects.create_user(username='role.assignee.one', password='pw')
+        second = User.objects.create_user(username='role.assignee.two', password='pw')
+        first.groups.add(group)
+        second.groups.add(group)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/users/groups/')
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data['results'] if isinstance(response.data, dict) and 'results' in response.data else response.data
+        row = next(item for item in rows if item['id'] == group.id)
+        self.assertEqual(row['user_count'], 2)
+
+
 class UserManagementLocationAssignmentScopeTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -374,6 +430,8 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
             parent_location=cls.root,
             is_standalone=True,
         )
+        cls.csit.refresh_from_db()
+        cls.csit_store = cls.csit.auto_created_store
         cls.csit_lab = Location.objects.create(
             name='CSIT Lab',
             location_type=LocationType.LAB,
@@ -393,6 +451,12 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
     def _perm(self, codename):
         return Permission.objects.get(
             content_type__app_label='user_management',
+            codename=codename,
+        )
+
+    def _inventory_perm(self, codename):
+        return Permission.objects.get(
+            content_type__app_label='inventory',
             codename=codename,
         )
 
@@ -631,7 +695,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
         self.assertIn('assigned_locations', resp.data)
         self.assertFalse(User.objects.filter(username='no_location_user').exists())
 
-    def test_root_assigned_user_manager_can_create_user_without_location(self):
+    def test_root_assigned_user_manager_cannot_create_user_without_location(self):
         manager = self._make_user_manager('root_empty_location_creator', self.root)
         self.client.force_authenticate(user=manager)
 
@@ -647,9 +711,9 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
             format='json',
         )
 
-        self.assertEqual(resp.status_code, 201)
-        created = User.objects.get(username='root_no_location_user')
-        self.assertFalse(created.profile.assigned_locations.exists())
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('assigned_locations', resp.data)
+        self.assertFalse(User.objects.filter(username='root_no_location_user').exists())
 
     def test_create_user_without_assign_roles_cannot_set_groups(self):
         manager = self._make_user_manager('csit_no_role_assign', self.csit)
@@ -698,6 +762,58 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('assigned_locations', resp.data)
         self.assertFalse(User.objects.filter(username='unauthorized_location_user').exists())
+
+    def test_create_user_with_stock_entry_create_role_requires_assigned_store(self):
+        manager = self._make_user_manager('csit_stock_entry_role_manager', self.csit)
+        manager.user_permissions.add(self._perm('assign_user_locations'))
+        manager.user_permissions.add(self._perm('assign_user_roles'))
+        group = Group.objects.create(name='Stock Entry Manage Role')
+        group.permissions.add(self._inventory_perm('create_stock_entries'))
+        self.client.force_authenticate(user=manager)
+
+        resp = self.client.post(
+            '/api/users/management/',
+            {
+                'username': 'stock_entry_without_store_user',
+                'password': 'pw',
+                'email': 'stock_entry_without_store@example.com',
+                'first_name': 'Stock',
+                'last_name': 'Entry',
+                'assigned_locations': [self.csit.id],
+                'groups': [group.id],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('assigned_locations', resp.data)
+        self.assertFalse(User.objects.filter(username='stock_entry_without_store_user').exists())
+
+    def test_create_user_with_stock_entry_create_role_allows_assigned_store(self):
+        manager = self._make_user_manager('csit_stock_entry_store_manager', self.csit)
+        manager.user_permissions.add(self._perm('assign_user_locations'))
+        manager.user_permissions.add(self._perm('assign_user_roles'))
+        group = Group.objects.create(name='Stock Entry Manage With Store')
+        group.permissions.add(self._inventory_perm('create_stock_entries'))
+        self.client.force_authenticate(user=manager)
+
+        resp = self.client.post(
+            '/api/users/management/',
+            {
+                'username': 'stock_entry_with_store_user',
+                'password': 'pw',
+                'email': 'stock_entry_with_store@example.com',
+                'first_name': 'Stock',
+                'last_name': 'Entry',
+                'assigned_locations': [self.csit.id, self.csit_store.id],
+                'groups': [group.id],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        created = User.objects.get(username='stock_entry_with_store_user')
+        self.assertTrue(created.profile.assigned_locations.filter(pk=self.csit_store.pk).exists())
 
     def test_non_superuser_cannot_change_own_location_assignments(self):
         manager = self._make_user_manager('csit_self_location_locked', self.csit)

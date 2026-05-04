@@ -203,9 +203,31 @@ class Location(models.Model):
 
     def get_main_store(self):
         if self.is_store and self.is_main_store: return self
-        if self.is_standalone and self.auto_created_store: return self.auto_created_store
+        if self.is_standalone:
+            if self.auto_created_store:
+                return self.auto_created_store
+            return self.child_locations.filter(
+                is_store=True,
+                is_main_store=True,
+                is_active=True,
+            ).first()
         parent_standalone = self.get_parent_standalone()
-        return parent_standalone.auto_created_store if parent_standalone else None
+        return parent_standalone.get_main_store() if parent_standalone else None
+
+    def get_containing_main_store(self):
+        if self.is_store and self.is_main_store:
+            return self
+
+        current = self.parent_location
+        while current:
+            if current.is_store and current.is_main_store:
+                return current
+            if current.is_standalone:
+                return current.get_main_store()
+            current = current.parent_location
+
+        parent_standalone = self.get_parent_standalone()
+        return parent_standalone.get_main_store() if parent_standalone else None
 
     def is_descendant_of(self, location):
         return self.hierarchy_path.startswith(f"{location.hierarchy_path}/")

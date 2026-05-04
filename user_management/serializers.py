@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User, Permission, Group
-from .models import UserProfile
+from .models import RoleMetadata, UserProfile
 from .services.capability_service import (
     apply_module_selections,
     compute_capabilities_for_user,
@@ -116,6 +116,36 @@ class UserManagementSerializer(serializers.ModelSerializer):
         permission_name = codename if "." in codename else f"user_management.{codename}"
         return request.user.has_perm(permission_name)
 
+    def _has_stock_entry_create_permission(self, groups, user_permissions):
+        for group in groups or []:
+            if group.permissions.filter(
+                content_type__app_label='inventory',
+                codename='create_stock_entries',
+            ).exists():
+                return True
+
+        for permission in user_permissions or []:
+            if (
+                permission.content_type.app_label == 'inventory'
+                and permission.codename == 'create_stock_entries'
+            ):
+                return True
+        return False
+
+    def _validate_stock_entry_creator_store_assignment(self, groups, user_permissions, locations):
+        if not self._has_stock_entry_create_permission(groups, user_permissions):
+            return
+
+        if any(getattr(location, 'is_store', False) and getattr(location, 'is_active', True) for location in locations or []):
+            return
+
+        raise serializers.ValidationError({
+            'assigned_locations': (
+                "Users with stock-entry create permission must be assigned "
+                "at least one store location."
+            ),
+        })
+
     def validate_assigned_locations(self, locations):
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
@@ -155,13 +185,16 @@ class UserManagementSerializer(serializers.ModelSerializer):
                 'user_permissions_list': "You do not have permission to assign direct permissions to users.",
             })
 
-        if (
-            not self._request_user_has_global_location_scope()
-            and not profile_data.get('assigned_locations')
-        ):
+        self._validate_stock_entry_creator_store_assignment(
+            groups,
+            user_permissions,
+            profile_data.get('assigned_locations', []),
+        )
+
+        if not profile_data.get('assigned_locations'):
             raise serializers.ValidationError({
                 'assigned_locations': (
-                    "Select at least one location within your assigned scope."
+                    "Select at least one location to assign to this user."
                 ),
             })
         
@@ -267,6 +300,27 @@ class UserManagementSerializer(serializers.ModelSerializer):
                 'user_permissions_list': "You do not have permission to assign direct permissions to users.",
             })
 
+        final_groups = (
+            validated_data['groups']
+            if 'groups' in validated_data
+            else list(instance.groups.all())
+        )
+        final_user_permissions = (
+            validated_data['user_permissions']
+            if 'user_permissions' in validated_data
+            else list(instance.user_permissions.select_related('content_type'))
+        )
+        final_locations = (
+            profile_data['assigned_locations']
+            if 'assigned_locations' in profile_data
+            else list(instance.profile.assigned_locations.all())
+        )
+        self._validate_stock_entry_creator_store_assignment(
+            final_groups,
+            final_user_permissions,
+            final_locations,
+        )
+
         # Update User fields
         instance.username = validated_data.get('username', instance.username)
         instance.email = validated_data.get('email', instance.email)
@@ -353,6 +407,10 @@ class GroupSerializer(serializers.ModelSerializer):
 
     permissions_details = serializers.SerializerMethodField()
     module_selections = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source='role_metadata.created_at', read_only=True, allow_null=True)
+    created_by_name = serializers.CharField(source='role_metadata.created_by.username', read_only=True, allow_null=True)
+    permission_count = serializers.SerializerMethodField()
+    user_count = serializers.SerializerMethodField()
     permissions = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Permission.objects.all(),
@@ -365,6 +423,7 @@ class GroupSerializer(serializers.ModelSerializer):
             'id', 'name',
             'permissions', 'permissions_details',
             'module_selections', 'inspection_stages',
+            'permission_count', 'user_count', 'created_at', 'created_by_name',
         )
 
     def get_permissions_details(self, obj):
@@ -378,6 +437,12 @@ class GroupSerializer(serializers.ModelSerializer):
             }
             for p in perms
         ]
+
+    def get_permission_count(self, obj):
+        return getattr(obj, 'permission_count', obj.permissions.count())
+
+    def get_user_count(self, obj):
+        return getattr(obj, 'user_count', obj.user_set.count())
 
     inspection_stages = serializers.SerializerMethodField()
 
@@ -436,6 +501,16 @@ class GroupSerializer(serializers.ModelSerializer):
         module_selections, inspection_stages = self._pop_module_selections()
         permissions = validated_data.pop('permissions', None)
         group = Group.objects.create(name=validated_data['name'])
+
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated:
+            RoleMetadata.objects.update_or_create(
+                group=group,
+                defaults={'created_by': request.user},
+            )
+        else:
+            RoleMetadata.objects.get_or_create(group=group)
+
         if module_selections is not None:
             apply_module_selections(group, module_selections, inspection_stages)
         elif permissions:
@@ -445,6 +520,7 @@ class GroupSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         module_selections, inspection_stages = self._pop_module_selections()
         permissions = validated_data.pop('permissions', serializers.empty)
+        RoleMetadata.objects.get_or_create(group=instance)
         if 'name' in validated_data:
             instance.name = validated_data['name']
             instance.save()

@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Iterable
+from urllib.parse import urlencode
 
 from django.contrib.auth.models import User
 from django.db.models import F, Q, Sum, Value
@@ -51,6 +52,18 @@ INSPECTION_STAGE_PERM_MAP = {
     InspectionStage.CENTRAL_REGISTER: "inventory.fill_central_register",
     InspectionStage.FINANCE_REVIEW: "inventory.review_finance",
 }
+
+
+def _items_alert_href(*, stock: str | None = None, tracking: str | None = None, focus: str | None = None) -> str:
+    params: dict[str, str] = {}
+    if stock:
+        params["stock"] = stock
+    if tracking:
+        params["tracking"] = tracking
+    if focus:
+        params["focus"] = focus
+    query = urlencode(params)
+    return f"/items?{query}" if query else "/items"
 
 
 def _clear_permission_caches(user: User) -> None:
@@ -359,12 +372,19 @@ def notify_inspection_completed(inspection: InspectionCertificate, actor: User |
 
 def notify_inspection_rejected(inspection: InspectionCertificate, actor: User | None) -> NotificationEvent | None:
     stage_label = inspection.get_rejection_stage_display() if inspection.rejection_stage else "the current stage"
+    was_cancelled = inspection.status == "CANCELLED"
+    outcome_label = "cancelled" if was_cancelled else "rejected"
+    follow_up = (
+        "Review the cancellation reason."
+        if was_cancelled
+        else "Review the rejection reason and resume the certificate when ready."
+    )
     return create_notification_event(
         module="inspections",
         kind="inspection.rejected",
         severity=NotificationSeverity.CRITICAL,
-        title=f"Inspection {inspection.contract_no} was rejected",
-        message=f"{inspection.contract_no} was rejected at {stage_label}. Review the rejection reason and resume the certificate when ready.",
+        title=f"Inspection {inspection.contract_no} was {outcome_label}",
+        message=f"{inspection.contract_no} was {outcome_label} at {stage_label}. {follow_up}",
         users=inspection_visible_users(inspection),
         href=f"/inspections/{inspection.id}",
         entity_type="inspection",
@@ -719,7 +739,7 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 severity=NotificationSeverity.CRITICAL,
                 title="Items are out of stock",
                 message=f"{out_of_stock_count} catalog item{'s' if out_of_stock_count != 1 else ''} are at zero stock within your scope.",
-                href="/items",
+                href=_items_alert_href(stock="out", focus="out-of-stock"),
                 count=out_of_stock_count,
             ))
 
@@ -735,7 +755,7 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 severity=NotificationSeverity.WARNING,
                 title="Items are low on stock",
                 message=f"{low_stock_count} catalog item{'s' if low_stock_count != 1 else ''} are at or below the configured low-stock threshold.",
-                href="/items",
+                href=_items_alert_href(stock="low", focus="low-stock"),
                 count=low_stock_count,
             ))
 
@@ -754,7 +774,7 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 severity=NotificationSeverity.CRITICAL,
                 title="Batches have expired",
                 message=f"{expired_count} tracked batch{'es' if expired_count != 1 else ''} are already expired within your visible stores.",
-                href="/items",
+                href=_items_alert_href(tracking="perishable", focus="expired-batches"),
                 count=expired_count,
             ))
 
@@ -769,7 +789,7 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 severity=NotificationSeverity.WARNING,
                 title="Batches are expiring soon",
                 message=f"{expiring_count} tracked batch{'es' if expiring_count != 1 else ''} expire within the next 30 days.",
-                href="/items",
+                href=_items_alert_href(tracking="perishable", focus="expiring-batches"),
                 count=expiring_count,
             ))
 
@@ -815,12 +835,11 @@ def build_notification_summary(user: User) -> dict[str, object]:
     modules: dict[str, dict[str, int]] = defaultdict(lambda: {"count": 0, "critical": 0})
     open_alerts = 0
     for alert in alerts:
-        count = int(alert.get("count") or 0)
-        open_alerts += count
+        open_alerts += 1
         module_name = str(alert.get("module") or "general")
-        modules[module_name]["count"] += count
+        modules[module_name]["count"] += 1
         if alert.get("severity") == NotificationSeverity.CRITICAL:
-            modules[module_name]["critical"] += count
+            modules[module_name]["critical"] += 1
 
     return {
         "unread_notifications": unread_notifications,

@@ -2,6 +2,7 @@ from rest_framework import viewsets, permissions, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth.models import User, Permission, Group
+from django.db.models import Count
 
 from .models import UserProfile
 from .permissions import (
@@ -94,7 +95,16 @@ class UserViewSet(viewsets.ModelViewSet):
 
 
 class GroupViewSet(viewsets.ModelViewSet):
-    queryset = Group.objects.all().prefetch_related("permissions")
+    queryset = (
+        Group.objects.all()
+        .select_related("role_metadata", "role_metadata__created_by")
+        .prefetch_related("permissions")
+        .annotate(
+            permission_count=Count("permissions", distinct=True),
+            user_count=Count("user", distinct=True),
+        )
+        .order_by("name", "id")
+    )
     serializer_class = GroupSerializer
     permission_classes = [permissions.IsAuthenticated, RolePermission]
     filter_backends = [filters.SearchFilter]
