@@ -83,7 +83,14 @@ jobs:
             "CORS_ALLOWED_ORIGINS=$corsAllowedOrigins",
             "FRONTEND_URL=$frontendUrl"
           )
-          $lines | Out-File -FilePath .env -Encoding utf8 -Force
+          # Write UTF-8 without BOM so python-decouple reads the first key correctly.
+          $envPath = Join-Path (Resolve-Path ".").Path ".env"
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines($envPath, $lines, $utf8NoBom)
+
+      - name: Verify production database config
+        run: |
+          & .\venv\Scripts\python.exe manage.py shell -c "from django.conf import settings; import sys; print('ENVIRONMENT=' + settings.ENVIRONMENT); print('ENGINE=' + settings.DATABASES['default']['ENGINE']); print('NAME=' + str(settings.DATABASES['default'].get('NAME'))); sys.exit(0 if settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql' else 1)"
 
       - name: Run migrations
         run: |
