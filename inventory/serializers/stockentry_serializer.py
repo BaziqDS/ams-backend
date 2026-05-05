@@ -380,6 +380,8 @@ class StockEntrySerializer(serializers.ModelSerializer):
         return bool(obj.status == 'PENDING_ACK' and self._user_can_edit_entries())
 
     def get_can_correct(self, obj):
+        if obj.inspection_certificate_id and obj.entry_type == 'RECEIPT' and obj.from_location_id is None:
+            return False
         return bool(obj.status == 'COMPLETED' and obj.from_location_id and self._user_can_edit_entries())
 
     def get_can_request_reversal(self, obj):
@@ -459,4 +461,3 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'entry_type': replacement.entry_type,
             'status': replacement.status,
         }
-

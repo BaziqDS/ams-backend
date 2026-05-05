@@ -572,6 +572,18 @@ class InspectionCertificateApiScopeTests(TestCase):
         self.assertIn(self.electrical_certificate.id, returned_ids)
         self.assertNotIn(self.csit_certificate.id, returned_ids)
 
+    def test_finance_reviewer_sees_all_inspections_regardless_of_assigned_location(self):
+        user = self._make_user('inspection_finance_global_scope', self.electrical)
+        user.user_permissions.add(self._perm('review_finance'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/inspections/')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in self._rows(resp)}
+        self.assertIn(self.electrical_certificate.id, returned_ids)
+        self.assertIn(self.csit_certificate.id, returned_ids)
+
     def test_root_assigned_user_cannot_create_for_unassigned_standalones(self):
         user = self._make_user('inspection_root_create_limited', self.root)
         user.user_permissions.add(self._perm('initiate_inspection'))
@@ -1286,6 +1298,9 @@ class InspectionTrackingIntakeTests(TestCase):
         self.assertEqual(receipt_item.stock_register, self.register)
         self.assertEqual(receipt_item.page_number, 1)
         self.assertEqual(receipt_item.accepted_instances.count(), 2)
+        generated_entries = StockEntry.objects.filter(inspection_certificate=certificate)
+        self.assertEqual(generated_entries.filter(status='COMPLETED').count(), 3)
+        self.assertFalse(generated_entries.filter(status='PENDING_ACK').exists())
 
     def test_perishable_quantity_inspection_persists_manufactured_and_expiry_dates_to_batch(self):
         certificate = self._certificate('TRACK-IC-PER-002')
@@ -1317,6 +1332,31 @@ class InspectionTrackingIntakeTests(TestCase):
         batch = ItemBatch.objects.get(item=self.perishable_item, batch_number='TRACK-BATCH-001')
         self.assertEqual(batch.manufactured_date, manufactured_date)
         self.assertEqual(batch.expiry_date, expiry_date)
+
+    def test_completion_auto_assigns_missing_perishable_batch_number(self):
+        certificate = self._certificate('TRACK-IC-PER-AUTO')
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.perishable_item,
+            item_description='Auto batch chemicals',
+            tendered_quantity=3,
+            accepted_quantity=3,
+            rejected_quantity=0,
+            unit_price=10,
+            central_register=self.register,
+            central_register_page_no='1',
+            stock_register=self.register,
+            stock_register_page_no='2',
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        inspection_item = certificate.items.get()
+        self.assertEqual(inspection_item.batch_number, 'TRACK-IC-PER-AUTO-TRACK-CHEM-ITM')
+        self.assertTrue(ItemBatch.objects.filter(item=self.perishable_item, batch_number='TRACK-IC-PER-AUTO-TRACK-CHEM-ITM').exists())
 
     def test_batch_listing_exposes_quantity_for_item_and_location_scopes(self):
         batch = ItemBatch.objects.create(
@@ -1362,7 +1402,7 @@ class InspectionTrackingIntakeTests(TestCase):
         self.assertEqual(scoped_batch_row['quantity'], 3)
         self.assertEqual(scoped_batch_row['available_quantity'], 3)
 
-    def test_perishable_quantity_inspection_requires_batch_number_before_completion(self):
+    def test_perishable_quantity_inspection_auto_generates_missing_batch_number(self):
         certificate = self._certificate('TRACK-IC-PER-001')
         InspectionItem.objects.create(
             inspection_certificate=certificate,
@@ -1382,8 +1422,10 @@ class InspectionTrackingIntakeTests(TestCase):
         client.force_authenticate(user=self.user)
         response = client.post(f'/api/inventory/inspections/{certificate.id}/complete/')
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn('batch number', response.data['detail'].lower())
+        self.assertEqual(response.status_code, 200, response.data)
+        inspection_item = certificate.items.get()
+        self.assertEqual(inspection_item.batch_number, 'TRACK-IC-PER-001-TRACK-CHEM-ITM')
+        self.assertTrue(ItemBatch.objects.filter(item=self.perishable_item, batch_number='TRACK-IC-PER-001-TRACK-CHEM-ITM').exists())
 
     def test_consumable_quantity_inspection_auto_generates_tracking_lot(self):
         certificate = self._certificate('TRACK-IC-CON-001')

@@ -153,6 +153,8 @@ def _location_access_scope(user: User):
 def _inspection_scope_for_user(user: User):
     if user.is_superuser:
         return InspectionCertificate.objects.all()
+    if user_has_perm(user, "inventory.review_finance"):
+        return InspectionCertificate.objects.all()
     if not hasattr(user, "profile"):
         return InspectionCertificate.objects.none()
     return InspectionCertificate.objects.filter(
@@ -731,18 +733,6 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 Value(0),
             )
         )
-        out_of_stock_count = item_totals.filter(low_stock_threshold__gt=0, restricted_total=0).count()
-        if out_of_stock_count:
-            alerts.append(AlertRecord(
-                key="items-out-of-stock",
-                module="items",
-                severity=NotificationSeverity.CRITICAL,
-                title="Items are out of stock",
-                message=f"{out_of_stock_count} catalog item{'s' if out_of_stock_count != 1 else ''} are at zero stock within your scope.",
-                href=_items_alert_href(stock="out", focus="out-of-stock"),
-                count=out_of_stock_count,
-            ))
-
         low_stock_count = item_totals.filter(
             low_stock_threshold__gt=0,
             restricted_total__gt=0,

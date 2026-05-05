@@ -78,6 +78,24 @@ def cleanup_provisional_items_for_cancellation(instance: InspectionCertificate):
         item.delete()
 
 
+def auto_assign_perishable_batch_numbers(instance: InspectionCertificate):
+    for inspection_item in instance.items.filter(
+        accepted_quantity__gt=0,
+    ).filter(
+        models.Q(batch_number__isnull=True) | models.Q(batch_number='')
+    ).select_related('item__category'):
+        item = inspection_item.item
+        if (
+            not item
+            or item.category.get_category_type() != CategoryType.PERISHABLE
+            or item.category.get_tracking_type() != TrackingType.QUANTITY
+        ):
+            continue
+        item_code = (item.code or f"ITEM-{item.id}").strip()
+        inspection_item.batch_number = f"{instance.contract_no}-{item_code}"
+        inspection_item.save(update_fields=['batch_number'])
+
+
 class InspectionWorkflowPermissions(StrictDjangoModelPermissions):
     """Allow inspection stage permissions to drive inspection workflow actions."""
 
@@ -136,6 +154,8 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
+        if user.is_superuser or user.has_perm('inventory.review_finance'):
+            return queryset
         if not hasattr(user, 'profile'):
             return queryset.none()
 
@@ -316,16 +336,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             ).exists():
                  return Response({'detail': 'All accepted items must have Central Register and Page Number recorded before completion.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            perishable_without_batch = [
-                item.id
-                for item in instance.items.filter(accepted_quantity__gt=0).select_related('item__category')
-                if item.item
-                and item.item.category.get_category_type() == CategoryType.PERISHABLE
-                and item.item.category.get_tracking_type() == TrackingType.QUANTITY
-                and not item.batch_number
-            ]
-            if perishable_without_batch:
-                return Response({'detail': 'All accepted perishable quantity items must have a batch number before completion.'}, status=status.HTTP_400_BAD_REQUEST)
+            auto_assign_perishable_batch_numbers(instance)
 
             # Final Validation: Ensure Stage 2 info is present if not Main University
             if instance.department.hierarchy_level != 0:

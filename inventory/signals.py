@@ -26,6 +26,10 @@ def _should_create_linked_receipt_for_issue(stock_entry):
     )
 
 
+def _linked_receipt_status_for_issue(stock_entry):
+    return 'COMPLETED' if stock_entry.inspection_certificate_id else 'PENDING_ACK'
+
+
 def _inspection_tracking_lot_code(certificate, inspection_item):
     return f"{certificate.contract_no}-L{inspection_item.id}"
 
@@ -180,7 +184,7 @@ def process_stock_entry_item(sender, instance, created, **kwargs):
                     'entry_date': stock_entry.entry_date,
                     'from_location': stock_entry.from_location,
                     'to_location': stock_entry.to_location,
-                    'status': 'PENDING_ACK',
+                    'status': _linked_receipt_status_for_issue(stock_entry),
                     'reference_purpose': 'AUTO_RECEIPT',
                     'remarks': f"Auto-generated receipt for {stock_entry.entry_number}. {stock_entry.remarks or ''}",
                     'purpose': stock_entry.purpose,
@@ -482,8 +486,6 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                 # but wait, process_stock_entry_item is a post_save on StockEntryItem.
                 # If we just change the StockEntry status, the items aren't saved again.
                 # So we manually handle it here for reliability.
-                target_status = instance.status if instance.status == 'PENDING_ACK' else 'COMPLETED'
-                
                 linked_receipt, r_created = StockEntry.objects.get_or_create(
                     reference_entry=instance,
                     entry_type='RECEIPT',
@@ -492,7 +494,7 @@ def process_stock_on_status_change(sender, instance, created, **kwargs):
                         'entry_date': instance.entry_date,
                         'from_location': instance.from_location,
                         'to_location': instance.to_location,
-                        'status': 'PENDING_ACK',
+                        'status': _linked_receipt_status_for_issue(instance),
                         'reference_purpose': 'AUTO_RECEIPT',
                         'remarks': f"Auto-generated receipt for {instance.entry_number}. {instance.remarks or ''}",
                         'purpose': instance.purpose,

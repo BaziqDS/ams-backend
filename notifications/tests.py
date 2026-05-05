@@ -148,10 +148,10 @@ class NotificationsApiTests(TestCase):
 
         summary_response = self.client.get("/api/notifications/summary/")
         self.assertEqual(summary_response.status_code, 200)
-        self.assertEqual(summary_response.data["open_alerts"], 6)
+        self.assertEqual(summary_response.data["open_alerts"], 5)
         self.assertEqual(summary_response.data["modules"]["inspections"]["count"], 1)
         self.assertEqual(summary_response.data["modules"]["stock-entries"]["count"], 1)
-        self.assertEqual(summary_response.data["modules"]["items"]["count"], 3)
+        self.assertEqual(summary_response.data["modules"]["items"]["count"], 2)
         self.assertEqual(summary_response.data["modules"]["depreciation"]["count"], 1)
         self.assertGreaterEqual(summary_response.data["unread_notifications"], 1)
 
@@ -161,7 +161,7 @@ class NotificationsApiTests(TestCase):
         self.assertIn("inspections-stock-details", alert_keys)
         self.assertIn("stock-entries-pending-ack", alert_keys)
         self.assertIn("items-low-stock", alert_keys)
-        self.assertIn("items-out-of-stock", alert_keys)
+        self.assertNotIn("items-out-of-stock", alert_keys)
         self.assertIn("items-expiring-batches", alert_keys)
         self.assertIn("depreciation-uncapitalized", alert_keys)
 
@@ -214,16 +214,15 @@ class NotificationsApiTests(TestCase):
 
         summary_response = self.client.get("/api/notifications/summary/")
         self.assertEqual(summary_response.status_code, 200)
-        self.assertEqual(summary_response.data["open_alerts"], 2)
-        self.assertEqual(summary_response.data["modules"]["items"]["count"], 2)
-        self.assertEqual(summary_response.data["modules"]["items"]["critical"], 2)
+        self.assertEqual(summary_response.data["open_alerts"], 1)
+        self.assertEqual(summary_response.data["modules"]["items"]["count"], 1)
+        self.assertEqual(summary_response.data["modules"]["items"]["critical"], 1)
 
         alerts_response = self.client.get("/api/notifications/alerts/")
         self.assertEqual(alerts_response.status_code, 200)
         alerts_by_key = {row["key"]: row for row in alerts_response.data}
 
-        self.assertEqual(alerts_by_key["items-out-of-stock"]["count"], 2)
-        self.assertEqual(alerts_by_key["items-out-of-stock"]["href"], "/items?stock=out&focus=out-of-stock")
+        self.assertNotIn("items-out-of-stock", alerts_by_key)
         self.assertEqual(alerts_by_key["items-expired-batches"]["count"], 2)
         self.assertEqual(alerts_by_key["items-expired-batches"]["href"], "/items?tracking=perishable&focus=expired-batches")
 
