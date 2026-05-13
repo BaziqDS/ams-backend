@@ -168,7 +168,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
-        if user.is_superuser or user.has_perm('inventory.review_finance'):
+        if user.is_superuser or user.has_perm('inventory.view_all_inspections') or user.has_perm('inventory.review_finance'):
             return queryset
         if not hasattr(user, 'profile'):
             return queryset.none()

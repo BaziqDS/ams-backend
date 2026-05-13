@@ -11,7 +11,6 @@ from .views import (
     DepreciationRunViewSet, FixedAssetRegisterEntryViewSet,
     MaintenanceMeterReadingViewSet, MaintenancePlanViewSet,
     MaintenanceWorkOrderViewSet,
-    ReportViewSet,
 )
 
 router = DefaultRouter()
@@ -42,15 +41,5 @@ router.register(r'maintenance/meter-readings', MaintenanceMeterReadingViewSet, b
 
 
 urlpatterns = [
-    path(
-        'reports/inventory-position/stores/',
-        ReportViewSet.as_view({'get': 'stores'}),
-        name='inventory-position-report-stores',
-    ),
-    path(
-        'reports/inventory-position/pdf/',
-        ReportViewSet.as_view({'get': 'inventory_position_pdf'}),
-        name='inventory-position-report-pdf',
-    ),
     path('', include(router.urls)),
 ]

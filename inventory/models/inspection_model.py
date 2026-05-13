@@ -99,6 +99,7 @@ class InspectionCertificate(models.Model):
             ("fill_stock_details", "Can fill stock details (Stage 2)"),
             ("fill_central_register", "Can fill central register (Stage 3)"),
             ("review_finance", "Can perform finance review (Stage 4)"),
+            ("view_all_inspections", "Can view all inspection certificates university-wide"),
         ]
 
 class InspectionItem(models.Model):

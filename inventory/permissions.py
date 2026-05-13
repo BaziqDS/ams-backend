@@ -247,15 +247,3 @@ class MaintenanceMeterReadingPermission(permissions.BasePermission):
         if request.method == "DELETE":
             return _has_perm(user, "inventory.delete_maintenance")
         return False
-
-
-class ReportsPermission(permissions.BasePermission):
-    """Read-only gate for inventory report endpoints."""
-
-    def has_permission(self, request, view):  # type: ignore[override]
-        user = request.user
-        if not user or not user.is_authenticated:
-            return False
-        if user.is_superuser:
-            return True
-        return request.method in permissions.SAFE_METHODS and _has_perm(user, "inventory.view_reports")

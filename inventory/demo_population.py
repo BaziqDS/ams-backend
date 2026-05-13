@@ -134,7 +134,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "items": "full",
             "stock-entries": "full",
             "stock-registers": "full",
-            "reports": "view",
             "inspections": "full",
             "depreciation": "full",
         },
@@ -148,7 +147,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "items": "manage",
             "stock-entries": "full",
             "stock-registers": "full",
-            "reports": "view",
             "inspections": "view",
             "depreciation": "view",
         },
@@ -161,7 +159,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "items": "view",
             "locations": "view",
             "stock-registers": "view",
-            "reports": "view",
             "depreciation": "view",
         },
     },
@@ -173,7 +170,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "locations": "view",
             "stock-entries": "manage",
             "stock-registers": "manage",
-            "reports": "view",
         },
     },
     {
@@ -184,7 +180,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "items": "view",
             "categories": "view",
             "inspections": "view",
-            "reports": "view",
         },
     },
     {
@@ -198,7 +193,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "items": "view",
             "stock-entries": "view",
             "stock-registers": "view",
-            "reports": "view",
             "inspections": "view",
             "depreciation": "view",
         },
@@ -210,7 +204,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
             "users": "full",
             "roles": "manage",
             "locations": "view",
-            "reports": "view",
         },
     },
     {
@@ -219,7 +212,6 @@ ROLE_BLUEPRINTS: list[dict[str, Any]] = [
         "module_selections": {
             "categories": "full",
             "items": "full",
-            "reports": "view",
             "depreciation": "view",
         },
     },
