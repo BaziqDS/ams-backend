@@ -9,7 +9,7 @@ from ..models.depreciation_model import AssetValueAdjustment, DepreciationEntry
 from ..models.instance_model import ItemInstance
 from ..models.stockentry_model import StockEntryItem
 from ..serializers.instance_serializer import ItemInstanceSerializer
-from .utils import ScopedViewSetMixin, get_item_scope_locations
+from .utils import ScopedViewSetMixin, get_item_scope_locations, get_scope_tokens_from_request
 from ..permissions import ItemInstancePermission
 
 
@@ -66,7 +66,12 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             id_list = [sid.strip() for sid in stock_entry_ids.split(',') if sid.strip()]
             queryset = queryset.filter(stock_entry_items__stock_entry_id__in=id_list).distinct()
 
-        return queryset.filter(current_location__in=get_item_scope_locations(self.request.user)).distinct()
+        return queryset.filter(
+            current_location__in=get_item_scope_locations(
+                self.request.user,
+                get_scope_tokens_from_request(self.request),
+            )
+        ).distinct()
 
     def _build_instance_serializer_maps(self, instances):
         instance_list = list(instances)
