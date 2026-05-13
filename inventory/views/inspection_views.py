@@ -124,7 +124,21 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = InspectionCertificate.objects.all().select_related(
         'department', 'initiated_by', 'stock_filled_by',
         'central_store_filled_by', 'finance_reviewed_by', 'revision_requested_by', 'rejected_by'
-    ).prefetch_related('items__item', 'stock_entries')
+    ).prefetch_related(
+        models.Prefetch(
+            'items',
+            queryset=InspectionItem.objects.select_related(
+                'item',
+                'item__category',
+                'item__category__parent_category',
+                'central_register',
+                'stock_register',
+                'depreciation_asset_class',
+            ),
+        ),
+        'documents',
+        'stock_entries',
+    )
     serializer_class = InspectionCertificateSerializer
     permission_classes = [permissions.IsAuthenticated, InspectionWorkflowPermissions]
     filter_backends = [filters.SearchFilter]

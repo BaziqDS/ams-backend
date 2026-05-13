@@ -21,6 +21,8 @@ from inventory.models import (
     ItemBatch,
     ItemInstance,
     Location,
+    MaintenanceStatus,
+    MaintenanceWorkOrder,
     StockCorrectionRequest,
     StockEntry,
     StockRegister,
@@ -73,7 +75,6 @@ def _clear_permission_caches(user: User) -> None:
 
 
 def user_has_perm(user: User, perm: str) -> bool:
-    _clear_permission_caches(user)
     return user.has_perm(perm)
 
 
@@ -781,6 +782,39 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
                 message=f"{expiring_count} tracked batch{'es' if expiring_count != 1 else ''} expire within the next 30 days.",
                 href=_items_alert_href(tracking="perishable", focus="expiring-batches"),
                 count=expiring_count,
+            ))
+
+    if user_has_perm(user, "inventory.view_maintenance"):
+        today = timezone.localdate()
+        maintenance_scope = _item_scope_for_user(user)
+        open_maintenance = MaintenanceWorkOrder.objects.filter(
+            Q(location__in=maintenance_scope)
+            | Q(instance__current_location__in=maintenance_scope)
+            | Q(batch__stock_records__location__in=maintenance_scope)
+        ).exclude(status__in=[MaintenanceStatus.COMPLETED, MaintenanceStatus.CANCELLED]).distinct()
+
+        overdue_count = open_maintenance.filter(due_date__lt=today).count()
+        if overdue_count:
+            alerts.append(AlertRecord(
+                key="maintenance-overdue",
+                module="maintenance",
+                severity=NotificationSeverity.CRITICAL,
+                title="Maintenance work orders are overdue",
+                message=f"{overdue_count} maintenance work order{'s' if overdue_count != 1 else ''} are past their due date.",
+                href="/maintenance?overdue=1",
+                count=overdue_count,
+            ))
+
+        critical_count = open_maintenance.filter(priority="CRITICAL").count()
+        if critical_count:
+            alerts.append(AlertRecord(
+                key="maintenance-critical",
+                module="maintenance",
+                severity=NotificationSeverity.WARNING,
+                title="Critical maintenance is open",
+                message=f"{critical_count} critical maintenance work order{'s' if critical_count != 1 else ''} need follow-up.",
+                href="/maintenance?priority=CRITICAL",
+                count=critical_count,
             ))
 
     if user_has_perm(user, "inventory.manage_depreciation") or user_has_perm(user, "inventory.post_depreciation"):

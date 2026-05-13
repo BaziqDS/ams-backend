@@ -1,5 +1,13 @@
 from rest_framework import permissions
 
+
+class DjoserUserCreateDisabled(permissions.BasePermission):
+    message = 'Use the scoped user management API to create accounts.'
+
+    def has_permission(self, request, view):
+        return False
+
+
 class StrictDjangoModelPermissions(permissions.DjangoModelPermissions):
     """
     Extends DjangoModelPermissions to also check for 'view' permissions on GET requests.

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Q, Sum
+from django.db.models import Prefetch, Q, Sum
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -63,7 +63,17 @@ class DepreciationAssetClassViewSet(viewsets.ModelViewSet):
     search_fields = ["name", "code", "description"]
 
     def get_queryset(self):
-        return DepreciationAssetClass.objects.select_related("category", "policy", "created_by").order_by("name")
+        return (
+            DepreciationAssetClass.objects.select_related("category", "policy", "created_by")
+            .prefetch_related(
+                Prefetch(
+                    "rate_versions",
+                    queryset=DepreciationRateVersion.objects.order_by("-effective_from", "-created_at"),
+                    to_attr="prefetched_rate_versions",
+                )
+            )
+            .order_by("name")
+        )
 
 
 class DepreciationRateVersionViewSet(viewsets.ModelViewSet):
@@ -101,6 +111,22 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
             "source_inspection",
             "inspection_item",
             "created_by",
+        ).prefetch_related(
+            Prefetch(
+                "asset_class__rate_versions",
+                queryset=DepreciationRateVersion.objects.order_by("-effective_from", "-created_at"),
+                to_attr="prefetched_rate_versions",
+            ),
+            Prefetch(
+                "depreciation_entries",
+                queryset=DepreciationEntry.objects.select_related("run", "rate_version").order_by("-fiscal_year_start"),
+                to_attr="prefetched_depreciation_entries",
+            ),
+            Prefetch(
+                "adjustments",
+                queryset=AssetValueAdjustment.objects.order_by("-effective_date", "-created_at"),
+                to_attr="prefetched_adjustments",
+            ),
         ).order_by("asset_number", "id")
         item_id = self.request.query_params.get("item")
         target_type = self.request.query_params.get("target_type")
@@ -133,16 +159,66 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
             "depreciation_rate": str(rate.rate) if rate else None,
         }
 
+    def _build_uncapitalized_depreciation_contexts(self, items):
+        categories_by_id = {}
+        item_category_ids = {}
+        for item in items:
+            category = depreciation_category_for_item(item)
+            item_category_ids[item.id] = category.id if category else None
+            if category:
+                categories_by_id[category.id] = category
+
+        setup_by_category_id = {}
+        if categories_by_id:
+            setups = (
+                DepreciationAssetClass.objects.filter(category_id__in=categories_by_id)
+                .prefetch_related(
+                    Prefetch(
+                        "rate_versions",
+                        queryset=DepreciationRateVersion.objects.order_by("-effective_from", "-created_at"),
+                        to_attr="prefetched_rate_versions",
+                    )
+                )
+                .order_by("id")
+            )
+            for setup in setups:
+                setup_by_category_id.setdefault(setup.category_id, setup)
+
+        contexts = {}
+        for item in items:
+            category_id = item_category_ids.get(item.id)
+            category = categories_by_id.get(category_id)
+            setup = setup_by_category_id.get(category_id)
+            rates = getattr(setup, "prefetched_rate_versions", []) if setup else []
+            rate = rates[0] if rates else None
+            contexts[item.id] = {
+                "depreciation_category": category.id if category else None,
+                "depreciation_category_name": category.name if category else None,
+                "depreciation_category_code": category.code if category else None,
+                "depreciation_setup": setup.id if setup else None,
+                "depreciation_setup_name": setup.name if setup else None,
+                "depreciation_setup_code": setup.code if setup else None,
+                "depreciation_rate": str(rate.rate) if rate else None,
+            }
+        return contexts
+
+    def _uncapitalized_context_for_item(self, contexts, item):
+        context = contexts.get(item.id)
+        if context is not None:
+            return context
+        return self._uncapitalized_depreciation_context(item)
+
     @action(detail=False, methods=["get"], url_path="uncapitalized")
     def uncapitalized(self, request):
         rows = []
         fixed_asset_category_filter = Q(item__category__category_type=CategoryType.FIXED_ASSET) | Q(
             item__category__parent_category__category_type=CategoryType.FIXED_ASSET
         )
-        instances = ItemInstance.objects.select_related("item", "item__category", "item__category__parent_category").filter(
+        instances = list(ItemInstance.objects.select_related("item", "item__category", "item__category__parent_category").filter(
             fixed_asset_category_filter,
             fixed_asset_entry__isnull=True,
-        )[:200]
+        )[:200])
+        instance_items = [instance.item for instance in instances]
         for instance in instances:
             rows.append({
                 "target_type": FixedAssetTargetType.INSTANCE,
@@ -153,14 +229,21 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
                 "batch": None,
                 "batch_number": None,
                 "quantity": 1,
-                **self._uncapitalized_depreciation_context(instance.item),
             })
 
-        batch_quantities = ItemBatch.objects.select_related("item", "item__category", "item__category__parent_category").filter(
+        batch_quantities = list(ItemBatch.objects.select_related("item", "item__category", "item__category__parent_category").filter(
             fixed_asset_category_filter,
             item__category__tracking_type=TrackingType.QUANTITY,
             fixed_asset_entry__isnull=True,
-        ).annotate(quantity=Sum("stock_records__quantity"))[:200]
+        ).annotate(quantity=Sum("stock_records__quantity"))[:200])
+        depreciation_contexts = self._build_uncapitalized_depreciation_contexts([
+            *instance_items,
+            *(batch.item for batch in batch_quantities),
+        ])
+
+        for idx, instance in enumerate(instances):
+            rows[idx].update(self._uncapitalized_context_for_item(depreciation_contexts, instance.item))
+
         for batch in batch_quantities:
             quantity = int(batch.quantity or 0)
             if quantity <= 0:
@@ -174,7 +257,7 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
                 "batch": batch.id,
                 "batch_number": batch.batch_number,
                 "quantity": quantity,
-                **self._uncapitalized_depreciation_context(batch.item),
+                **self._uncapitalized_context_for_item(depreciation_contexts, batch.item),
             })
         return Response(rows)
 

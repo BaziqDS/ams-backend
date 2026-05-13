@@ -8,9 +8,10 @@ from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..models.correction_model import CorrectionStatus
 from ..models.item_model import Item
 from ..models.batch_model import ItemBatch
-from ..models.instance_model import ItemInstance
+from ..models.instance_model import InstanceStatus, ItemInstance
 from ..models.stock_record_model import StockRecord
 from ..models.category_model import CategoryType, TrackingType
+from ..services.deletion_policy import get_delete_blockers
 
 class PersonSerializer(serializers.ModelSerializer):
     standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
@@ -56,6 +57,8 @@ class StockEntrySerializer(serializers.ModelSerializer):
     correction_status = serializers.SerializerMethodField()
     generated_correction_entries = serializers.SerializerMethodField()
     replacement_entry = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+    delete_blockers = serializers.SerializerMethodField()
 
 
     class Meta:
@@ -73,9 +76,15 @@ class StockEntrySerializer(serializers.ModelSerializer):
             'created_by', 'created_by_name', 'created_at',
             'can_acknowledge', 'can_cancel', 'can_correct', 'can_request_reversal',
             'active_correction', 'correction_status', 'generated_correction_entries',
-            'replacement_entry',
+            'replacement_entry', 'can_delete', 'delete_blockers',
         )
         read_only_fields = ('entry_number', 'created_by', 'created_at', 'acknowledged_by', 'acknowledged_at', 'cancelled_by', 'cancelled_at')
+
+    def get_delete_blockers(self, obj):
+        return get_delete_blockers(obj)
+
+    def get_can_delete(self, obj):
+        return not self.get_delete_blockers(obj)
 
     def _should_auto_split_consumable_issue_item(self, entry_type, from_location, item_data):
         if entry_type != 'ISSUE' or not from_location:
@@ -186,6 +195,41 @@ class StockEntrySerializer(serializers.ModelSerializer):
         if store.id not in assigned_store_ids:
             errors[field] = 'Select a store directly assigned to this user.'
 
+    def _validate_instances_for_entry(self, errors, entry_type, from_location, items_data):
+        seen_instance_ids = set()
+
+        for item_data in items_data or []:
+            instances = item_data.get('instances') or []
+            if not instances:
+                continue
+
+            if entry_type != 'ISSUE':
+                errors['items'] = 'Instance selection is only allowed on issue entries.'
+                return
+
+            if not from_location:
+                errors['items'] = 'Source store is required when selecting item instances.'
+                return
+
+            item = item_data.get('item')
+            for instance in instances:
+                if instance.id in seen_instance_ids:
+                    errors['items'] = 'Each item instance can only be selected once.'
+                    return
+                seen_instance_ids.add(instance.id)
+
+                if item and instance.item_id != item.id:
+                    errors['items'] = 'Selected item instances must belong to the entry item.'
+                    return
+
+                if instance.current_location_id != from_location.id:
+                    errors['items'] = 'Selected item instances must be available at the source store.'
+                    return
+
+                if instance.status != InstanceStatus.AVAILABLE:
+                    errors['items'] = 'Selected item instances must be available before issue.'
+                    return
+
     def validate(self, attrs):
         candidate = self.instance or StockEntry()
         for field, value in attrs.items():
@@ -263,8 +307,18 @@ class StockEntrySerializer(serializers.ModelSerializer):
         if from_location and to_location and from_location.pk == to_location.pk:
             errors['to_location'] = 'Destination cannot be the same as the source store.'
         self._validate_assigned_creation_store(errors, entry_type, from_location, to_location)
+        self._validate_instances_for_entry(errors, entry_type, from_location, attrs.get('items'))
         if errors:
             raise serializers.ValidationError(errors)
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if (
+            not getattr(candidate, 'created_by_id', None)
+            and user
+            and user.is_authenticated
+        ):
+            candidate.created_by = user
 
         try:
             candidate.clean()
@@ -366,6 +420,9 @@ class StockEntrySerializer(serializers.ModelSerializer):
             return False
 
         # Must have location access to the destination
+        access_checker = self.context.get('stock_entry_location_access_checker')
+        if access_checker and obj.to_location:
+            return bool(access_checker(obj.to_location))
         if hasattr(user, 'profile') and obj.to_location:
             return user.profile.has_location_access(obj.to_location)
 
@@ -403,7 +460,27 @@ class StockEntrySerializer(serializers.ModelSerializer):
             return obj.reference_entry
         return obj
 
+    def _prefetched_attr(self, obj, *names):
+        for name in names:
+            if hasattr(obj, name):
+                return getattr(obj, name)
+        return None
+
+    def _correction_requests(self, obj):
+        correction_source = self._correction_source_entry(obj)
+        requests = self._prefetched_attr(
+            correction_source,
+            'prefetched_correction_requests',
+            '_prefetched_correction_requests',
+        )
+        if requests is not None:
+            return list(requests)
+        return None
+
     def _latest_correction(self, obj):
+        requests = self._correction_requests(obj)
+        if requests is not None:
+            return requests[0] if requests else None
         correction_source = self._correction_source_entry(obj)
         return correction_source.correction_requests.order_by('-requested_at').first()
 
@@ -422,6 +499,18 @@ class StockEntrySerializer(serializers.ModelSerializer):
         }
 
     def get_active_correction(self, obj):
+        requests = self._correction_requests(obj)
+        if requests is not None:
+            correction = next(
+                (
+                    request
+                    for request in requests
+                    if request.status not in [CorrectionStatus.APPLIED, CorrectionStatus.REJECTED]
+                ),
+                None,
+            )
+            return self._serialize_correction_summary(correction)
+
         correction_source = self._correction_source_entry(obj)
         correction = correction_source.correction_requests.exclude(
             status__in=[CorrectionStatus.APPLIED, CorrectionStatus.REJECTED]
@@ -434,6 +523,41 @@ class StockEntrySerializer(serializers.ModelSerializer):
 
     def get_generated_correction_entries(self, obj):
         correction_source = self._correction_source_entry(obj)
+        prefetched_entries = self._prefetched_attr(
+            correction_source,
+            'prefetched_generated_correction_entries',
+            '_prefetched_generated_correction_entries',
+        )
+        if prefetched_entries is None:
+            requests = self._correction_requests(obj)
+            if requests is not None:
+                by_id = {}
+                for correction in requests:
+                    generated_entries = self._prefetched_attr(
+                        correction,
+                        'prefetched_generated_entries',
+                        '_prefetched_generated_entries',
+                    )
+                    if generated_entries is None:
+                        generated_entries = getattr(correction, '_prefetched_objects_cache', {}).get('generated_entries')
+                    if generated_entries is None:
+                        generated_entries = []
+                    for entry in generated_entries:
+                        by_id[entry.id] = entry
+                prefetched_entries = [by_id[key] for key in sorted(by_id)]
+
+        if prefetched_entries is not None:
+            return [
+                {
+                    'id': entry.id,
+                    'entry_number': entry.entry_number,
+                    'entry_type': entry.entry_type,
+                    'status': entry.status,
+                    'reference_purpose': entry.reference_purpose,
+                }
+                for entry in prefetched_entries
+            ]
+
         entries = StockEntry.objects.filter(
             generated_by_correction_requests__original_entry=correction_source
         ).distinct().order_by('id')
@@ -449,6 +573,22 @@ class StockEntrySerializer(serializers.ModelSerializer):
         ]
 
     def get_replacement_entry(self, obj):
+        prefetched_replacements = self._prefetched_attr(
+            obj,
+            'prefetched_replacement_entries',
+            '_prefetched_replacement_entries',
+        )
+        if prefetched_replacements is not None:
+            replacement = prefetched_replacements[0] if prefetched_replacements else None
+            if not replacement:
+                return None
+            return {
+                'id': replacement.id,
+                'entry_number': replacement.entry_number,
+                'entry_type': replacement.entry_type,
+                'status': replacement.status,
+            }
+
         replacement = StockEntry.objects.filter(
             reference_entry=obj,
             reference_purpose='REPLACEMENT',

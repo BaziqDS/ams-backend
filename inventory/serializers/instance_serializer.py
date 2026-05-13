@@ -48,6 +48,10 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             allocations = obj._prefetched_allocations
             if allocations:
                 return allocations[0]  # Already ordered by -allocated_at in prefetch
+
+        allocation_by_item_batch = self.context.get('allocation_by_item_batch')
+        if allocation_by_item_batch is not None:
+            return allocation_by_item_batch.get((obj.item_id, None))
         
         # Fallback: Use the same allocation across all three methods
         # Cache on the object to avoid repeated queries in same serialization
@@ -104,6 +108,9 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
         return None
 
     def get_stock_entry_ids(self, obj):
+        stock_entry_ids_by_instance = self.context.get('stock_entry_ids_by_instance')
+        if stock_entry_ids_by_instance is not None:
+            return stock_entry_ids_by_instance.get(obj.id, [])
         return list(obj.stock_entry_items.values_list('stock_entry_id', flat=True).distinct())
 
     def get_depreciation_summary(self, obj):

@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
 
@@ -95,14 +96,16 @@ class CookieRefreshView(APIView):
             )
 
         try:
-            refresh = RefreshToken(raw_refresh)
-            access = str(refresh.access_token)
+            serializer = TokenRefreshSerializer(data={'refresh': raw_refresh})
+            serializer.is_valid(raise_exception=True)
         except (TokenError, InvalidToken) as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
 
+        access = serializer.validated_data['access']
+        refresh = serializer.validated_data.get('refresh')
         response = Response({'detail': 'Token refreshed.'}, status=status.HTTP_200_OK)
-        if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS', False):
-            _set_token_cookies(response, access, str(refresh))
+        if refresh:
+            _set_token_cookies(response, access, refresh)
         else:
             _set_token_cookies(response, access)
         return response

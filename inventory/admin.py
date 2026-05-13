@@ -8,6 +8,12 @@ from .models.stock_record_model import StockRecord
 from .models.stockentry_model import StockEntry, StockEntryItem
 from .models.person_model import Person
 from .models.allocation_model import StockAllocation
+from .models.maintenance_model import (
+    MaintenanceLog,
+    MaintenanceMeterReading,
+    MaintenancePlan,
+    MaintenanceWorkOrder,
+)
 
 @admin.register(StockAllocation)
 class StockAllocationAdmin(admin.ModelAdmin):
@@ -82,4 +88,33 @@ class StockEntryAdmin(admin.ModelAdmin):
     list_filter = ('entry_type', 'status', 'entry_date')
     search_fields = ('entry_number', 'remarks')
     inlines = [StockEntryItemInline]
+
+
+class MaintenanceLogInline(admin.TabularInline):
+    model = MaintenanceLog
+    extra = 0
+    readonly_fields = ('event_type', 'from_status', 'to_status', 'notes', 'performed_by', 'created_at')
+    can_delete = False
+
+
+@admin.register(MaintenanceWorkOrder)
+class MaintenanceWorkOrderAdmin(admin.ModelAdmin):
+    list_display = ('work_order_number', 'title', 'target_type', 'item', 'status', 'priority', 'due_date')
+    list_filter = ('status', 'priority', 'maintenance_type', 'target_type', 'due_date')
+    search_fields = ('work_order_number', 'title', 'item__name', 'instance__serial_number', 'batch__batch_number')
+    inlines = [MaintenanceLogInline]
+
+
+@admin.register(MaintenancePlan)
+class MaintenancePlanAdmin(admin.ModelAdmin):
+    list_display = ('plan_code', 'name', 'target_type', 'item', 'cadence', 'next_due_date', 'is_active')
+    list_filter = ('target_type', 'cadence', 'maintenance_type', 'is_active')
+    search_fields = ('plan_code', 'name', 'item__name', 'instance__serial_number', 'batch__batch_number')
+
+
+@admin.register(MaintenanceMeterReading)
+class MaintenanceMeterReadingAdmin(admin.ModelAdmin):
+    list_display = ('reading_name', 'item', 'target_type', 'value', 'unit', 'recorded_at')
+    list_filter = ('target_type', 'reading_name', 'recorded_at')
+    search_fields = ('reading_name', 'item__name', 'instance__serial_number', 'batch__batch_number')
 

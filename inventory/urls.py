@@ -9,6 +9,8 @@ from .views import (
     AssetValueAdjustmentViewSet, DepreciationAssetClassViewSet,
     DepreciationPolicyViewSet, DepreciationRateVersionViewSet,
     DepreciationRunViewSet, FixedAssetRegisterEntryViewSet,
+    MaintenanceMeterReadingViewSet, MaintenancePlanViewSet,
+    MaintenanceWorkOrderViewSet,
     ReportViewSet,
 )
 
@@ -32,6 +34,9 @@ router.register(r'depreciation/asset-classes', DepreciationAssetClassViewSet, ba
 router.register(r'depreciation/rates', DepreciationRateVersionViewSet, basename='depreciation-rate')
 router.register(r'depreciation/runs', DepreciationRunViewSet, basename='depreciation-run')
 router.register(r'depreciation/adjustments', AssetValueAdjustmentViewSet, basename='depreciation-adjustment')
+router.register(r'maintenance/work-orders', MaintenanceWorkOrderViewSet, basename='maintenance-work-order')
+router.register(r'maintenance/plans', MaintenancePlanViewSet, basename='maintenance-plan')
+router.register(r'maintenance/meter-readings', MaintenanceMeterReadingViewSet, basename='maintenance-meter-reading')
 
 
 

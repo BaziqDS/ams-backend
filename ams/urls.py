@@ -36,8 +36,10 @@ urlpatterns = [
     path('api/users/', include('user_management.urls')),
     path('api/inventory/', include('inventory.urls')),
     path('api/notifications/', include('notifications.urls')),
-    path('silk/', include('silk.urls', namespace='silk')),
 ]
+
+if settings.ENABLE_SILK:
+    urlpatterns.append(path('silk/', include('silk.urls', namespace='silk')))
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

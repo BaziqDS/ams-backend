@@ -854,3 +854,67 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('groups', resp.data)
         self.assertEqual(set(manager.groups.values_list('id', flat=True)), {assigned_group.id})
+
+    def test_non_superuser_user_manager_cannot_create_staff_or_superuser(self):
+        manager = self._make_user_manager('csit_privilege_create_blocked', self.csit)
+        manager.user_permissions.add(self._perm('assign_user_locations'))
+        self.client.force_authenticate(user=manager)
+
+        resp = self.client.post(
+            '/api/users/management/',
+            {
+                'username': 'created_privileged_user',
+                'password': 'pw',
+                'email': 'created_privileged@example.com',
+                'first_name': 'Created',
+                'last_name': 'Privileged',
+                'assigned_locations': [self.csit_lab.id],
+                'is_staff': True,
+                'is_superuser': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('is_superuser', resp.data)
+        self.assertFalse(User.objects.filter(username='created_privileged_user').exists())
+
+    def test_non_superuser_user_manager_cannot_promote_user_to_superuser(self):
+        manager = self._make_user_manager('csit_privilege_update_blocked', self.csit)
+        manager.user_permissions.add(self._perm('edit_user_accounts'))
+        target = self._make_managed_user('csit_regular_target', self.csit_lab)
+        self.client.force_authenticate(user=manager)
+
+        resp = self.client.patch(
+            f'/api/users/management/{target.id}/',
+            {
+                'is_staff': True,
+                'is_superuser': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('is_superuser', resp.data)
+        target.refresh_from_db()
+        self.assertFalse(target.is_staff)
+        self.assertFalse(target.is_superuser)
+
+    def test_superuser_can_manage_staff_and_superuser_flags(self):
+        admin = User.objects.create_superuser(username='root_flag_admin', password='pw')
+        target = self._make_managed_user('root_flag_target', self.csit_lab)
+        self.client.force_authenticate(user=admin)
+
+        resp = self.client.patch(
+            f'/api/users/management/{target.id}/',
+            {
+                'is_staff': True,
+                'is_superuser': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        target.refresh_from_db()
+        self.assertTrue(target.is_staff)
+        self.assertTrue(target.is_superuser)

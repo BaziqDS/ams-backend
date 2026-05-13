@@ -1,10 +1,12 @@
 # pyright: reportAttributeAccessIssue=false
 import json
 
+from django.conf import settings
 from django.contrib.auth.models import Group, Permission, User
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework.response import Response
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from ams.auth_views import ACCESS_COOKIE, REFRESH_COOKIE, _set_token_cookies
 
@@ -27,6 +29,57 @@ class AuthCookieSettingsTests(SimpleTestCase):
 
         self.assertTrue(response.cookies[ACCESS_COOKIE]['secure'])
         self.assertTrue(response.cookies[REFRESH_COOKIE]['secure'])
+
+
+class DiagnosticsSettingsTests(SimpleTestCase):
+    def test_silk_requires_authentication_and_authorisation_when_enabled(self):
+        if not settings.ENABLE_SILK:
+            return
+
+        self.assertTrue(settings.SILKY_AUTHENTICATION)
+        self.assertTrue(settings.SILKY_AUTHORISATION)
+
+
+class CookieRefreshRotationTests(TestCase):
+    def test_refresh_cookie_rotates_and_old_refresh_is_rejected(self):
+        user = User.objects.create_user(username='refresh_rotation_user', password='pw')
+        raw_refresh = str(RefreshToken.for_user(user))
+        client = APIClient()
+        client.cookies[REFRESH_COOKIE] = raw_refresh
+
+        resp = client.post('/auth/cookie/refresh/', {}, format='json')
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertIn(REFRESH_COOKIE, resp.cookies)
+        rotated_refresh = resp.cookies[REFRESH_COOKIE].value
+        self.assertNotEqual(rotated_refresh, raw_refresh)
+
+        replay_client = APIClient()
+        replay_client.cookies[REFRESH_COOKIE] = raw_refresh
+        replay_resp = replay_client.post('/auth/cookie/refresh/', {}, format='json')
+
+        self.assertEqual(replay_resp.status_code, 401)
+
+
+class DjoserUserCreatePermissionTests(TestCase):
+    def test_authenticated_user_cannot_create_account_via_djoser(self):
+        user = User.objects.create_user(username='ordinary_creator', password='pw')
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        resp = client.post(
+            '/auth/users/',
+            {
+                'username': 'created_via_djoser',
+                'password': 'StrongPass123!',
+                're_password': 'StrongPass123!',
+                'email': 'created_via_djoser@example.com',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(User.objects.filter(username='created_via_djoser').exists())
 
 
 class CapabilitiesEndpointLocationsTests(TestCase):

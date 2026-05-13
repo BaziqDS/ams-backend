@@ -47,9 +47,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'djoser',
     'corsheaders',
-    'silk',
     'inventory',
     'user_management',
     'notifications',
@@ -57,7 +57,6 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
-    'silk.middleware.SilkyMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -66,6 +65,14 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+ENABLE_SILK = config('ENABLE_SILK', default=DEBUG, cast=bool)
+if ENABLE_SILK:
+    INSTALLED_APPS.append('silk')
+    MIDDLEWARE.insert(1, 'silk.middleware.SilkyMiddleware')
+    SILKY_AUTHENTICATION = True
+    SILKY_AUTHORISATION = True
+    SILKY_PERMISSIONS = lambda user: bool(user and user.is_superuser)
 
 
 ROOT_URLCONF = 'ams.urls'
@@ -110,6 +117,9 @@ else:
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {
+                'timeout': 20,
+            },
             'ATOMIC_REQUESTS': True,
         }
     }
@@ -236,7 +246,7 @@ DJOSER = {
         'current_user': 'user_management.serializers.UserSerializer',
     },
     'PERMISSIONS': {
-        'user_create': ['rest_framework.permissions.IsAuthenticated'],
+        'user_create': ['ams.permissions.DjoserUserCreateDisabled'],
         'user': ['rest_framework.permissions.IsAuthenticated'],
         'user_list': ['rest_framework.permissions.IsAuthenticated'],
         'token_create': ['rest_framework.permissions.AllowAny'],

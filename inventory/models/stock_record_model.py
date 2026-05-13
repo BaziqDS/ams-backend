@@ -21,6 +21,10 @@ class StockRecord(models.Model):
 
     class Meta:
         unique_together = [['item', 'batch', 'location']]
+        indexes = [
+            models.Index(fields=['location', 'item', 'batch'], name='stockrec_loc_item_batch_idx'),
+            models.Index(fields=['item', 'location', 'batch'], name='stockrec_item_loc_batch_idx'),
+        ]
 
     def __str__(self):
         batch_str = f" - Batch {self.batch.batch_number}" if self.batch else ""

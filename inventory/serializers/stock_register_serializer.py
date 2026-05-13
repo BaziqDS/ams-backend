@@ -2,6 +2,7 @@ from django.db import models
 from rest_framework import serializers
 from ..models.stock_register_model import StockRegister
 from ..models.location_model import Location
+from ..services.deletion_policy import get_delete_blockers
 
 
 class StockRegisterSerializer(serializers.ModelSerializer):
@@ -9,6 +10,14 @@ class StockRegisterSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
     closed_by_name = serializers.CharField(source='closed_by.username', read_only=True)
     reopened_by_name = serializers.CharField(source='reopened_by.username', read_only=True)
+    can_delete = serializers.SerializerMethodField()
+    delete_blockers = serializers.SerializerMethodField()
+
+    def get_delete_blockers(self, obj):
+        return get_delete_blockers(obj)
+
+    def get_can_delete(self, obj):
+        return not self.get_delete_blockers(obj)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -42,7 +51,7 @@ class StockRegisterSerializer(serializers.ModelSerializer):
             'id', 'register_number', 'register_type', 'store', 'store_name',
             'is_active', 'closed_at', 'closed_by', 'closed_by_name', 'closed_reason',
             'reopened_at', 'reopened_by', 'reopened_by_name', 'reopened_reason',
-            'created_at', 'updated_at', 'created_by_name'
+            'created_at', 'updated_at', 'created_by_name', 'can_delete', 'delete_blockers'
         ]
         read_only_fields = (
             'created_at', 'updated_at', 'created_by',

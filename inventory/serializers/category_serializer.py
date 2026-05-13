@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from ..models.category_model import Category, CategoryRateHistory
+from ..services.deletion_policy import get_delete_blockers
 
 class RateHistorySerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.username', read_only=True)
@@ -15,6 +16,8 @@ class CategorySerializer(serializers.ModelSerializer):
     resolved_depreciation_rate = serializers.DecimalField(source='get_depreciation_rate', max_digits=5, decimal_places=2, read_only=True)
     rate_history = RateHistorySerializer(many=True, read_only=True)
     notes = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    can_delete = serializers.SerializerMethodField()
+    delete_blockers = serializers.SerializerMethodField()
 
     class Meta:
         model = Category
@@ -22,9 +25,16 @@ class CategorySerializer(serializers.ModelSerializer):
             'id', 'name', 'code', 'parent_category', 'parent_category_display',
             'category_type', 'tracking_type', 'default_depreciation_rate',
             'resolved_category_type', 'resolved_tracking_type', 'resolved_depreciation_rate',
-            'rate_history', 'is_active', 'created_at', 'updated_at', 'notes'
+            'rate_history', 'is_active', 'created_at', 'updated_at', 'notes',
+            'can_delete', 'delete_blockers',
         ]
         read_only_fields = ('created_by',)
+
+    def get_delete_blockers(self, obj):
+        return get_delete_blockers(obj)
+
+    def get_can_delete(self, obj):
+        return not self.get_delete_blockers(obj)
 
     def create(self, validated_data):
         request_user = validated_data.pop('request_user', None)

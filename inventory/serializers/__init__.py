@@ -18,4 +18,9 @@ from .depreciation_serializer import (
     DepreciationRunSerializer,
     FixedAssetRegisterEntrySerializer,
 )
-
+from .maintenance_serializer import (
+    MaintenanceLogSerializer,
+    MaintenanceMeterReadingSerializer,
+    MaintenancePlanSerializer,
+    MaintenanceWorkOrderSerializer,
+)

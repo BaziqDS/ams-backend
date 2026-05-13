@@ -1,14 +1,16 @@
 from django.utils import timezone
 import logging
-from rest_framework import viewsets, permissions, filters, serializers
+from django.db.models import Prefetch, Q
+from rest_framework import viewsets, permissions, filters, serializers, status
 
 logger = logging.getLogger(__name__)
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.person_model import Person
 from ..models.correction_model import CorrectionResolutionType, StockCorrectionRequest
-from ..models.stockentry_model import StockEntry
+from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..serializers.stockentry_serializer import PersonSerializer, StockEntrySerializer
+from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 from ..services.stock_correction_service import (
     apply_correction,
     approve_correction,
@@ -87,15 +89,65 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     ViewSet for Stock Entries.
     Optimized with select_related and prefetch_related.
     """
+    correction_requests_queryset = StockCorrectionRequest.objects.prefetch_related(
+        Prefetch(
+            'generated_entries',
+            queryset=StockEntry.objects.order_by('id'),
+            to_attr='prefetched_generated_entries',
+        )
+    ).order_by('-requested_at')
     queryset = StockEntry.objects.select_related(
-        'from_location', 'to_location', 'issued_to', 'created_by', 'cancelled_by', 'reference_entry'
+        'from_location',
+        'to_location',
+        'issued_to',
+        'created_by',
+        'acknowledged_by',
+        'cancelled_by',
+        'reference_entry',
+        'reference_entry__from_location',
+        'reference_entry__to_location',
+        'inspection_certificate',
     ).prefetch_related(
-        'items__item', 'items__batch', 'items__stock_register', 'items__ack_stock_register', 'items__instances'
+        Prefetch(
+            'items',
+            queryset=StockEntryItem.objects.select_related(
+                'item',
+                'batch',
+                'stock_register',
+                'ack_stock_register',
+            ).prefetch_related('instances'),
+        ),
+        Prefetch(
+            'correction_requests',
+            queryset=correction_requests_queryset,
+            to_attr='prefetched_correction_requests',
+        ),
+        Prefetch(
+            'reference_entry__correction_requests',
+            queryset=correction_requests_queryset,
+            to_attr='prefetched_correction_requests',
+        ),
+        Prefetch(
+            'correction_entries',
+            queryset=StockEntry.objects.filter(reference_purpose='REPLACEMENT').order_by('-created_at'),
+            to_attr='prefetched_replacement_entries',
+        ),
     ).order_by('-entry_date')
     serializer_class = StockEntrySerializer
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['entry_number', 'remarks']
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            delete_with_policy(instance)
+        except DeletionBlocked as exc:
+            return Response(
+                {'detail': 'Delete is blocked by existing dependencies.', 'delete_blockers': exc.blockers},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _workflow_scope_filter(self, locations):
         from django.db.models import Q
@@ -173,6 +225,29 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             }
             for store in stores.order_by('name')
         ])
+
+    def _build_location_access_checker(self, user):
+        if user.is_superuser or user.groups.filter(name='System Admin').exists():
+            return lambda location: True
+        if not hasattr(user, 'profile'):
+            return lambda location: False
+        assigned_locations = list(user.profile.assigned_locations.all())
+
+        def has_access(location):
+            if location is None:
+                return False
+            return any(
+                location == assigned
+                or location.hierarchy_path.startswith(f"{assigned.hierarchy_path}/")
+                for assigned in assigned_locations
+            )
+
+        return has_access
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['stock_entry_location_access_checker'] = self._build_location_access_checker(self.request.user)
+        return context
 
     @action(detail=True, methods=['post'])
     def acknowledge(self, request, pk=None):
@@ -466,6 +541,18 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         entry_type = self.request.query_params.get('entry_type')
         if entry_type:
             queryset = queryset.filter(entry_type=entry_type)
+        reference_entry = self.request.query_params.get('reference_entry')
+        if reference_entry:
+            queryset = queryset.filter(reference_entry_id=reference_entry)
+        raw_ids = self.request.query_params.get('ids')
+        if raw_ids:
+            ids = []
+            for piece in raw_ids.split(','):
+                try:
+                    ids.append(int(piece.strip()))
+                except (TypeError, ValueError):
+                    continue
+            queryset = queryset.filter(id__in=ids) if ids else queryset.none()
         return queryset
 
 
@@ -482,6 +569,52 @@ class StockCorrectionViewSet(viewsets.GenericViewSet):
     )
     permission_classes = [permissions.IsAuthenticated]
 
+    def _has_global_correction_scope(self, user):
+        return bool(
+            user
+            and (
+                user.is_superuser
+                or user.groups.filter(name__in=['System Admin', 'Central Store Manager']).exists()
+            )
+        )
+
+    def _correction_scope_locations(self, user):
+        if not hasattr(user, 'profile'):
+            return None
+        return user.profile.get_stock_entry_scope_locations()
+
+    def _correction_in_scope(self, user, correction):
+        if self._has_global_correction_scope(user):
+            return True
+        locations = self._correction_scope_locations(user)
+        if locations is None or correction is None or not correction.original_entry_id:
+            return False
+
+        entry = correction.original_entry
+        scoped_ids = [
+            location_id
+            for location_id in (entry.from_location_id, entry.to_location_id)
+            if location_id
+        ]
+        return bool(scoped_ids and locations.filter(id__in=scoped_ids).exists())
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return queryset.none()
+        if self._has_global_correction_scope(user):
+            return queryset
+
+        locations = self._correction_scope_locations(user)
+        if locations is None:
+            return queryset.none()
+
+        return queryset.filter(
+            Q(original_entry__from_location__in=locations)
+            | Q(original_entry__to_location__in=locations)
+        ).distinct()
+
     def _can_approve(self, request, correction=None):
         user = request.user
         if not user or not user.is_authenticated:
@@ -489,6 +622,8 @@ class StockCorrectionViewSet(viewsets.GenericViewSet):
         if user.is_superuser or user.groups.filter(name='Central Store Manager').exists():
             return True
         if not user.has_perm('inventory.approve_stock_corrections'):
+            return False
+        if not self._correction_in_scope(user, correction):
             return False
 
         if correction and correction.resolution_type in {

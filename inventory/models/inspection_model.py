@@ -89,6 +89,11 @@ class InspectionCertificate(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['stage'], name='inspection_stage_idx'),
+            models.Index(fields=['status'], name='inspection_status_idx'),
+            models.Index(fields=['department', 'stage'], name='inspection_dept_stage_idx'),
+        ]
         permissions = [
             ("initiate_inspection", "Can initiate inspection"),
             ("fill_stock_details", "Can fill stock details (Stage 2)"),

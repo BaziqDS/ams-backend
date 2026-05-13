@@ -72,3 +72,9 @@ class StockAllocation(models.Model):
 
     class Meta:
         ordering = ['-allocated_at']
+        indexes = [
+            models.Index(fields=['status', 'source_location', 'item', 'batch'], name='stockalloc_stat_src_item_idx'),
+            models.Index(fields=['stock_entry', 'item', 'batch'], name='stockalloc_entry_item_idx'),
+            models.Index(fields=['status', 'allocated_to_person'], name='stockalloc_stat_person_idx'),
+            models.Index(fields=['status', 'allocated_to_location'], name='stockalloc_stat_loc_idx'),
+        ]

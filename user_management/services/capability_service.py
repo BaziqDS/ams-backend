@@ -102,9 +102,12 @@ def compute_inspection_stages_for_user(user) -> list[str]:
 
 def compute_inspection_stages_for_group(group: Group) -> list[str]:
     """Return the list of inspection stage keys assigned to a group."""
+    permissions = getattr(group, "prefetched_permissions", None)
+    if permissions is None:
+        permissions = group.permissions.select_related("content_type")
     held = {
         f"{p.content_type.app_label}.{p.codename}"
-        for p in group.permissions.select_related("content_type")
+        for p in permissions
     }
     return [key for key, perm in INSPECTION_STAGE_PERMS.items() if perm in held]
 

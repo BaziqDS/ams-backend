@@ -27,6 +27,7 @@ from inventory.models import (
     AllocationStatus,
     StockAllocation,
     StockRecord,
+    StockCorrectionRequest,
     StockEntry,
     StockEntryItem,
     StockRegister,
@@ -2132,6 +2133,35 @@ class LocationStandaloneWorkflowTests(TestCase):
         self.assertTrue(child.is_store)
         self.assertFalse(child.is_standalone)
 
+    def test_children_create_endpoint_allows_store_capability_separate_from_type(self):
+        root = Location.objects.create(
+            name='Explicit Store Root',
+            location_type=LocationType.DEPARTMENT,
+            is_standalone=True,
+        )
+        csit = Location.objects.create(
+            name='Explicit Store CSIT',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=root,
+            is_standalone=True,
+        )
+
+        resp = self.client.post(
+            f'/api/inventory/locations/{csit.id}/children/',
+            {
+                'name': 'CSIT Lab Inventory Room',
+                'location_type': LocationType.LAB,
+                'is_store': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 201)
+        child = Location.objects.get(pk=resp.data['id'])
+        self.assertEqual(child.location_type, LocationType.LAB)
+        self.assertTrue(child.is_store)
+        self.assertFalse(child.is_standalone)
+
 
 class CategoryApiDomainPermissionTests(TestCase):
     @classmethod
@@ -4163,6 +4193,181 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['resolution_type'], 'BLOCKED')
         self.assertIn('stock is no longer available', resp.data['message'])
+
+    def test_create_rejects_person_allocation_outside_source_standalone(self):
+        other_department = Location.objects.create(
+            name='Stock Mechanical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        outsider = Person.objects.create(
+            name='Out of Scope Person',
+            department=other_department.name,
+        )
+        outsider.standalone_locations.add(other_department)
+        user = self._make_user('stock_entry_outside_person_blocked')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Outside person allocation')
+        payload['to_location'] = None
+        payload['issued_to'] = outsider.id
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(
+            StockEntry.objects.filter(purpose='Outside person allocation').exists()
+        )
+
+    def _individual_item(self, suffix):
+        category = Category.objects.create(
+            name=f'Individual Instance Category {suffix}',
+            parent_category=self.parent_category,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        return Item.objects.create(
+            name=f'Individual Instance Item {suffix}',
+            category=category,
+            acct_unit='unit',
+        )
+
+    def test_create_rejects_out_of_scope_instance_id(self):
+        other_department = Location.objects.create(
+            name='Stock Instance Mechanical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        other_store = other_department.auto_created_store
+        item = self._individual_item('blocked')
+        StockRecord.objects.create(item=item, location=self.store, quantity=1)
+        outside_instance = ItemInstance.objects.create(
+            item=item,
+            current_location=other_store,
+            status='AVAILABLE',
+            serial_number='OOS-INSTANCE-001',
+        )
+        user = self._make_user('stock_entry_oos_instance_blocked')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Outside instance allocation')
+        payload['to_location'] = None
+        payload['issued_to'] = self.person.id
+        payload['items'][0].update({
+            'item': item.id,
+            'batch': None,
+            'instances': [outside_instance.id],
+        })
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        outside_instance.refresh_from_db()
+        self.assertEqual(outside_instance.status, 'AVAILABLE')
+        self.assertEqual(outside_instance.current_location_id, other_store.id)
+
+    def test_create_allows_source_location_instance_id(self):
+        item = self._individual_item('allowed')
+        StockRecord.objects.create(item=item, location=self.store, quantity=1)
+        instance = ItemInstance.objects.create(
+            item=item,
+            current_location=self.store,
+            status='AVAILABLE',
+            serial_number='SOURCE-INSTANCE-001',
+        )
+        user = self._make_user('stock_entry_source_instance_allowed')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Source instance allocation')
+        payload['to_location'] = None
+        payload['issued_to'] = self.person.id
+        payload['items'][0].update({
+            'item': item.id,
+            'batch': None,
+            'instances': [instance.id],
+        })
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, 'ALLOCATED')
+
+    def _manual_correction(self):
+        entry = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            status='COMPLETED',
+        )
+        StockEntryItem.objects.create(
+            stock_entry=entry,
+            item=self.item,
+            batch=self.batch,
+            quantity=1,
+        )
+        return StockCorrectionRequest.objects.create(
+            original_entry=entry,
+            reason='Manual correction scope',
+        )
+
+    def test_correction_retrieve_rejects_unrelated_authenticated_user(self):
+        correction = self._manual_correction()
+        other_department = Location.objects.create(
+            name='Stock Correction Mechanical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        other_user = self._make_user('stock_correction_unrelated_reader')
+        other_user.profile.assigned_locations.clear()
+        other_user.profile.assigned_locations.add(other_department.auto_created_store)
+
+        self.client.force_authenticate(user=other_user)
+        resp = self.client.get(f'/api/inventory/stock-corrections/{correction.id}/')
+
+        self.assertEqual(resp.status_code, 404)
+
+    def test_correction_approve_rejects_unrelated_approver(self):
+        correction = self._manual_correction()
+        other_department = Location.objects.create(
+            name='Stock Correction Approver Mechanical',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        approver = self._make_user('stock_correction_unrelated_approver')
+        approver.profile.assigned_locations.clear()
+        approver.profile.assigned_locations.add(other_department.auto_created_store)
+        approver.user_permissions.add(self._perm('approve_stock_corrections'))
+
+        self.client.force_authenticate(user=approver)
+        resp = self.client.post(
+            f'/api/inventory/stock-corrections/{correction.id}/approve/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 404)
+        correction.refresh_from_db()
+        self.assertEqual(correction.status, 'REQUESTED')
+
+    def test_correction_approve_allows_source_scope_approver(self):
+        correction = self._manual_correction()
+        approver = self._make_user('stock_correction_source_approver')
+        approver.user_permissions.add(self._perm('approve_stock_corrections'))
+
+        self.client.force_authenticate(user=approver)
+        resp = self.client.post(
+            f'/api/inventory/stock-corrections/{correction.id}/approve/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        correction.refresh_from_db()
+        self.assertEqual(correction.status, 'APPROVED')
 
     def test_patch_requires_domain_edit_stock_entries_perm(self):
         user = self._make_user('stock_entry_legacy_change')

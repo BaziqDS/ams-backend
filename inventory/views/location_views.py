@@ -1,11 +1,21 @@
 # pyright: reportAttributeAccessIssue=false
+from django.db import transaction
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from ..models.location_model import Location
+from ..models.location_model import Location, LocationType
 from ..serializers.location_serializer import LocationSerializer
 from ..permissions import LocationPermission
+from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 from user_management.models import UserProfile
+
+
+def _is_truthy(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 class LocationViewSet(viewsets.ModelViewSet):
     """
@@ -31,12 +41,30 @@ class LocationViewSet(viewsets.ModelViewSet):
         
         try:
             profile = user.profile
-            return profile.get_location_view_locations()
+            scoped_locations = profile.get_location_view_locations()
+            return queryset.filter(id__in=scoped_locations.values_list('id', flat=True))
         except (AttributeError, UserProfile.DoesNotExist):
             return Location.objects.none()
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        roots = Location.objects.filter(parent_location__isnull=True).select_related('auto_created_store')
+        context['root_locations_by_code'] = {root.code: root for root in roots}
+        return context
+
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            delete_with_policy(instance)
+        except DeletionBlocked as exc:
+            return Response(
+                {'detail': 'Delete is blocked by existing dependencies.', 'delete_blockers': exc.blockers},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['get', 'post'])
     def standalone(self, request):
@@ -90,10 +118,32 @@ class LocationViewSet(viewsets.ModelViewSet):
         data = request.data.copy()
         data['parent_location'] = parent.id
         data['is_standalone'] = False
+        create_main_store = _is_truthy(data.get('create_main_store', False))
+
+        if create_main_store:
+            if parent.auto_created_store_id or parent.get_main_store():
+                return Response(
+                    {'detail': 'This location already has a main store.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            data['location_type'] = LocationType.STORE
+            data['is_store'] = True
+            data['is_main_store'] = True
+            data['is_auto_created'] = True
+            if not data.get('code'):
+                data['code'] = 'CENTRAL-STORE' if parent.parent_location_id is None else f'{parent.code}-MAIN-STORE'
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
+
+        if create_main_store:
+            with transaction.atomic():
+                self.perform_create(serializer)
+                parent.auto_created_store = serializer.instance
+                parent.save(update_fields=['auto_created_store'])
+        else:
+            self.perform_create(serializer)
+
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 

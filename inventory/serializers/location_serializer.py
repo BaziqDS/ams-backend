@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
 from ..models.location_model import Location, LocationType
+from ..services.deletion_policy import get_delete_blockers
 
 class LocationSerializer(serializers.ModelSerializer):
     parent_location_display = serializers.StringRelatedField(source='parent_location', read_only=True)
@@ -10,6 +11,14 @@ class LocationSerializer(serializers.ModelSerializer):
     main_store_code = serializers.SerializerMethodField()
     root_main_store_id = serializers.SerializerMethodField()
     root_main_store_display = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+    delete_blockers = serializers.SerializerMethodField()
+
+    def get_delete_blockers(self, obj):
+        return get_delete_blockers(obj)
+
+    def get_can_delete(self, obj):
+        return not self.get_delete_blockers(obj)
 
     def get_main_store_id(self, obj):
         return obj.auto_created_store_id
@@ -21,6 +30,11 @@ class LocationSerializer(serializers.ModelSerializer):
         return obj.auto_created_store.code if obj.auto_created_store else None
 
     def _get_root_location(self, obj):
+        roots_by_code = self.context.get('root_locations_by_code') or {}
+        root_code = (obj.hierarchy_path or obj.code or '').split('/')[0]
+        if root_code in roots_by_code:
+            return roots_by_code[root_code]
+
         current = obj
         while getattr(current, 'parent_location', None) is not None:
             current = current.parent_location
@@ -35,8 +49,8 @@ class LocationSerializer(serializers.ModelSerializer):
         return root.auto_created_store.name if root and root.auto_created_store else None
 
     def validate(self, attrs):
-        if 'location_type' in attrs:
-            attrs['is_store'] = attrs['location_type'] == LocationType.STORE
+        if attrs.get('location_type') == LocationType.STORE and 'is_store' not in attrs:
+            attrs['is_store'] = True
 
         candidate = self.instance or Location()
         for field, value in attrs.items():

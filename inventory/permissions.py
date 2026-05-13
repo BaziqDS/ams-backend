@@ -185,6 +185,70 @@ class DepreciationPermission(permissions.BasePermission):
         return False
 
 
+class MaintenancePermission(permissions.BasePermission):
+    """Domain-permission gate for maintenance work-order endpoints."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        action = getattr(view, "action", None)
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_maintenance")
+        if action == "approve":
+            return _has_perm(user, "inventory.approve_maintenance")
+        if action == "complete":
+            return _has_perm(user, "inventory.close_maintenance")
+        if action in {"start", "cancel", "add_note"}:
+            return _has_perm(user, "inventory.edit_maintenance")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_maintenance")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_maintenance")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_maintenance")
+        return False
+
+
+class MaintenancePlanPermission(permissions.BasePermission):
+    """Domain-permission gate for preventive maintenance plans."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_maintenance")
+        return _has_perm(user, "inventory.manage_maintenance_plans")
+
+
+class MaintenanceMeterReadingPermission(permissions.BasePermission):
+    """Domain-permission gate for maintenance meter and condition readings."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_maintenance")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_maintenance")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_maintenance")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_maintenance")
+        return False
+
+
 class ReportsPermission(permissions.BasePermission):
     """Read-only gate for inventory report endpoints."""
 

@@ -94,6 +94,9 @@ class DepreciationRateVersion(models.Model):
     class Meta:
         ordering = ["asset_class", "-effective_from", "-created_at"]
         unique_together = [["asset_class", "effective_from"]]
+        indexes = [
+            models.Index(fields=["asset_class", "-effective_from", "-created_at"], name="depr_rate_class_latest_idx"),
+        ]
 
     def clean(self):
         super().clean()
@@ -127,6 +130,10 @@ class FixedAssetRegisterEntry(models.Model):
 
     class Meta:
         ordering = ["asset_number", "id"]
+        indexes = [
+            models.Index(fields=["status", "item"], name="fixedasset_status_item_idx"),
+            models.Index(fields=["policy", "status", "capitalization_date"], name="fixedasset_run_scope_idx"),
+        ]
         permissions = [
             ("view_depreciation", "Can view depreciation module"),
             ("manage_depreciation", "Can create and edit depreciation profiles and adjustments"),
@@ -222,6 +229,9 @@ class DepreciationEntry(models.Model):
     class Meta:
         ordering = ["-fiscal_year_start", "asset__asset_number"]
         unique_together = [["asset", "fiscal_year_start", "run"]]
+        indexes = [
+            models.Index(fields=["asset", "-fiscal_year_start"], name="depentry_asset_latest_idx"),
+        ]
 
     def __str__(self):
         return f"{self.asset.asset_number} FY {self.fiscal_year_start}: {self.depreciation_amount}"
@@ -239,6 +249,9 @@ class AssetValueAdjustment(models.Model):
 
     class Meta:
         ordering = ["-effective_date", "-created_at"]
+        indexes = [
+            models.Index(fields=["asset", "effective_date"], name="assetadjust_asset_date_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         is_new = self.pk is None

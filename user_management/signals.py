@@ -58,6 +58,13 @@ EXPLICIT_PERMISSION_IMPLICATIONS: dict[str, list[str]] = {
     "create_stock_registers": ["view_stock_registers"],
     "edit_stock_registers": ["view_stock_registers"],
     "delete_stock_registers": ["view_stock_registers"],
+    # Maintenance module
+    "create_maintenance": ["view_maintenance"],
+    "edit_maintenance": ["view_maintenance"],
+    "delete_maintenance": ["view_maintenance"],
+    "approve_maintenance": ["view_maintenance"],
+    "close_maintenance": ["view_maintenance"],
+    "manage_maintenance_plans": ["view_maintenance"],
 }
 
 

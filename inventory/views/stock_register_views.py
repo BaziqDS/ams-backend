@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from ..models.stock_register_model import StockRegister
 from ..serializers.stock_register_serializer import StockRegisterSerializer
 from ..permissions import StockRegisterPermission
+from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 from notifications.services import notify_stock_register_closed, notify_stock_register_reopened
 
 
@@ -42,6 +43,17 @@ class StockRegisterViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            delete_with_policy(instance)
+        except DeletionBlocked as exc:
+            return Response(
+                {'detail': 'Delete is blocked by existing dependencies.', 'delete_blockers': exc.blockers},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):

@@ -116,6 +116,26 @@ class UserManagementSerializer(serializers.ModelSerializer):
         permission_name = codename if "." in codename else f"user_management.{codename}"
         return request.user.has_perm(permission_name)
 
+    def _request_user_can_manage_django_privileges(self):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and user.is_superuser)
+
+    def _validate_django_privilege_flags(self, validated_data, instance=None):
+        if self._request_user_can_manage_django_privileges():
+            return
+
+        errors = {}
+        for field in ('is_superuser', 'is_staff'):
+            if field not in validated_data:
+                continue
+            current_value = getattr(instance, field, False) if instance else False
+            if bool(validated_data[field]) != bool(current_value):
+                errors[field] = 'Only superusers can manage Django privilege flags.'
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
     def _has_stock_entry_create_permission(self, groups, user_permissions):
         for group in groups or []:
             if group.permissions.filter(
@@ -169,6 +189,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
         user_permissions = validated_data.pop('user_permissions', [])
         groups = validated_data.pop('groups', [])
         password = validated_data.pop('password', None)
+
+        self._validate_django_privilege_flags(validated_data)
 
         if 'assigned_locations' in profile_data and not self._request_user_has_permission('assign_user_locations'):
             raise serializers.ValidationError({
@@ -237,6 +259,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
             and instance.pk == request.user.pk
             and not request.user.is_superuser
         )
+
+        self._validate_django_privilege_flags(validated_data, instance)
 
         if editing_self and 'assigned_locations' in profile_data:
             incoming_ids = {loc.pk for loc in profile_data['assigned_locations']}
@@ -427,7 +451,9 @@ class GroupSerializer(serializers.ModelSerializer):
         )
 
     def get_permissions_details(self, obj):
-        perms = obj.permissions.select_related('content_type')
+        perms = getattr(obj, 'prefetched_permissions', None)
+        if perms is None:
+            perms = obj.permissions.select_related('content_type')
         return [
             {
                 'id': p.id,
@@ -449,7 +475,10 @@ class GroupSerializer(serializers.ModelSerializer):
     def get_module_selections(self, obj):
         """Back-compute the highest matching level per module for this group."""
         from ams.permissions_manifest import LEVEL_ORDER
-        held = {f"{p.content_type.app_label}.{p.codename}" for p in obj.permissions.select_related('content_type')}
+        perms = getattr(obj, 'prefetched_permissions', None)
+        if perms is None:
+            perms = obj.permissions.select_related('content_type')
+        held = {f"{p.content_type.app_label}.{p.codename}" for p in perms}
         out: dict[str, str | None] = {}
         for module, levels in MODULES.items():
             current: str | None = None

@@ -259,6 +259,33 @@ MODULES: dict[str, ModuleSpec] = {
             "reads": ["items", "categories", "locations", "inspections", "stock-registers"],
         },
     },
+    "maintenance": {
+        "view": {
+            "perms": ["inventory.view_maintenance"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_maintenance",
+                "inventory.create_maintenance",
+                "inventory.edit_maintenance",
+                "inventory.close_maintenance",
+            ],
+            "reads": ["items", "locations", "categories", "depreciation"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_maintenance",
+                "inventory.create_maintenance",
+                "inventory.edit_maintenance",
+                "inventory.close_maintenance",
+                "inventory.approve_maintenance",
+                "inventory.delete_maintenance",
+                "inventory.manage_maintenance_plans",
+            ],
+            "reads": ["items", "locations", "categories", "depreciation"],
+        },
+    },
 }
 
 
@@ -280,6 +307,7 @@ READ_PERMS: dict[str, list[str]] = {
     "stock-allocations": ["inventory.view_stockallocation"],
     "inspections": ["inventory.view_inspectioncertificate"],
     "depreciation": ["inventory.view_depreciation"],
+    "maintenance": ["inventory.view_maintenance"],
 }
 
 

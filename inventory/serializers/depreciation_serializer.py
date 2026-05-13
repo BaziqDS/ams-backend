@@ -50,7 +50,11 @@ class DepreciationAssetClassSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "updated_at", "created_by"]
 
     def get_current_rate(self, obj):
-        rate = obj.rate_versions.order_by("-effective_from", "-created_at").first()
+        rates = getattr(obj, "prefetched_rate_versions", None)
+        if rates is not None:
+            rate = rates[0] if rates else None
+        else:
+            rate = obj.rate_versions.order_by("-effective_from", "-created_at").first()
         return str(rate.rate) if rate else None
 
     def create(self, validated_data):

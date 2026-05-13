@@ -1,8 +1,11 @@
+from django.db.models import Prefetch
+
 from inventory.models import (
     AllocationStatus,
     ItemInstance,
     Location,
     StockAllocation,
+    StockEntryItem,
     StockRecord,
     TrackingType,
 )
@@ -84,7 +87,18 @@ def build_inventory_position_report(store):
             'item',
             'item__category',
         )
-        .prefetch_related('stock_entry__items__instances')
+        .prefetch_related(
+            Prefetch(
+                'stock_entry__items',
+                queryset=StockEntryItem.objects.select_related('item').prefetch_related(
+                    Prefetch(
+                        'instances',
+                        queryset=ItemInstance.objects.select_related('item'),
+                    )
+                ),
+                to_attr='prefetched_items_for_report',
+            )
+        )
     )
     for allocation in individual_allocations:
         holder_type, holder_name = _allocation_holder(allocation)
@@ -92,7 +106,17 @@ def build_inventory_position_report(store):
             continue
 
         seen_instance_ids = set()
-        for entry_item in allocation.stock_entry.items.filter(item=allocation.item, batch__isnull=True):
+        entry_items = getattr(allocation.stock_entry, 'prefetched_items_for_report', None)
+        if entry_items is None:
+            entry_items = allocation.stock_entry.items.filter(item=allocation.item, batch__isnull=True)
+        else:
+            entry_items = [
+                entry_item
+                for entry_item in entry_items
+                if entry_item.item_id == allocation.item_id and entry_item.batch_id is None
+            ]
+
+        for entry_item in entry_items:
             for instance in entry_item.instances.all():
                 if instance.id in seen_instance_ids:
                     continue

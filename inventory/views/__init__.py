@@ -17,4 +17,9 @@ from .depreciation_views import (
     DepreciationRunViewSet,
     FixedAssetRegisterEntryViewSet,
 )
+from .maintenance_views import (
+    MaintenanceMeterReadingViewSet,
+    MaintenancePlanViewSet,
+    MaintenanceWorkOrderViewSet,
+)
 from .report_views import ReportViewSet

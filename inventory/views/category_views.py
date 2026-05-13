@@ -1,11 +1,12 @@
 # pyright: reportAttributeAccessIssue=false
-from rest_framework import viewsets, permissions, filters
+from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db.models import Prefetch
 from ..models.category_model import Category, CategoryRateHistory
 from ..serializers.category_serializer import CategorySerializer
 from ..permissions import CategoryPermission
+from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 
 class CategoryViewSet(viewsets.ModelViewSet):
     """
@@ -19,7 +20,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         # Add select_related to avoid N+1 on parent_category
-        return Category.objects.select_related('parent_category').all()
+        return Category.objects.select_related('parent_category').order_by('name', 'id')
 
     def perform_create(self, serializer):
         # Extract notes if provided for the audit trail
@@ -30,6 +31,17 @@ class CategoryViewSet(viewsets.ModelViewSet):
         # Extract notes if provided for the audit trail
         audit_notes = self.request.data.get('notes')
         serializer.save(request_user=self.request.user, audit_notes=audit_notes)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            delete_with_policy(instance)
+        except DeletionBlocked as exc:
+            return Response(
+                {'detail': 'Delete is blocked by existing dependencies.', 'delete_blockers': exc.blockers},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['get'])
     def historical_rates(self, request):

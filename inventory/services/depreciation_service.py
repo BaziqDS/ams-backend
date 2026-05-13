@@ -92,6 +92,27 @@ def is_fixed_asset_item(item) -> bool:
 
 
 def rate_version_for_asset(asset: FixedAssetRegisterEntry, fiscal_year_start_date: date) -> DepreciationRateVersion:
+    prefetched_rates = getattr(asset.asset_class, "prefetched_rate_versions", None)
+    if prefetched_rates is None:
+        prefetched_rates = getattr(asset.asset_class, "_prefetched_objects_cache", {}).get("rate_versions")
+    if prefetched_rates is not None:
+        sorted_rates = sorted(
+            prefetched_rates,
+            key=lambda rate: (rate.effective_from, rate.created_at),
+            reverse=True,
+        )
+        for rate in sorted_rates:
+            if rate.effective_from <= fiscal_year_start_date and rate.effective_to is None:
+                return rate
+        for rate in sorted_rates:
+            if (
+                rate.effective_from <= fiscal_year_start_date
+                and rate.effective_to is not None
+                and rate.effective_to >= fiscal_year_start_date
+            ):
+                return rate
+        raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.code}.")
+
     rate = asset.asset_class.rate_versions.filter(
         effective_from__lte=fiscal_year_start_date,
     ).filter(
@@ -108,15 +129,53 @@ def rate_version_for_asset(asset: FixedAssetRegisterEntry, fiscal_year_start_dat
     raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.code}.")
 
 
+def _prefetched_depreciation_entries(asset: FixedAssetRegisterEntry):
+    entries = getattr(asset, "prefetched_depreciation_entries", None)
+    if entries is not None:
+        return entries
+    return getattr(asset, "_prefetched_objects_cache", {}).get("depreciation_entries")
+
+
+def _prefetched_adjustments(asset: FixedAssetRegisterEntry):
+    adjustments = getattr(asset, "prefetched_adjustments", None)
+    if adjustments is not None:
+        return adjustments
+    return getattr(asset, "_prefetched_objects_cache", {}).get("adjustments")
+
+
+def _latest_posted_entry_before(asset: FixedAssetRegisterEntry, fiscal_year_start: int | None = None):
+    entries = _prefetched_depreciation_entries(asset)
+    if entries is None:
+        queryset = asset.depreciation_entries.filter(run__status=DepreciationRunStatus.POSTED)
+        if fiscal_year_start is not None:
+            queryset = queryset.filter(fiscal_year_start__lt=fiscal_year_start)
+        return queryset.order_by("-fiscal_year_start").first()
+
+    candidates = [
+        entry
+        for entry in entries
+        if entry.run.status == DepreciationRunStatus.POSTED
+        and (fiscal_year_start is None or entry.fiscal_year_start < fiscal_year_start)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda entry: entry.fiscal_year_start)
+
+
 def accumulated_before(asset: FixedAssetRegisterEntry, fiscal_year_start: int) -> Decimal:
-    latest = asset.depreciation_entries.filter(
-        run__status=DepreciationRunStatus.POSTED,
-        fiscal_year_start__lt=fiscal_year_start,
-    ).order_by("-fiscal_year_start", "-created_at").first()
+    latest = _latest_posted_entry_before(asset, fiscal_year_start)
     return latest.accumulated_depreciation if latest else Decimal("0.00")
 
 
 def adjustments_before(asset: FixedAssetRegisterEntry, fiscal_year_start_date: date) -> Decimal:
+    adjustments = _prefetched_adjustments(asset)
+    if adjustments is not None:
+        total = sum(
+            (adjustment.amount for adjustment in adjustments if adjustment.effective_date < fiscal_year_start_date),
+            Decimal("0.00"),
+        )
+        return money(total)
+
     total = asset.adjustments.filter(
         effective_date__lt=fiscal_year_start_date,
     ).aggregate(total=Sum("amount"))["total"]
@@ -140,6 +199,10 @@ def eligible_assets_for_run(policy: DepreciationPolicy, fiscal_year_start: int):
         "batch",
         "asset_class",
         "policy",
+    ).prefetch_related(
+        "asset_class__rate_versions",
+        "depreciation_entries__run",
+        "adjustments",
     ).filter(
         status=FixedAssetStatus.ACTIVE,
         capitalization_date__lte=end_date,
@@ -193,8 +256,10 @@ def post_depreciation_run(fiscal_year_start: int, user, policy: DepreciationPoli
         raise ValueError("Reversed depreciation runs cannot be posted again.")
 
     rows = preview_depreciation_run(fiscal_year_start, policy)
-    for row in rows:
-        DepreciationEntry.objects.create(run=run, **row)
+    DepreciationEntry.objects.bulk_create([
+        DepreciationEntry(run=run, **row)
+        for row in rows
+    ])
     run.mark_posted(user)
     return run
 
@@ -301,7 +366,7 @@ def capitalize_inspection_item(inspection_item, *, instances=None, batch=None, u
 def depreciation_summary_for_asset(asset: FixedAssetRegisterEntry | None) -> dict | None:
     if asset is None:
         return None
-    latest = asset.depreciation_entries.filter(run__status=DepreciationRunStatus.POSTED).order_by("-fiscal_year_start").first()
+    latest = _latest_posted_entry_before(asset)
     accumulated = latest.accumulated_depreciation if latest else Decimal("0.00")
     current_value = latest.closing_value if latest else money(asset.original_cost + adjustments_before(asset, date.today()))
     return {

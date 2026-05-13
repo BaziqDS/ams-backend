@@ -10,6 +10,7 @@ from ..services.depreciation_service import (
     empty_depreciation_summary,
     money,
 )
+from ..services.deletion_policy import get_delete_blockers
 
 class ItemSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(source='category.name', read_only=True)
@@ -29,6 +30,8 @@ class ItemSerializer(serializers.ModelSerializer):
     is_low_stock = serializers.SerializerMethodField()
     standalone_location_count = serializers.SerializerMethodField()
     depreciation_summary = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+    delete_blockers = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
@@ -41,9 +44,16 @@ class ItemSerializer(serializers.ModelSerializer):
             'is_low_stock', 'standalone_location_count', 'is_active',
             'is_provisional', 'provisional_inspection',
             'created_at', 'updated_at',
-            'created_by_name', 'depreciation_summary'
+            'created_by_name', 'depreciation_summary',
+            'can_delete', 'delete_blockers',
         )
         read_only_fields = ('created_at', 'updated_at', 'created_by')
+
+    def get_delete_blockers(self, obj):
+        return get_delete_blockers(obj)
+
+    def get_can_delete(self, obj):
+        return not self.get_delete_blockers(obj)
 
 
     def validate(self, attrs):
@@ -125,7 +135,9 @@ class ItemSerializer(serializers.ModelSerializer):
         latest_year = None
         linked_entry_id = None
 
-        assets = obj.fixed_asset_entries.select_related("asset_class", "policy").prefetch_related("depreciation_entries")
+        assets = getattr(obj, "prefetched_fixed_asset_entries", None)
+        if assets is None:
+            assets = obj.fixed_asset_entries.select_related("asset_class", "policy").prefetch_related("depreciation_entries__run", "adjustments")
         for asset in assets:
             summary = depreciation_summary_for_asset(asset)
             if not summary:
@@ -150,5 +162,3 @@ class ItemSerializer(serializers.ModelSerializer):
             "latest_posted_fiscal_year": latest_year,
             "status": None,
         }
-
-

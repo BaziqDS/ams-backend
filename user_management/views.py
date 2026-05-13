@@ -2,7 +2,7 @@ from rest_framework import viewsets, permissions, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth.models import User, Permission, Group
-from django.db.models import Count
+from django.db.models import Count, Prefetch
 
 from .models import UserProfile
 from .permissions import (
@@ -22,7 +22,22 @@ def _visible_users_queryset(request_user):
     base_qs = (
         User.objects.all()
         .select_related("profile")
-        .prefetch_related("user_permissions", "groups")
+        .prefetch_related(
+            "profile__assigned_locations",
+            Prefetch(
+                "user_permissions",
+                queryset=Permission.objects.select_related("content_type"),
+            ),
+            Prefetch(
+                "groups",
+                queryset=Group.objects.prefetch_related(
+                    Prefetch(
+                        "permissions",
+                        queryset=Permission.objects.select_related("content_type"),
+                    )
+                ),
+            ),
+        )
         .order_by("id")
     )
     if request_user.is_superuser:
@@ -98,7 +113,13 @@ class GroupViewSet(viewsets.ModelViewSet):
     queryset = (
         Group.objects.all()
         .select_related("role_metadata", "role_metadata__created_by")
-        .prefetch_related("permissions")
+        .prefetch_related(
+            Prefetch(
+                "permissions",
+                queryset=Permission.objects.select_related("content_type"),
+                to_attr="prefetched_permissions",
+            )
+        )
         .annotate(
             permission_count=Count("permissions", distinct=True),
             user_count=Count("user", distinct=True),
@@ -121,9 +142,11 @@ class AvailablePermissionsView(APIView):
     permission_classes = [permissions.IsAuthenticated, AvailableRolePermissionsPermission]
 
     def get(self, request):
-        inventory_perms = Permission.objects.filter(content_type__app_label="inventory")
-        user_mgmt_perms = Permission.objects.filter(content_type__app_label="user_management")
-        perms = list(inventory_perms | user_mgmt_perms)
+        perms = list(
+            Permission.objects.filter(
+                content_type__app_label__in=["inventory", "user_management"]
+            ).select_related("content_type")
+        )
         data = [
             {
                 "id": p.id,
