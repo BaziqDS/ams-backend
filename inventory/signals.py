@@ -34,6 +34,15 @@ def _inspection_tracking_lot_code(certificate, inspection_item):
     return f"{certificate.contract_no}-L{inspection_item.id}"
 
 
+def _refresh_instance_qr_images(instances):
+    for item_instance in instances.select_related(
+        'item__category__parent_category',
+        'current_location__parent_location',
+    ):
+        item_instance.generate_qr_code_image()
+        item_instance.save(update_fields=['qr_code_image'])
+
+
 def _sync_linked_receipt_item_instances(issue_item):
     stock_entry = issue_item.stock_entry
     if not _should_create_linked_receipt_for_issue(stock_entry):
@@ -252,6 +261,7 @@ def process_single_stock_item(instance):
                 # Mark instances as IN_TRANSIT
                 if instance.instances.exists():
                     instance.instances.all().update(status='IN_TRANSIT')
+                    _refresh_instance_qr_images(instance.instances.all())
                 instance.is_in_transit_recorded = True
                 instance.save(update_fields=['is_in_transit_recorded'])
                 logger.info(f"[SIGNAL] Recorded In-Transit: {item.name} at {from_loc.name} (Instances marked IN_TRANSIT)")
@@ -262,6 +272,7 @@ def process_single_stock_item(instance):
                 # Revert instances to AVAILABLE
                 if instance.instances.exists():
                     instance.instances.all().update(status='AVAILABLE')
+                    _refresh_instance_qr_images(instance.instances.all())
                 instance.is_in_transit_recorded = False
                 instance.save(update_fields=['is_in_transit_recorded'])
                 logger.info(f"[SIGNAL] Reversed In-Transit: {item.name} at {from_loc.name} (Instances reverted to AVAILABLE)")
@@ -292,6 +303,7 @@ def process_single_stock_item(instance):
                     # Update instances
                     if instance.instances.exists():
                         instance.instances.all().update(status='ALLOCATED')
+                        _refresh_instance_qr_images(instance.instances.all())
                     
                     # Record Movement History for Allocation
                     from .models.history_model import MovementHistory, MovementAction
@@ -373,6 +385,7 @@ def process_single_stock_item(instance):
                     # Update instances
                     if instance.instances.exists():
                         instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                        _refresh_instance_qr_images(instance.instances.all())
                     
                     # Record Movement History for Return
                     from .models.history_model import MovementHistory, MovementAction
@@ -409,8 +422,10 @@ def process_single_stock_item(instance):
                     if instance.instances.exists():
                         if instance.accepted_instances.exists():
                             instance.accepted_instances.all().update(current_location=to_loc, status='AVAILABLE')
+                            _refresh_instance_qr_images(instance.accepted_instances.all())
                         else:
                             instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                            _refresh_instance_qr_images(instance.instances.all())
                      
                     logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {effective_qty} {item.name} in {to_loc.name}")
             elif (
@@ -430,6 +445,7 @@ def process_single_stock_item(instance):
 
                 if instance.instances.exists():
                     instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                    _refresh_instance_qr_images(instance.instances.all())
 
                 original_issue = entry.reference_entry.reference_entry
                 if original_issue:
@@ -457,6 +473,7 @@ def process_single_stock_item(instance):
                     
                     if instance.instances.exists():
                         instance.instances.all().update(status='AVAILABLE')
+                        _refresh_instance_qr_images(instance.instances.all())
                 else:
                     # Reverse physical decrement
                     StockRecord.update_balance(item, from_loc, quantity_change=qty, batch=batch)
@@ -601,12 +618,14 @@ def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
         if to_loc:
             # Store transfer: update physical location
             ItemInstance.objects.filter(pk__in=pk_set).update(current_location=to_loc)
+            _refresh_instance_qr_images(ItemInstance.objects.filter(pk__in=pk_set))
             logger.info(f"Updated {len(pk_set)} instances to location {to_loc.name}")
         elif entry.entry_type == 'ISSUE':
             # Person/non-store allocation: mark instances as ALLOCATED
             is_allocation = entry.issued_to or (entry.to_location and not entry.to_location.is_store)
             if is_allocation:
                 ItemInstance.objects.filter(pk__in=pk_set).update(status='ALLOCATED')
+                _refresh_instance_qr_images(ItemInstance.objects.filter(pk__in=pk_set))
                 logger.info(f"Marked {len(pk_set)} instances as ALLOCATED for {entry.entry_number}")
 
 @receiver(post_save, sender=InspectionCertificate)

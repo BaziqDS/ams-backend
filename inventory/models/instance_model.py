@@ -52,28 +52,123 @@ class ItemInstance(models.Model):
     def __str__(self):
         return f"{self.item.name} ({self.serial_number or self.id})"
 
+    def _clean_qr_value(self, value, fallback="Not Recorded"):
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        return text if text else fallback
+
+    def get_qr_classification(self):
+        category = self.item.category
+        if category.parent_category:
+            return f"{category.parent_category.name} / {category.name}"
+        return category.name
+
+    def get_latest_active_allocation(self):
+        from .allocation_model import AllocationStatus, StockAllocation
+
+        return StockAllocation.objects.filter(
+            item=self.item,
+            batch__isnull=True,
+            status=AllocationStatus.ALLOCATED,
+            stock_entry__items__instances=self,
+        ).select_related(
+            'allocated_to_person',
+            'allocated_to_location',
+            'source_location',
+        ).order_by('-allocated_at').first()
+
+    def get_qr_status_label(self):
+        status_labels = {
+            InstanceStatus.AVAILABLE: "In Store" if self.current_location.is_store else "Available",
+            InstanceStatus.IN_TRANSIT: "In Transit",
+            InstanceStatus.ISSUED: "Issued",
+            InstanceStatus.ALLOCATED: "Allocated",
+            InstanceStatus.IN_USE: "In Use",
+            InstanceStatus.MAINTENANCE: "Under Maintenance",
+            InstanceStatus.JUNK: "Disposed",
+            InstanceStatus.LOST: "Lost",
+        }
+        return status_labels.get(self.status, self.get_status_display())
+
+    def get_qr_placement(self):
+        if self.status == InstanceStatus.IN_TRANSIT:
+            latest_pending = self.stock_entry_items.filter(
+                stock_entry__status='PENDING_ACK',
+                stock_entry__to_location__isnull=False,
+            ).select_related('stock_entry__to_location').order_by('-stock_entry__entry_date').first()
+            if latest_pending and latest_pending.stock_entry.to_location:
+                return f"Transfer in Progress to {latest_pending.stock_entry.to_location.name}"
+            return "Transfer in Progress"
+
+        if self.status == InstanceStatus.JUNK:
+            return "Not Applicable"
+
+        return self._clean_qr_value(getattr(self.current_location, 'name', None))
+
+    def get_qr_custodian(self):
+        if self.status in {InstanceStatus.JUNK, InstanceStatus.LOST}:
+            return "Not Applicable"
+        if self.status == InstanceStatus.IN_TRANSIT:
+            return "Pending Receipt"
+
+        allocation = self.get_latest_active_allocation() if self.status == InstanceStatus.ALLOCATED else None
+        if allocation:
+            if allocation.allocated_to_person:
+                return self._clean_qr_value(allocation.allocated_to_person.name)
+            if allocation.allocated_to_location:
+                return self._clean_qr_value(allocation.allocated_to_location.name)
+
+        return self._clean_qr_value(getattr(self.current_location, 'name', None))
+
+    def get_qr_owning_store(self):
+        allocation = self.get_latest_active_allocation() if self.status == InstanceStatus.ALLOCATED else None
+        if allocation and allocation.source_location:
+            return self._clean_qr_value(allocation.source_location.name)
+        if self.current_location.is_store:
+            return self._clean_qr_value(self.current_location.name)
+
+        containing_store = self.current_location.get_containing_main_store()
+        if containing_store:
+            return self._clean_qr_value(containing_store.name)
+
+        return "Not Recorded"
+
+    def build_qr_payload(self):
+        """
+        Builds the plain-text asset identification payload encoded in the QR image.
+        The QR intentionally does not link to the authenticated web application.
+        """
+        identifier = self._clean_qr_value(self.qr_code or self.serial_number or f"Instance #{self.pk}")
+        return "\n".join([
+            "NED UNIVERSITY - ASSET IDENTIFICATION",
+            "",
+            f"Asset Instance No.: {identifier}",
+            f"Classification: {self.get_qr_classification()}",
+            f"Item Name: {self.item.name}",
+            "",
+            f"Operational Status: {self.get_qr_status_label()}",
+            f"Current Placement: {self.get_qr_placement()}",
+            f"Custodian: {self.get_qr_custodian()}",
+            f"Owning Store: {self.get_qr_owning_store()}",
+        ])
+
     def generate_qr_code_image(self):
         """
-        Generates a QR code image linking to the frontend detail page.
+        Generates a QR code image containing a plain-text asset identification summary.
         """
         import qrcode
         from io import BytesIO
         from django.core.files import File
-        from django.conf import settings
-        
-        # Construct the URL
-        # Format: /items/:id/instances/:locationId/:instanceId
-        base_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
-        url = f"{base_url}/items/{self.item.id}/instances/{self.current_location.id}/{self.id}"
         
         # Generate QR
         qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=10,
             border=4,
         )
-        qr.add_data(url)
+        qr.add_data(self.build_qr_payload())
         qr.make(fit=True)
 
         img = qr.make_image(fill_color="black", back_color="white")

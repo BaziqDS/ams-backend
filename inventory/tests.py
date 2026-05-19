@@ -2594,6 +2594,44 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertIn(self.csit.id, returned_ids)
         self.assertNotIn(self.ee.id, returned_ids)
 
+    def test_batch_listing_respects_selected_scope_filter(self):
+        user = User.objects.create_user(username='item_batch_store_filter', password='pw')
+        user.profile.assigned_locations.add(self.root, self.store)
+        user.user_permissions.add(self._perm('view_items'))
+        StockRecord.objects.create(
+            item=self.item,
+            batch=self.batch,
+            location=self.ee_store,
+            quantity=4,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/item-batches/?item={self.item.id}&scope=store:{self.store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+        row = next(record for record in payload if record['id'] == self.batch.id)
+        self.assertEqual(row['quantity'], 5)
+
+    def test_instance_listing_respects_selected_scope_filter(self):
+        user = User.objects.create_user(username='item_instance_store_filter', password='pw')
+        user.profile.assigned_locations.add(self.root, self.store)
+        user.user_permissions.add(self._perm('view_items'))
+        outside_instance = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.ee_store,
+            serial_number='CPU-EE-001',
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/item-instances/?item={self.item.id}&scope=store:{self.store.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+        returned_ids = {record['id'] for record in payload}
+        self.assertIn(self.instance.id, returned_ids)
+        self.assertNotIn(outside_instance.id, returned_ids)
+
     def test_distribution_scope_options_expose_default_and_assigned_store_filters(self):
         user = User.objects.create_user(username='item_distribution_scope_options', password='pw')
         user.profile.assigned_locations.add(self.csit, self.store)

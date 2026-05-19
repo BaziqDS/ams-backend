@@ -4,7 +4,7 @@ from django.db.models.functions import Coalesce
 from ..models.batch_model import ItemBatch
 from ..serializers.batch_serializer import ItemBatchSerializer
 from ..permissions import ItemReadPermission
-from .utils import get_item_scope_locations
+from .utils import get_item_scope_locations, get_scope_tokens_from_request
 
 class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -21,7 +21,10 @@ class ItemBatchViewSet(viewsets.ReadOnlyModelViewSet):
             'item__category',
             'created_by'
         ).order_by('-created_at')
-        accessible_locations = get_item_scope_locations(self.request.user)
+        accessible_locations = get_item_scope_locations(
+            self.request.user,
+            get_scope_tokens_from_request(self.request),
+        )
         
         item_id = self.request.query_params.get('item')
         if item_id:
