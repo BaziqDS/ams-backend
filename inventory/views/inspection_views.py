@@ -168,7 +168,7 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
-        if user.is_superuser or user.has_perm('inventory.view_all_inspections') or user.has_perm('inventory.review_finance'):
+        if user.is_superuser or user.has_perm('inventory.view_all_inspections'):
             return queryset
         if not hasattr(user, 'profile'):
             return queryset.none()
@@ -339,6 +339,9 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def complete(self, request, pk=None):
         with transaction.atomic():
             instance = self.get_object()
+            if not request.user.has_perm('inventory.review_finance'):
+                return Response({'detail': 'You do not have permission to complete finance reviews.'}, status=status.HTTP_403_FORBIDDEN)
+
             if instance.stage != InspectionStage.FINANCE_REVIEW:
                 return Response({'detail': f'Cannot transition from {instance.stage} to COMPLETED.'}, status=status.HTTP_400_BAD_REQUEST)
             

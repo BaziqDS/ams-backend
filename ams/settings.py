@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'inventory',
     'user_management',
     'notifications',
+    'ai_assistant',
 ]
 
 MIDDLEWARE = [
@@ -66,7 +67,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ENABLE_SILK = config('ENABLE_SILK', default=DEBUG, cast=bool)
+ENABLE_SILK = config('ENABLE_SILK', default=False, cast=bool)
 if ENABLE_SILK:
     INSTALLED_APPS.append('silk')
     MIDDLEWARE.insert(1, 'silk.middleware.SilkyMiddleware')

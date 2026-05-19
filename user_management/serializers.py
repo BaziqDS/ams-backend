@@ -213,12 +213,17 @@ class UserManagementSerializer(serializers.ModelSerializer):
             profile_data.get('assigned_locations', []),
         )
 
+        setup_errors = {}
+        if not groups:
+            setup_errors['groups'] = "Assign at least one role to this user."
+
         if not profile_data.get('assigned_locations'):
-            raise serializers.ValidationError({
-                'assigned_locations': (
-                    "Select at least one location to assign to this user."
-                ),
-            })
+            setup_errors['assigned_locations'] = (
+                "Select at least one location to assign to this user."
+            )
+
+        if setup_errors:
+            raise serializers.ValidationError(setup_errors)
         
         # Create user using create_user to hash password
         user = User.objects.create_user(

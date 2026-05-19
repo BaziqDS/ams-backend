@@ -58,6 +58,14 @@ class CategorySerializer(serializers.ModelSerializer):
                 'tracking_type': "Tracking type cannot be changed after subcategory creation.",
             })
 
+        if (
+            'category_type' in validated_data
+            and validated_data['category_type'] != instance.category_type
+        ):
+            raise serializers.ValidationError({
+                'category_type': "Category type cannot be changed after category creation.",
+            })
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save(request_user=request_user, audit_notes=audit_notes)

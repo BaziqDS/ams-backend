@@ -36,6 +36,7 @@ urlpatterns = [
     path('api/users/', include('user_management.urls')),
     path('api/inventory/', include('inventory.urls')),
     path('api/notifications/', include('notifications.urls')),
+    path('api/ai/', include('ai_assistant.urls')),
 ]
 
 if settings.ENABLE_SILK:
