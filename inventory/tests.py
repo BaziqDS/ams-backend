@@ -1002,6 +1002,87 @@ class InspectionWorkflowReturnAndCancellationTests(TestCase):
         self.assertEqual(inspection_item.stock_register_page_no, '7')
         self.assertEqual(certificate.revision_requested_reason, reason)
 
+    def test_stock_details_submit_requires_department_stock_register(self):
+        certificate, inspection_item = self._make_certificate('IC-STOCK-MISSING-001', self.department, InspectionStage.STOCK_DETAILS)
+        inspection_item.stock_register = None
+        inspection_item.stock_register_no = ''
+        inspection_item.stock_register_page_no = ''
+        inspection_item.stock_entry_date = None
+        inspection_item.save(update_fields=[
+            'stock_register',
+            'stock_register_no',
+            'stock_register_page_no',
+            'stock_entry_date',
+        ])
+        user = self._make_user(
+            'workflow.stock.missing.register',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_stock_details',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/submit_to_central_register/'
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('items', response.data)
+        self.assertIn('stock_register', response.data['items'][0])
+        self.assertIn('stock_register_page_no', response.data['items'][0])
+        self.assertIn('stock_entry_date', response.data['items'][0])
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.STOCK_DETAILS)
+
+    def test_stock_details_submit_rejects_register_from_another_department(self):
+        certificate, inspection_item = self._make_certificate('IC-STOCK-WRONG-001', self.department, InspectionStage.STOCK_DETAILS)
+        inspection_item.stock_register = self.root_register
+        inspection_item.stock_register_no = self.root_register.register_number
+        inspection_item.stock_register_page_no = '7'
+        inspection_item.stock_entry_date = timezone.localdate()
+        inspection_item.save(update_fields=[
+            'stock_register',
+            'stock_register_no',
+            'stock_register_page_no',
+            'stock_entry_date',
+        ])
+        user = self._make_user(
+            'workflow.stock.wrong.register',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_stock_details',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/submit_to_central_register/'
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('stock_register', response.data['items'][0])
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.STOCK_DETAILS)
+
+    def test_stock_details_submit_accepts_valid_department_register(self):
+        certificate, inspection_item = self._make_certificate('IC-STOCK-VALID-001', self.department, InspectionStage.STOCK_DETAILS)
+        inspection_item.stock_entry_date = timezone.localdate()
+        inspection_item.save(update_fields=['stock_entry_date'])
+        user = self._make_user(
+            'workflow.stock.valid.register',
+            'view_inspectioncertificate',
+            'change_inspectioncertificate',
+            'fill_stock_details',
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            f'/api/inventory/inspections/{certificate.id}/submit_to_central_register/'
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.stage, InspectionStage.CENTRAL_REGISTER)
+
     def test_return_from_root_central_register_moves_back_to_draft_and_marks_revision_requested(self):
         certificate, _ = self._make_certificate('IC-RET-ROOT-001', self.root, InspectionStage.CENTRAL_REGISTER)
         user = self._make_user(

@@ -7,6 +7,7 @@ from .utils import ScopedViewSetMixin
 from .distribution_views import build_hierarchical_distribution
 from ..models.category_model import CategoryType, TrackingType
 from ..models.inspection_model import InspectionCertificate, InspectionItem, InspectionStage
+from ..models.stock_register_model import StockRegister
 from ..models.batch_model import ItemBatch
 from ..models.item_model import Item
 from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
@@ -28,6 +29,61 @@ def previous_stage_for_inspection(instance: InspectionCertificate):
     if instance.stage == InspectionStage.STOCK_DETAILS:
         return InspectionStage.DRAFT
     return None
+
+
+def validate_department_stock_details(instance: InspectionCertificate):
+    if not instance.department or instance.department.hierarchy_level == 0:
+        return None
+
+    department_store_id = getattr(instance.department, 'auto_created_store_id', None)
+    if not department_store_id:
+        return {
+            'detail': 'Departmental stock details cannot be submitted because this department has no main store.',
+        }
+
+    has_department_register = StockRegister.objects.filter(
+        store_id=department_store_id,
+        is_active=True,
+    ).exists()
+
+    item_errors = []
+    has_errors = False
+    ordered_items = instance.items.all().order_by('id')
+    for item in ordered_items:
+        errors = {}
+        if item.accepted_quantity <= 0:
+            item_errors.append(errors)
+            continue
+
+        if not has_department_register:
+            errors['stock_register'] = [
+                f'No active stock register exists for {instance.department.name}. Create a stock register before submitting Stock Details.'
+            ]
+        elif not item.stock_register_id:
+            errors['stock_register'] = ['Select a departmental stock register.']
+        elif not item.stock_register.is_active:
+            errors['stock_register'] = ['Select an active departmental stock register.']
+        elif item.stock_register.store_id != department_store_id:
+            errors['stock_register'] = [
+                f'Select a stock register that belongs to {instance.department.name}.'
+            ]
+
+        if not (item.stock_register_page_no or '').strip():
+            errors['stock_register_page_no'] = ['Enter a stock register page number.']
+
+        if not item.stock_entry_date:
+            errors['stock_entry_date'] = ['Enter a stock recording date.']
+
+        item_errors.append(errors)
+        has_errors = has_errors or bool(errors)
+
+    if not has_errors:
+        return None
+
+    return {
+        'detail': 'All accepted items must have valid departmental stock register details before submitting to Central Register.',
+        'items': item_errors,
+    }
 
 
 def finalize_provisional_items_for_completion(instance: InspectionCertificate):
@@ -273,6 +329,10 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
             if instance.stage not in allowed_stages:
                 return Response({'detail': f'Cannot transition from {instance.stage} to CENTRAL_REGISTER.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            stock_detail_errors = validate_department_stock_details(instance)
+            if stock_detail_errors:
+                return Response(stock_detail_errors, status=status.HTTP_400_BAD_REQUEST)
             
             instance.stage = InspectionStage.CENTRAL_REGISTER
             instance.stock_filled_by = request.user
