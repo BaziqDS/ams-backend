@@ -8,6 +8,7 @@ from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..models.correction_model import CorrectionStatus
 from ..models.item_model import Item
 from ..models.batch_model import ItemBatch
+from ..models.inspection_model import InspectionItem
 from ..models.instance_model import InstanceStatus, ItemInstance
 from ..models.stock_record_model import StockRecord
 from ..models.category_model import TrackingType
@@ -71,11 +72,53 @@ class StockEntryItemSerializer(serializers.ModelSerializer):
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
     stock_register_name = serializers.CharField(source='stock_register.register_number', read_only=True)
     ack_stock_register_name = serializers.CharField(source='ack_stock_register.register_number', read_only=True, allow_null=True)
+    source_inspection = serializers.SerializerMethodField()
+    source_inspection_number = serializers.SerializerMethodField()
+    source_inspection_item = serializers.SerializerMethodField()
+    source_inspection_department = serializers.SerializerMethodField()
+
+    def _source_inspection_item(self, obj):
+        batch_number = getattr(obj.batch, 'batch_number', None)
+        if not obj.batch_id or not batch_number:
+            return None
+        cached = getattr(obj, '_source_inspection_item_cache', None)
+        if cached is not None:
+            return cached
+
+        source = (
+            InspectionItem.objects
+            .select_related('inspection_certificate', 'inspection_certificate__department')
+            .filter(item_id=obj.item_id, batch_number=batch_number)
+            .order_by('-inspection_certificate__date', '-id')
+            .first()
+        )
+        obj._source_inspection_item_cache = source
+        return source
+
+    def get_source_inspection(self, obj):
+        source = self._source_inspection_item(obj)
+        return source.inspection_certificate_id if source else None
+
+    def get_source_inspection_number(self, obj):
+        source = self._source_inspection_item(obj)
+        return source.inspection_certificate.contract_no if source else None
+
+    def get_source_inspection_item(self, obj):
+        source = self._source_inspection_item(obj)
+        return source.id if source else None
+
+    def get_source_inspection_department(self, obj):
+        source = self._source_inspection_item(obj)
+        if not source or not source.inspection_certificate.department:
+            return None
+        return source.inspection_certificate.department.name
     
     class Meta:
         model = StockEntryItem
         fields = (
             'id', 'item', 'item_name', 'batch', 'batch_number', 'quantity', 'instances',
+            'source_inspection', 'source_inspection_number', 'source_inspection_item',
+            'source_inspection_department',
             'stock_register', 'stock_register_name', 'page_number',
             'ack_stock_register', 'ack_stock_register_name', 'ack_page_number',
             'accepted_quantity', 'accepted_instances'

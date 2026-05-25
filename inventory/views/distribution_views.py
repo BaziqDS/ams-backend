@@ -29,6 +29,8 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
         'location',
         'location__parent_location',
         'batch',
+    ).prefetch_related(
+        'location__tags',
     )
     allocations = StockAllocation.objects.filter(
         item_id=item_id,
@@ -58,7 +60,22 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
         if alloc.source_location.parent_location_id:
             all_location_ids.add(alloc.source_location.parent_location_id)
 
-    location_map = {loc.id: loc for loc in Location.objects.filter(id__in=all_location_ids)}
+    location_map = {loc.id: loc for loc in Location.objects.filter(id__in=all_location_ids).prefetch_related('tags')}
+
+    def serialize_tags(location):
+        return [
+            {
+                "id": tag.id,
+                "name": tag.name,
+                "code": tag.code,
+                "category": tag.category,
+                "categoryDisplay": tag.get_category_display(),
+                "label": f"{tag.get_category_display()}: {tag.name}",
+                "color": tag.color,
+                "isActive": tag.is_active,
+            }
+            for tag in location.tags.all()
+        ]
 
     def get_standalone(location):
         if not location:
@@ -81,6 +98,7 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
                 "id": unit_loc.id,
                 "name": unit_loc.name,
                 "code": unit_loc.code,
+                "tags": serialize_tags(unit_loc),
                 "totalQuantity": 0,
                 "availableQuantity": 0,
                 "inTransitQuantity": 0,
@@ -211,6 +229,8 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             'location__parent_location',
             'item',
             'batch'
+        ).prefetch_related(
+            'location__tags',
         )
         
         item_id = self.request.query_params.get('item')

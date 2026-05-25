@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    LocationViewSet, CategoryViewSet, ItemViewSet, 
+    LocationTagViewSet, LocationViewSet, CategoryViewSet, ItemViewSet, 
     StockRecordViewSet, StockEntryViewSet, PersonViewSet, EmployeeViewSet,
     StockCorrectionViewSet,
     StockAllocationViewSet, InspectionViewSet, ItemInstanceViewSet,
@@ -14,6 +14,7 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.register(r'location-tags', LocationTagViewSet, basename='location-tag')
 router.register(r'locations', LocationViewSet, basename='location')
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'items', ItemViewSet, basename='item')
