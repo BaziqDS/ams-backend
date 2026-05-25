@@ -24,6 +24,7 @@ class StockEntry(models.Model):
         ('COMPLETED', 'Completed'),
         ('REJECTED', 'Rejected'),
         ('CANCELLED', 'Cancelled'),
+        ('VOIDED', 'Voided'),
     ]
 
     REFERENCE_PURPOSE_CHOICES = [
@@ -116,6 +117,15 @@ class StockEntry(models.Model):
         related_name='cancelled_entries'
     )
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True, null=True)
+    voided_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='voided_entries',
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

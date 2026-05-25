@@ -3055,6 +3055,19 @@ class StockEntryApiDomainPermissionTests(TestCase):
         returned_ids = {row['id'] for row in resp.data}
         self.assertEqual(returned_ids, {self.child_store.id})
 
+    def test_allocations_use_stock_entry_scope_for_assigned_main_store_user(self):
+        user = User.objects.create_user(username='stock_entry_allocation_scope', password='pw')
+        user.profile.assigned_locations.add(self.store)
+        user.user_permissions.add(self._perm('view_stockallocation'))
+        allocation = self._allocation(location=self.non_store_location)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/stock-allocations/?status=ALLOCATED')
+
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = {row['id'] for row in resp.data['results']} if 'results' in resp.data else {row['id'] for row in resp.data}
+        self.assertIn(allocation.id, returned_ids)
+
     def test_create_rejects_source_store_derived_only_from_assigned_standalone(self):
         user = User.objects.create_user(username='stock_entry_standalone_source_blocked', password='pw')
         user.profile.assigned_locations.add(self.csit)
@@ -3391,6 +3404,127 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(self.consumable_stock_a.in_transit_quantity, 4)
         self.assertEqual(self.consumable_stock_b.in_transit_quantity, 3)
 
+    def test_create_issue_auto_splits_quantity_item_across_available_stock_records(self):
+        user = self._make_user('stock_entry_quantity_batchless_transfer')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        second_batch = ItemBatch.objects.create(
+            item=self.item,
+            batch_number='MOUSE-B2',
+        )
+        second_stock = StockRecord.objects.create(
+            item=self.item,
+            batch=second_batch,
+            location=self.store,
+            quantity=6,
+        )
+        payload = self._payload('Quantity item transfer without explicit batch')
+        payload['items'][0]['batch'] = None
+        payload['items'][0]['quantity'] = 12
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201)
+        issue = StockEntry.objects.get(id=resp.data['id'])
+        issue_items = list(issue.items.order_by('batch_id'))
+        self.assertEqual(
+            [(item.batch.batch_number if item.batch else None, item.quantity) for item in issue_items],
+            [('MOUSE-B1', 10), ('MOUSE-B2', 2)],
+        )
+
+        self.source_stock.refresh_from_db()
+        second_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.in_transit_quantity, 10)
+        self.assertEqual(second_stock.in_transit_quantity, 2)
+
+    def test_create_issue_rejects_duplicate_item_lines(self):
+        user = self._make_user('stock_entry_duplicate_item_lines')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Duplicate item issue')
+        payload['items'].append({
+            **payload['items'][0],
+            'quantity': 2,
+        })
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Each item can only be added once', str(resp.data))
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.in_transit_quantity, 0)
+
+    def test_create_issue_rejects_quantity_above_available_stock(self):
+        user = self._make_user('stock_entry_over_issue')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        payload = self._payload('Over issue item')
+        payload['items'][0]['quantity'] = 11
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('exceeds available stock', str(resp.data))
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.in_transit_quantity, 0)
+
+    def test_reconciliation_voids_pending_quantity_issue_that_exceeds_source_stock(self):
+        from inventory.services.stock_reconciliation_service import StockReconciliationService
+
+        StockRecord.objects.filter(id=self.source_stock.id).update(
+            quantity=15,
+            in_transit_quantity=0,
+            allocated_quantity=0,
+        )
+        issue = StockEntry.objects.create(
+            entry_type='ISSUE',
+            from_location=self.store,
+            to_location=self.child_store,
+            status='PENDING_ACK',
+            purpose='Invalid duplicate quantity issue',
+        )
+        StockEntryItem.objects.create(
+            stock_entry=issue,
+            item=self.item,
+            batch=self.batch,
+            quantity=5,
+        )
+        StockEntryItem.objects.create(
+            stock_entry=issue,
+            item=self.item,
+            batch=self.batch,
+            quantity=11,
+        )
+        self.source_stock.refresh_from_db()
+        self.assertEqual(self.source_stock.in_transit_quantity, 16)
+
+        dry_run = StockReconciliationService.run(
+            item_id=self.item.id,
+            location_id=self.store.id,
+            apply=False,
+        )
+        self.assertTrue(
+            dry_run.findings.filter(finding_type='QUANTITY_PENDING_OVER_ISSUE').exists()
+        )
+
+        applied_run = StockReconciliationService.run(
+            item_id=self.item.id,
+            location_id=self.store.id,
+            apply=True,
+            reason='Repair invalid duplicate quantity issue',
+        )
+
+        issue.refresh_from_db()
+        self.source_stock.refresh_from_db()
+        self.assertEqual(issue.status, 'VOIDED')
+        self.assertEqual(self.source_stock.in_transit_quantity, 0)
+        self.assertTrue(
+            applied_run.findings.filter(
+                finding_type='QUANTITY_PENDING_OVER_ISSUE',
+                applied=True,
+            ).exists()
+        )
+
     def test_create_allocation_auto_splits_consumable_quantity_across_internal_batches(self):
         user = self._make_user('stock_entry_consumable_batchless_allocation')
         user.user_permissions.add(self._perm('create_stock_entries'))
@@ -3423,6 +3557,59 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.consumable_stock_b.refresh_from_db()
         self.assertEqual(self.consumable_stock_a.allocated_quantity, 4)
         self.assertEqual(self.consumable_stock_b.allocated_quantity, 4)
+
+    def test_create_return_receipt_auto_splits_quantity_across_active_allocation_batches(self):
+        user = self._make_user('stock_entry_batchless_return_receipt')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        StockAllocation.objects.create(
+            item=self.consumable_item,
+            batch=self.consumable_batch_a,
+            source_location=self.store,
+            quantity=4,
+            allocated_to_person=self.person,
+            status=AllocationStatus.ALLOCATED,
+        )
+        StockAllocation.objects.create(
+            item=self.consumable_item,
+            batch=self.consumable_batch_b,
+            source_location=self.store,
+            quantity=3,
+            allocated_to_person=self.person,
+            status=AllocationStatus.ALLOCATED,
+        )
+        payload = {
+            'entry_type': 'RECEIPT',
+            'from_location': None,
+            'to_location': self.store.id,
+            'issued_to': self.person.id,
+            'status': 'DRAFT',
+            'purpose': 'Batchless allocation return',
+            'remarks': '',
+            'items': [
+                {
+                    'item': self.consumable_item.id,
+                    'batch': None,
+                    'quantity': 6,
+                    'instances': [],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['status'], 'COMPLETED')
+        entry = StockEntry.objects.get(id=resp.data['id'])
+        entry_items = list(entry.items.order_by('batch_id'))
+        self.assertEqual(
+            [(item.batch.batch_number if item.batch else None, item.quantity) for item in entry_items],
+            [('STAPLER-B1', 4), ('STAPLER-B2', 2)],
+        )
 
     def test_create_forces_store_transfer_issue_to_pending_ack_and_creates_pending_receipt(self):
         user = self._make_user('stock_entry_force_pending_ack')
@@ -4565,6 +4752,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
         resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
 
         self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'COMPLETED')
 
     def test_create_allows_receipt_return_from_non_store_to_store(self):
         user = self._make_user('stock_entry_receipt_non_store')
@@ -4580,6 +4768,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
         resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
 
         self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'COMPLETED')
 
     def test_create_rejects_receipt_return_from_person_without_active_allocation(self):
         user = self._make_user('stock_entry_receipt_person_unallocated')
@@ -4779,8 +4968,8 @@ class StockRegisterApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
-    def test_create_allows_domain_create_stock_registers_perm_for_in_scope_store(self):
-        user = self._make_user('stock_register_creator', self.csit)
+    def test_create_allows_domain_create_stock_registers_perm_for_directly_assigned_store(self):
+        user = self._make_user('stock_register_creator', self.csit_store)
         user.user_permissions.add(self._perm('create_stock_registers'))
 
         self.client.force_authenticate(user=user)
@@ -4788,6 +4977,30 @@ class StockRegisterApiPermissionAndScopeTests(TestCase):
 
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.data['store'], self.csit_store.id)
+
+    def test_create_rejects_standalone_assignment_without_direct_store_assignment(self):
+        user = self._make_user('stock_register_creator_standalone_only', self.csit)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-registers/', self._payload(register_number='CSR-CSIT-NO-DIRECT-STORE'), format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('store', resp.data)
+
+    def test_create_rejects_sibling_store_for_directly_assigned_store_user(self):
+        user = self._make_user('stock_register_creator_direct_store_only', self.csit_store)
+        user.user_permissions.add(self._perm('create_stock_registers'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/stock-registers/',
+            self._payload(register_number='CSR-CSIT-SIBLING-BLOCKED', store=self.csit_lab_store.id),
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('store', resp.data)
 
     def test_create_rejects_out_of_scope_store_even_with_create_perm(self):
         user = self._make_user('stock_register_creator_scoped', self.csit)

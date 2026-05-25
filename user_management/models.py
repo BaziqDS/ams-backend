@@ -326,10 +326,9 @@ class UserProfile(models.Model):
         """
         Stores available when creating or reassigning stock registers.
 
-        Root-standalone assignments are creation-sensitive: they do not unlock
-        every descendant store. Those users may only create registers for
-        directly assigned stores. Non-root scopes retain the existing
-        standalone-boundary behavior.
+        Stock-register creation is tied to directly assigned stores. Broader
+        stock-register visibility still uses get_stock_register_scope_locations,
+        but a store manager should not create ledgers for sibling stores.
         """
         from inventory.models import Location
 
@@ -339,15 +338,7 @@ class UserProfile(models.Model):
         ):
             return Location.objects.filter(is_store=True, is_active=True)
 
-        assigned = self.assigned_locations.filter(is_active=True)
-        has_root_standalone = assigned.filter(
-            parent_location__isnull=True,
-            is_standalone=True,
-        ).exists()
-        if not has_root_standalone:
-            return self.get_stock_register_scope_locations()
-
-        return assigned.filter(is_store=True, is_active=True).distinct()
+        return self.assigned_locations.filter(is_store=True, is_active=True).distinct()
 
     def _get_same_standalone_location_ids(self, standalone):
         """

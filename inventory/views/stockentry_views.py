@@ -20,7 +20,7 @@ from ..services.stock_correction_service import (
     serialize_correction,
 )
 from ams.permissions import StrictDjangoModelPermissions
-from ..permissions import StockEntryPermission
+from ..permissions import EmployeePermission, StockEntryPermission
 from notifications.services import (
     notify_correction_applied,
     notify_correction_approved,
@@ -33,12 +33,12 @@ from .utils import ScopedViewSetMixin
 
 class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     """
-    ViewSet for Persons.
+    ViewSet for employees/persons.
     Optimized to avoid N+1 in get_parent_standalone loop.
     """
-    queryset = Person.objects.filter(is_active=True).prefetch_related('standalone_locations')
+    queryset = Person.objects.filter(is_active=True).prefetch_related('standalone_locations').order_by('name', 'id')
     serializer_class = PersonSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, EmployeePermission]
 
     def get_queryset(self):
         from django.db.models import Q
@@ -57,8 +57,9 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         if profile.power_level == 0:
             return queryset
         
-        # Optimized: Get accessible locations first, then find standalone parents in bulk
-        accessible_locs = profile.get_descendant_locations()
+        # Employee records are scoped by the standalone units visible to the
+        # user's assigned location tree, independent of distribution permissions.
+        accessible_locs = profile.get_location_view_locations()
         
         # Get all unique standalone locations in one query
         # Walk up hierarchy to find standalone parents
@@ -83,6 +84,9 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             return queryset.none()
             
         return queryset.filter(standalone_locations__id__in=standalone_ids).distinct()
+
+
+EmployeeViewSet = PersonViewSet
 
 class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     """
@@ -156,6 +160,31 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             Q(entry_type='ISSUE', from_location__in=locations) |
             Q(entry_type='RECEIPT', to_location__in=locations) |
             Q(entry_type='RETURN', to_location__in=locations)
+        )
+
+    def _workflow_scope_with_linked_receipts_filter(self, locations):
+        from django.db.models import Q
+
+        base_scope = self._workflow_scope_filter(locations)
+        scoped_issue_ids = StockEntry.objects.filter(
+            base_scope,
+            entry_type='ISSUE',
+        ).values('id')
+        scoped_auto_receipt_issue_ids = StockEntry.objects.filter(
+            base_scope,
+            entry_type='RECEIPT',
+            reference_purpose='AUTO_RECEIPT',
+            reference_entry_id__isnull=False,
+        ).values('reference_entry_id')
+
+        return (
+            base_scope |
+            Q(
+                entry_type='RECEIPT',
+                reference_purpose='AUTO_RECEIPT',
+                reference_entry_id__in=scoped_issue_ids,
+            ) |
+            Q(id__in=scoped_auto_receipt_issue_ids)
         )
 
     def _assigned_central_stores(self, user):
@@ -524,7 +553,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         requested_stores = self._requested_store_scope(user)
 
         if requested_stores is not None:
-            queryset = queryset.filter(self._workflow_scope_filter(requested_stores)).distinct()
+            queryset = queryset.filter(self._workflow_scope_with_linked_receipts_filter(requested_stores)).distinct()
         elif user.is_superuser or user.groups.filter(name='System Admin').exists():
             pass 
         elif hasattr(user, 'profile'):
@@ -534,7 +563,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             # 1. ISSUE rows only to the source location
             # 2. RECEIPT rows only to the destination location
             # 3. RETURN rows only to the destination location
-            queryset = queryset.filter(self._workflow_scope_filter(accessible_locations)).distinct()
+            queryset = queryset.filter(self._workflow_scope_with_linked_receipts_filter(accessible_locations)).distinct()
         else:
             return queryset.none()
 

@@ -64,9 +64,19 @@ class StockAllocationViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        
-        # Security: Filter by source store visibility
-        queryset = self.get_scoped_queryset(queryset, location_field='source_location')
+
+        # Stock allocations feed stock-entry return source options. Use the
+        # same store scope as stock entries so assigned main-store users can
+        # see active allocations they are allowed to receive back.
+        user = self.request.user
+        if user.is_superuser or user.groups.filter(name='System Admin').exists():
+            pass
+        elif hasattr(user, 'profile'):
+            queryset = queryset.filter(
+                source_location__in=user.profile.get_stock_entry_scope_locations(),
+            ).distinct()
+        else:
+            queryset = queryset.none()
                 
         # Optional filters
         status_filter = self.request.query_params.get('status')
