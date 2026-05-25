@@ -56,6 +56,20 @@ class ItemSerializer(serializers.ModelSerializer):
         return not self.get_delete_blockers(obj)
 
 
+    def validate_description(self, value):
+        """
+        Item description is mandatory for the agent's hybrid catalog search
+        to work — items without a description carry almost no semantic signal
+        and become invisible to inspection central-register linking.
+        """
+        if value is None or str(value).strip() == '':
+            raise serializers.ValidationError(
+                "Description is required. Describe the item (brand, model, "
+                "specs, intended use) so it can be matched against future "
+                "inspection items."
+            )
+        return value
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         provisional_inspection = attrs.get('provisional_inspection')

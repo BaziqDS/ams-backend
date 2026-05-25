@@ -1,5 +1,6 @@
 from django.db.models import Prefetch
 from rest_framework import viewsets, permissions, filters, status
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from collections import defaultdict
 from ..models.depreciation_model import AssetValueAdjustment, DepreciationEntry, FixedAssetRegisterEntry
@@ -8,8 +9,9 @@ from ..models.location_model import Location
 from ..models.stock_record_model import StockRecord
 from ..models.allocation_model import StockAllocation, AllocationStatus
 from ..serializers.item_serializer import ItemSerializer
-from ..permissions import ItemPermission
+from ..permissions import ItemPermission, ItemCopilotSearchPermission
 from ..services.deletion_policy import DeletionBlocked, delete_with_policy
+from ..services import item_search
 from .utils import get_item_scope_locations, get_scope_tokens_from_request
 
 class ItemViewSet(viewsets.ModelViewSet):
@@ -187,3 +189,81 @@ class ItemViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # =========================================================================
+    # COPILOT-ONLY hybrid catalog search.
+    # =========================================================================
+    # This endpoint is reached only from the frontend's copilot bridge when
+    # the agent calls search_form_options for items.N.item on a Central
+    # Register form. Human-facing dropdowns continue to hit the standard
+    # `list` endpoint with `?search=...` which performs the existing keyword
+    # filter — no behaviour change there.
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='copilot-search',
+        # POST here is "search-as-RPC" not "create-an-item" — view permission
+        # is the right gate. The agent-only call surface still requires the
+        # signed-in user to have at least view_items.
+        permission_classes=[permissions.IsAuthenticated, ItemCopilotSearchPermission],
+    )
+    def copilot_search(self, request):
+        payload = request.data or {}
+
+        if not item_search.is_supported():
+            # Feature flag off or DB is not Postgres — caller should fall
+            # back to the keyword resolver.
+            return Response(
+                {
+                    'enabled': False,
+                    'reason': 'hybrid_search_not_supported',
+                    'hits': [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        hits = item_search.hybrid_search_items(
+            query_name=str(payload.get('item_name') or '').strip(),
+            query_code=str(payload.get('item_code') or '').strip(),
+            query_category=str(payload.get('item_category') or '').strip(),
+            query_description=str(payload.get('item_description') or '').strip(),
+            query_specifications=str(payload.get('item_specifications') or '').strip(),
+            query_unit=str(payload.get('item_unit') or '').strip(),
+            tracking_type=(payload.get('item_tracking_type') or None),
+            category_type=(payload.get('item_category_type') or None),
+            limit=int(payload.get('limit') or 10),
+        )
+
+        if hits is None:
+            return Response(
+                {
+                    'enabled': False,
+                    'reason': 'insufficient_query_signal',
+                    'hits': [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                'enabled': True,
+                'hits': [
+                    {
+                        'id': h.id,
+                        'name': h.name,
+                        'code': h.code,
+                        'category_id': h.category_id,
+                        'category_display': h.category_display,
+                        'category_type': h.category_type,
+                        'tracking_type': h.tracking_type,
+                        'description': h.description,
+                        'specifications': h.specifications,
+                        'acct_unit': h.acct_unit,
+                        'score': round(h.rrf_score, 6),
+                        'signals': h.signals,
+                    }
+                    for h in hits
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )

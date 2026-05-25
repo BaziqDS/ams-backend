@@ -3,6 +3,10 @@ from django.dispatch import receiver
 from django.db import transaction
 import logging
 
+from django.conf import settings
+from django.contrib.postgres.search import SearchVector
+from django.db import connection
+
 from .models.location_model import Location, LocationType
 from .models.stockentry_model import StockEntry, StockEntryItem
 from .models.stock_record_model import StockRecord
@@ -11,7 +15,9 @@ from .models.inspection_model import InspectionCertificate, InspectionItem
 from .models.batch_model import ItemBatch
 from .models.category_model import CategoryType, TrackingType
 from .models.history_model import MovementHistory, MovementAction
+from .models.item_model import Item
 from .services.depreciation_service import capitalize_inspection_item
+from .services.embeddings import embed_item, hash_text, build_item_embedding_text
 
 logger = logging.getLogger(__name__)
 
@@ -775,3 +781,110 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
             # Note: The linked RECEIPT for the target store will be automatically created
             # by the post_save signal on StockEntryItem (process_stock_entry_item) 
             # when the COMPLETED ISSUE items are saved.
+
+
+# =============================================================================
+# Hybrid copilot item search — index maintenance
+# =============================================================================
+# When an Item is created or its semantic-relevant fields change, refresh the
+# tsvector and the pgvector embedding. The hash check makes the signal a
+# no-op for unrelated saves (e.g. last_used_at updates), keeping write
+# amplification and embedding-API spend low.
+#
+# Synchronous by design (per user choice). Errors are caught — the Item save
+# is the source of truth, embedding is best-effort. The backfill command
+# retries items whose embedded_text_hash is empty.
+
+_INDEXED_FIELDS = ('name', 'code', 'description', 'specifications',
+                   'category_id', 'acct_unit')
+
+
+@receiver(post_save, sender=Item)
+def refresh_item_search_index(sender, instance: Item, created, **kwargs):
+    if not getattr(settings, 'ITEM_SEARCH_HYBRID_ENABLED', False):
+        return
+    if connection.vendor != 'postgresql':
+        return
+    if instance.is_provisional:
+        # Provisional items belong to a pending inspection that may be
+        # rejected. Skip embedding until the item is committed to the
+        # catalog (is_provisional flips to False).
+        return
+
+    desired_text = build_item_embedding_text(instance)
+    desired_hash = hash_text(desired_text)
+
+    # Skip if nothing material changed. `embedding` is not a Django field
+    # (Postgres-only column), so we check it via raw SQL.
+    if instance.embedded_text_hash == desired_hash and _has_embedding(instance.pk):
+        _refresh_tsvector(instance.pk)
+        return
+
+    # Recompute embedding inline.
+    result = embed_item(instance)
+
+    Item.objects.filter(pk=instance.pk).update(embedded_text_hash=result.text_hash)
+    if result.vector is not None:
+        _write_embedding(instance.pk, result.vector)
+    _refresh_tsvector(instance.pk)
+
+
+def _has_embedding(item_id: int) -> bool:
+    """Check whether the Postgres-only embedding column already has a value."""
+    if connection.vendor != 'postgresql':
+        return False
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT embedding IS NOT NULL FROM inventory_item WHERE id = %s",
+                [item_id],
+            )
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception:
+        return False
+
+
+def _write_embedding(item_id: int, vector) -> None:
+    """Persist an embedding vector to the Postgres-only column."""
+    if connection.vendor != 'postgresql':
+        return
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE inventory_item SET embedding = %s::vector WHERE id = %s",
+                [str(list(vector)), item_id],
+            )
+    except Exception as exc:
+        logger.warning("Failed to write embedding for item %s: %s", item_id, exc)
+
+
+def _refresh_tsvector(item_id: int) -> None:
+    """
+    Rebuild the weighted tsvector for one item. Weights:
+        A — name, code            (highest)
+        B — description
+        C — specifications
+        D — category path         (lowest, broadest)
+    """
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE inventory_item AS i
+                SET search_text =
+                    setweight(to_tsvector('english', coalesce(i.name, '')), 'A')
+                  || setweight(to_tsvector('english', coalesce(i.code, '')), 'A')
+                  || setweight(to_tsvector('english', coalesce(i.description, '')), 'B')
+                  || setweight(to_tsvector('english', coalesce(i.specifications, '')), 'C')
+                  || setweight(to_tsvector('english',
+                       coalesce(cat.name, '') || ' ' || coalesce(parent_cat.name, '')), 'D')
+                FROM inventory_item i2
+                LEFT JOIN inventory_category cat ON cat.id = i2.category_id
+                LEFT JOIN inventory_category parent_cat ON parent_cat.id = cat.parent_category_id
+                WHERE i.id = %s AND i2.id = i.id
+                """,
+                [item_id],
+            )
+    except Exception as exc:
+        logger.warning("Failed to refresh tsvector for item %s: %s", item_id, exc)

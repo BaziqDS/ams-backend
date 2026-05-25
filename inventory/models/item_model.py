@@ -1,5 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.contrib.postgres.search import SearchVectorField
+
 
 class Item(models.Model):
     """
@@ -61,6 +63,34 @@ class Item(models.Model):
         related_name='created_items'
     )
 
+    # ---- Hybrid copilot search (agent-only Central Register linking) ----
+    # Populated by inventory.signals on Item save and consumed by
+    # inventory.services.item_search.hybrid_search_items. Only used for the
+    # agent's copilot-search endpoint; the human-facing dropdown still uses
+    # the standard keyword search_fields filter.
+    #
+    # The `embedding` column is Postgres-only (pgvector). It is NOT declared
+    # as a Django field because that would force every INSERT to bind a value
+    # for it, breaking on SQLite where the column doesn't exist. The signal
+    # writes to it via raw SQL after gating on connection.vendor.
+    search_text = SearchVectorField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Weighted Postgres tsvector for BM25-style ranking. Maintained "
+            "by the post_save signal. Unused on SQLite."
+        ),
+    )
+    embedded_text_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default='',
+        help_text=(
+            "SHA-256 of the text that produced the current embedding. Used "
+            "to skip redundant re-embeds on no-op saves."
+        ),
+    )
+
     class Meta:
         permissions = [
             ("view_items", "Can view items module"),
@@ -68,6 +98,10 @@ class Item(models.Model):
             ("edit_items", "Can edit items module records"),
             ("delete_items", "Can delete items module records"),
         ]
+        # The hybrid-search indexes (GIN on search_text, HNSW on embedding) are
+        # Postgres-only and created manually inside migration 0057 via raw SQL
+        # that's gated on connection.vendor == 'postgresql'. Declaring them
+        # here would make Django emit Postgres-specific DDL on SQLite migrate.
 
     def __str__(self):
         return f"{self.name} ({self.code})"

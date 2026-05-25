@@ -117,6 +117,22 @@ class ItemReadPermission(permissions.BasePermission):
         return False
 
 
+class ItemCopilotSearchPermission(permissions.BasePermission):
+    """
+    Gate for the agent-only POST /items/copilot-search/ endpoint. Uses POST
+    because the search payload is structured, but is logically a read — so
+    we only require view_items, not create_items.
+    """
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return _has_perm(user, "inventory.view_items")
+
+
 class ItemInstancePermission(permissions.BasePermission):
     """Item module gate for instance reads plus controlled instance edits."""
 

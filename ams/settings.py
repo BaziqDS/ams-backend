@@ -264,3 +264,38 @@ if IS_PRODUCTION:
     X_FRAME_OPTIONS = 'DENY'
     SESSION_COOKIE_SECURE = COOKIE_SECURE
     CSRF_COOKIE_SECURE = COOKIE_SECURE
+
+
+# =============================================================================
+# COPILOT HYBRID ITEM SEARCH (agent-only Central Register linking)
+# =============================================================================
+# Postgres-only. SQLite dev installs skip the embedding columns and the
+# copilot endpoint falls back to standard keyword search.
+ITEM_SEARCH_HYBRID_ENABLED = config(
+    'ITEM_SEARCH_HYBRID_ENABLED', default=False, cast=bool,
+)
+
+# Embedding provider — OpenAI-compatible HTTP API. Wire to OpenRouter for
+# testing by pointing EMBEDDING_BASE_URL at OpenRouter and using one of
+# their hosted embedding models.
+EMBEDDING_BASE_URL = config(
+    'EMBEDDING_BASE_URL', default='https://openrouter.ai/api/v1',
+)
+EMBEDDING_API_KEY = config('EMBEDDING_API_KEY', default='')
+EMBEDDING_MODEL = config(
+    'EMBEDDING_MODEL', default='openai/text-embedding-3-small',
+)
+EMBEDDING_DIM = config('EMBEDDING_DIM', default=1536, cast=int)
+EMBEDDING_TIMEOUT_SECONDS = config(
+    'EMBEDDING_TIMEOUT_SECONDS', default=15, cast=int,
+)
+
+# RRF (Reciprocal Rank Fusion) constant — Cormack et al. recommend 60.
+ITEM_SEARCH_RRF_K = config('ITEM_SEARCH_RRF_K', default=60, cast=int)
+
+# Per-stage candidate budgets before fusion.
+ITEM_SEARCH_BM25_TOP_N = config('ITEM_SEARCH_BM25_TOP_N', default=30, cast=int)
+ITEM_SEARCH_SEMANTIC_TOP_N = config(
+    'ITEM_SEARCH_SEMANTIC_TOP_N', default=30, cast=int,
+)
+
