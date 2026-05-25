@@ -3,8 +3,8 @@ from django.db import transaction
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from ..models.location_model import Location, LocationType
-from ..serializers.location_serializer import LocationSerializer
+from ..models.location_model import Location, LocationTag, LocationType
+from ..serializers.location_serializer import LocationSerializer, LocationTagSerializer
 from ..permissions import LocationPermission
 from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 from user_management.models import UserProfile
@@ -16,6 +16,17 @@ def _is_truthy(value):
     if isinstance(value, (list, tuple)):
         value = value[0] if value else False
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+class LocationTagViewSet(viewsets.ModelViewSet):
+    serializer_class = LocationTagSerializer
+    permission_classes = [permissions.IsAuthenticated, LocationPermission]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['name', 'code', 'category']
+
+    def get_queryset(self):
+        return LocationTag.objects.all()
+
 
 class LocationViewSet(viewsets.ModelViewSet):
     """
@@ -33,7 +44,7 @@ class LocationViewSet(viewsets.ModelViewSet):
             'parent_location',
             'created_by',
             'auto_created_store'
-        ).all()
+        ).prefetch_related('tags').all()
         
         user = self.request.user
         if user.is_superuser:

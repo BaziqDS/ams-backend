@@ -6,6 +6,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+TAG_COLOR_PALETTE = [
+    '#E0F2FE',
+    '#DCFCE7',
+    '#FEF3C7',
+    '#FCE7F3',
+    '#EDE9FE',
+    '#ECFCCB',
+    '#FFE4E6',
+    '#CCFBF1',
+]
+
 class LocationType(models.TextChoices):
     DEPARTMENT = 'DEPARTMENT', 'Department'
     BUILDING = 'BUILDING', 'Building'
@@ -17,6 +28,57 @@ class LocationType(models.TextChoices):
     AV_HALL = 'AV_HALL', 'AV Hall'
     AUDITORIUM = 'AUDITORIUM', 'Auditorium'
     OTHER = 'OTHER', 'Other'
+
+
+class LocationTagCategory(models.TextChoices):
+    BUILDING = 'BUILDING', 'Building'
+    DEAN_FACULTY = 'DEAN_FACULTY', 'Dean Faculty'
+    DEPARTMENT_NATURE = 'DEPARTMENT_NATURE', 'Department Nature'
+    CAMPUS_ZONE = 'CAMPUS_ZONE', 'Campus Zone'
+    USAGE_TYPE = 'USAGE_TYPE', 'Usage Type'
+    OTHER = 'OTHER', 'Other'
+
+
+class LocationTag(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    code = models.CharField(max_length=64, unique=True, blank=True)
+    category = models.CharField(
+        max_length=40,
+        choices=LocationTagCategory.choices,
+        default=LocationTagCategory.OTHER,
+    )
+    color = models.CharField(max_length=20, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['code']),
+            models.Index(fields=['category']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            self.code = self.generate_tag_code()
+        if not self.color:
+            self.color = TAG_COLOR_PALETTE[(LocationTag.objects.count()) % len(TAG_COLOR_PALETTE)]
+        super().save(*args, **kwargs)
+
+    def generate_tag_code(self):
+        last_tag = LocationTag.objects.order_by('-id').first()
+        next_seq = (last_tag.id + 1) if last_tag else 1
+        while True:
+            code = f"TAG-{next_seq:04d}"
+            if not LocationTag.objects.filter(code=code).exists():
+                return code
+            next_seq += 1
+
 
 class Location(models.Model):
     name = models.CharField(max_length=255, unique=True, help_text="Location name must be unique")
@@ -31,6 +93,12 @@ class Location(models.Model):
     location_type = models.CharField(
         max_length=20,
         choices=LocationType.choices
+    )
+    tags = models.ManyToManyField(
+        LocationTag,
+        blank=True,
+        related_name='locations',
+        help_text="Reporting/grouping tags. Does not affect hierarchy or permissions.",
     )
     is_store = models.BooleanField(default=False)
     description = models.TextField(null=True, blank=True)

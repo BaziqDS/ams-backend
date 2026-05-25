@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models.location_model import Location
+from .models.location_model import Location, LocationTag
 from .models.category_model import Category, CategoryRateHistory
 from .models.item_model import Item
 from .models.batch_model import ItemBatch
@@ -24,7 +24,16 @@ class StockAllocationAdmin(admin.ModelAdmin):
 @admin.register(Location)
 class LocationAdmin(admin.ModelAdmin):
     list_display = ('name', 'code', 'location_type', 'is_store', 'is_standalone', 'is_main_store', 'is_active')
-    list_filter = ('location_type', 'is_store', 'is_standalone', 'is_main_store', 'is_active')
+    list_filter = ('location_type', 'tags', 'is_store', 'is_standalone', 'is_main_store', 'is_active')
+    search_fields = ('name', 'code')
+    ordering = ('name',)
+    filter_horizontal = ('tags',)
+
+
+@admin.register(LocationTag)
+class LocationTagAdmin(admin.ModelAdmin):
+    list_display = ('name', 'code', 'category', 'is_active')
+    list_filter = ('category', 'is_active')
     search_fields = ('name', 'code')
     ordering = ('name',)
 

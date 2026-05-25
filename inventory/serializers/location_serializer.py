@@ -1,10 +1,33 @@
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
-from ..models.location_model import Location, LocationType
+from ..models.location_model import Location, LocationTag, LocationType
 from ..services.deletion_policy import get_delete_blockers
+
+
+class LocationTagSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    label = serializers.SerializerMethodField()
+
+    def get_label(self, obj):
+        return f"{obj.get_category_display()}: {obj.name}"
+
+    def validate_name(self, value):
+        normalized = ' '.join(value.split())
+        queryset = LocationTag.objects.filter(name__iexact=normalized)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("A tag with this name already exists.")
+        return normalized
+ 
+    class Meta:
+        model = LocationTag
+        fields = '__all__'
+
 
 class LocationSerializer(serializers.ModelSerializer):
     parent_location_display = serializers.StringRelatedField(source='parent_location', read_only=True)
+    tags_display = LocationTagSerializer(source='tags', many=True, read_only=True)
     main_store_name = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=True)
     main_store_id = serializers.SerializerMethodField()
     main_store_display = serializers.SerializerMethodField()
@@ -54,6 +77,8 @@ class LocationSerializer(serializers.ModelSerializer):
 
         candidate = self.instance or Location()
         for field, value in attrs.items():
+            if field == 'tags':
+                continue
             setattr(candidate, field, value)
         try:
             candidate.clean()
@@ -64,11 +89,21 @@ class LocationSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        tags = validated_data.pop('tags', [])
         main_store_name = validated_data.pop('main_store_name', '')
         location = Location(**validated_data)
         location._main_store_name = main_store_name
         location.save()
+        if tags:
+            location.tags.set(tags)
         return location
+
+    def update(self, instance, validated_data):
+        tags = validated_data.pop('tags', None)
+        instance = super().update(instance, validated_data)
+        if tags is not None:
+            instance.tags.set(tags)
+        return instance
     
     class Meta:
         model = Location
