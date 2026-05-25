@@ -240,6 +240,10 @@ class NotificationsApiTests(TestCase):
         notification = UserNotification.objects.get(user=receiver)
         self.assertEqual(notification.event.kind, "stock_entry.pending_ack")
         self.assertEqual(notification.event.entity_id, entry.id)
+        self.assertEqual(notification.event.metadata["entry_number"], entry.entry_number)
+        self.assertEqual(notification.event.metadata["entry_type_label"], "Receipt")
+        self.assertEqual(notification.event.metadata["status_label"], "Pending Acknowledgment")
+        self.assertEqual(notification.event.metadata["to_location_name"], self.department_store.name)
         self.assertFalse(notification.is_read)
 
     def test_feed_read_read_all_and_clear_endpoints_update_user_state(self):
@@ -321,10 +325,12 @@ class NotificationsApiTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(
-            UserNotification.objects.filter(
-                user=watcher,
-                event__kind="inspection.rejected",
-                event__entity_id=inspection.id,
-            ).exists()
+        notification = UserNotification.objects.get(
+            user=watcher,
+            event__kind="inspection.rejected",
+            event__entity_id=inspection.id,
         )
+        self.assertEqual(notification.event.metadata["contract_no"], "IC-REJECT-001")
+        self.assertEqual(notification.event.metadata["department_name"], self.department.name)
+        self.assertEqual(notification.event.metadata["rejection_stage_label"], "Stock Details (Stage 2)")
+        self.assertEqual(notification.event.metadata["rejection_reason"], "Missing stock register evidence.")

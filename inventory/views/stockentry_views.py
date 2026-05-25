@@ -417,6 +417,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                     reference_purpose='REJECTION_RETURN',
                     remarks=f"Automatic return for items rejected in {instance.entry_number}.",
                     reference_entry=instance,
+                    inspection_certificate=instance.inspection_certificate,
                     created_by=user
                 )
                 for rej in rejected_items:

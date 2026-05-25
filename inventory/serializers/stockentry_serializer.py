@@ -535,6 +535,9 @@ class StockEntrySerializer(serializers.ModelSerializer):
         items_data = self._expand_quantity_issue_items(entry_type, from_location, items_data)
         items_data = self._expand_quantity_return_items(entry_type, to_location, issued_to, from_location, items_data)
         self._validate_issue_stock_available(entry_type, from_location, items_data)
+        reference_entry = validated_data.get('reference_entry')
+        if reference_entry and reference_entry.inspection_certificate_id:
+            validated_data['inspection_certificate'] = reference_entry.inspection_certificate
 
         from django.db import transaction
         with transaction.atomic():

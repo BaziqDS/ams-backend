@@ -290,6 +290,7 @@ def _create_issue_from_lines(entry, correction, lines, *, from_location, to_loca
         reference_purpose=reference_purpose,
         remarks=f"Generated from correction {correction.id}: {correction.reason}",
         purpose=entry.purpose,
+        inspection_certificate=entry.inspection_certificate,
         created_by=correction.requested_by,
     )
 
@@ -323,6 +324,7 @@ def _create_receipt_from_lines(entry, correction, lines, *, from_location, to_lo
         reference_purpose=reference_purpose,
         remarks=f"Generated from correction {correction.id}: {correction.reason}",
         purpose=entry.purpose,
+        inspection_certificate=entry.inspection_certificate,
         created_by=correction.requested_by,
     )
 

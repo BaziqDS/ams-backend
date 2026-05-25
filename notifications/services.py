@@ -306,6 +306,66 @@ def depreciation_visible_users(*, require_action: bool = False) -> list[User]:
     return users
 
 
+def _inspection_notification_metadata(inspection: InspectionCertificate) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "contract_no": inspection.contract_no,
+        "contractor_name": inspection.contractor_name,
+        "indent_no": inspection.indent_no,
+        "stage": inspection.stage,
+        "stage_label": inspection.get_stage_display(),
+        "status": inspection.status,
+        "department_id": inspection.department_id,
+        "department_name": inspection.department.name if inspection.department_id else "",
+        "item_count": inspection.items.count(),
+    }
+    if inspection.rejection_stage:
+        metadata["rejection_stage"] = inspection.rejection_stage
+        metadata["rejection_stage_label"] = inspection.get_rejection_stage_display()
+    if inspection.rejection_reason:
+        metadata["rejection_reason"] = inspection.rejection_reason
+    return metadata
+
+
+def _stock_entry_notification_metadata(entry: StockEntry) -> dict[str, object]:
+    item_summary = entry.items.aggregate(total_quantity=Coalesce(Sum("quantity"), Value(0)))
+    metadata: dict[str, object] = {
+        "entry_number": entry.entry_number,
+        "entry_type": entry.entry_type,
+        "entry_type_label": entry.get_entry_type_display(),
+        "status": entry.status,
+        "status_label": entry.get_status_display(),
+        "from_location_id": entry.from_location_id,
+        "from_location_name": entry.from_location.name if entry.from_location_id else "",
+        "to_location_id": entry.to_location_id,
+        "to_location_name": entry.to_location.name if entry.to_location_id else "",
+        "issued_to_id": entry.issued_to_id,
+        "issued_to_name": entry.issued_to.name if entry.issued_to_id else "",
+        "item_count": entry.items.count(),
+        "total_quantity": item_summary["total_quantity"] or 0,
+    }
+    if entry.inspection_certificate_id:
+        metadata["inspection_id"] = entry.inspection_certificate_id
+        metadata["inspection_contract_no"] = entry.inspection_certificate.contract_no
+    if entry.reference_entry_id:
+        metadata["reference_entry_id"] = entry.reference_entry_id
+        metadata["reference_entry_number"] = entry.reference_entry.entry_number
+    if entry.reference_purpose:
+        metadata["reference_purpose"] = entry.reference_purpose
+    return metadata
+
+
+def _stock_correction_notification_metadata(correction: StockCorrectionRequest) -> dict[str, object]:
+    metadata = _stock_entry_notification_metadata(correction.original_entry)
+    metadata.update({
+        "correction_id": correction.id,
+        "correction_status": correction.status,
+        "resolution_type": correction.resolution_type,
+    })
+    if correction.reason:
+        metadata["correction_reason"] = correction.reason
+    return metadata
+
+
 def notify_inspection_initiated(inspection: InspectionCertificate, actor: User | None) -> NotificationEvent | None:
     stage_perm = INSPECTION_STAGE_PERM_MAP.get(inspection.stage)
     recipients = users_for_inspection_stage(inspection, stage_perm) if stage_perm else inspection_visible_users(inspection)
@@ -321,7 +381,7 @@ def notify_inspection_initiated(inspection: InspectionCertificate, actor: User |
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata={"stage": inspection.stage, "department_id": inspection.department_id},
+        metadata=_inspection_notification_metadata(inspection),
     )
 
 
@@ -337,7 +397,7 @@ def notify_inspection_submitted_to_central_register(inspection: InspectionCertif
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata={"stage": inspection.stage, "department_id": inspection.department_id},
+        metadata=_inspection_notification_metadata(inspection),
     )
 
 
@@ -353,7 +413,7 @@ def notify_inspection_submitted_to_finance_review(inspection: InspectionCertific
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata={"stage": inspection.stage, "department_id": inspection.department_id},
+        metadata=_inspection_notification_metadata(inspection),
     )
 
 
@@ -369,7 +429,7 @@ def notify_inspection_completed(inspection: InspectionCertificate, actor: User |
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata={"stage": inspection.stage, "department_id": inspection.department_id},
+        metadata=_inspection_notification_metadata(inspection),
     )
 
 
@@ -393,7 +453,7 @@ def notify_inspection_rejected(inspection: InspectionCertificate, actor: User | 
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata={"stage": inspection.stage, "rejection_stage": inspection.rejection_stage, "department_id": inspection.department_id},
+        metadata=_inspection_notification_metadata(inspection),
     )
 
 
@@ -420,7 +480,7 @@ def notify_stock_entry_pending_ack(entry: StockEntry, actor: User | None = None)
         entity_type="stock_entry",
         entity_id=entry.id,
         actor=actor or entry.created_by,
-        metadata={"entry_type": entry.entry_type, "status": entry.status},
+        metadata=_stock_entry_notification_metadata(entry),
     )
 
 
@@ -439,7 +499,7 @@ def notify_stock_entry_acknowledged(entry: StockEntry, actor: User | None) -> No
         entity_type="stock_entry",
         entity_id=entry.id,
         actor=actor,
-        metadata={"entry_type": entry.entry_type, "status": entry.status},
+        metadata=_stock_entry_notification_metadata(entry),
     )
 
 
@@ -455,7 +515,7 @@ def notify_correction_requested(correction: StockCorrectionRequest, actor: User 
         entity_type="stock_correction",
         entity_id=correction.id,
         actor=actor,
-        metadata={"status": correction.status, "resolution_type": correction.resolution_type},
+        metadata=_stock_correction_notification_metadata(correction),
     )
 
 
@@ -472,7 +532,7 @@ def notify_correction_approved(correction: StockCorrectionRequest, actor: User |
         entity_type="stock_correction",
         entity_id=correction.id,
         actor=actor,
-        metadata={"status": correction.status, "resolution_type": correction.resolution_type},
+        metadata=_stock_correction_notification_metadata(correction),
     )
 
 
@@ -488,7 +548,7 @@ def notify_correction_rejected(correction: StockCorrectionRequest, actor: User |
         entity_type="stock_correction",
         entity_id=correction.id,
         actor=actor,
-        metadata={"status": correction.status, "resolution_type": correction.resolution_type},
+        metadata=_stock_correction_notification_metadata(correction),
     )
 
 
@@ -504,7 +564,7 @@ def notify_correction_applied(correction: StockCorrectionRequest, actor: User | 
         entity_type="stock_correction",
         entity_id=correction.id,
         actor=actor,
-        metadata={"status": correction.status, "resolution_type": correction.resolution_type},
+        metadata=_stock_correction_notification_metadata(correction),
     )
 
 

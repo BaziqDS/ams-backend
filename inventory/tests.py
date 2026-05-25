@@ -2926,6 +2926,27 @@ class StockEntryApiDomainPermissionTests(TestCase):
     def _register(self, store, number):
         return StockRegister.objects.create(register_number=number, store=store)
 
+    def _inspection_certificate(self, contract_no):
+        return InspectionCertificate.objects.create(
+            date=timezone.now().date(),
+            contract_no=contract_no,
+            contract_date=timezone.now().date(),
+            contractor_name='Stock Detail Supplier',
+            contractor_address='Block D',
+            indenter='Stock Detail Indenter',
+            indent_no=f'IND-{contract_no}',
+            department=self.csit,
+            date_of_delivery=timezone.now().date(),
+            delivery_type='FULL',
+            remarks='Stock detail link check',
+            inspected_by='Inspector',
+            date_of_inspection=timezone.now().date(),
+            consignee_name='Consignee',
+            consignee_designation='Manager',
+            stage=InspectionStage.FINANCE_REVIEW,
+            status='IN_PROGRESS',
+        )
+
     def _completed_transfer(self, user, *, quantity=4, purpose='Completed transfer'):
         user.user_permissions.add(self._perm('create_stock_entries'))
         user.user_permissions.add(self._perm('acknowledge_stockentry'))
@@ -3800,6 +3821,9 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(source_record.in_transit_quantity, 5)
         self.assertEqual(source_record.available_quantity, 5)
         linked_receipt = StockEntry.objects.get(reference_entry_id=create_resp.data['id'], entry_type='RECEIPT')
+        certificate = self._inspection_certificate('IC-PARTIAL-RETURN-001')
+        linked_receipt.inspection_certificate = certificate
+        linked_receipt.save(update_fields=['inspection_certificate'])
         receipt_item = linked_receipt.items.get()
 
         ack_resp = self.client.post(
@@ -3828,7 +3852,12 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(return_entry.from_location, self.child_store)
         self.assertEqual(return_entry.to_location, self.store)
         self.assertEqual(return_entry.status, 'PENDING_ACK')
+        self.assertEqual(return_entry.inspection_certificate, certificate)
         self.assertEqual(return_entry.items.get().quantity, 3)
+        return_detail_resp = self.client.get(f'/api/inventory/stock-entries/{return_entry.id}/')
+        self.assertEqual(return_detail_resp.status_code, 200)
+        self.assertEqual(return_detail_resp.data['inspection_certificate'], certificate.id)
+        self.assertEqual(return_detail_resp.data['inspection_certificate_number'], 'IC-PARTIAL-RETURN-001')
         source_record.refresh_from_db()
         child_record = StockRecord.objects.get(item=self.item, batch=self.batch, location=self.child_store)
         self.assertEqual(source_record.quantity, 8)
@@ -3971,6 +4000,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
             to_location=self.child_store,
             status='CANCELLED',
             cancellation_reason='Wrong destination.',
+            inspection_certificate=self._inspection_certificate('IC-REPLACEMENT-001'),
         )
         payload = self._payload('Replacement entry')
         payload['reference_entry'] = source.id
@@ -3982,12 +4012,15 @@ class StockEntryApiDomainPermissionTests(TestCase):
         replacement = StockEntry.objects.get(id=resp.data['id'])
         self.assertEqual(replacement.reference_entry, source)
         self.assertEqual(replacement.reference_purpose, 'REPLACEMENT')
+        self.assertEqual(replacement.inspection_certificate, source.inspection_certificate)
 
     def test_completed_transfer_correction_upward_creates_additional_linked_issue(self):
         user = self._make_user('stock_entry_correction_upward')
         user.user_permissions.add(self._perm('edit_stock_entries'))
         self.client.force_authenticate(user=user)
         issue = self._completed_transfer(user, quantity=4, purpose='Correction upward')
+        issue.inspection_certificate = self._inspection_certificate('IC-CORRECTION-UP-001')
+        issue.save(update_fields=['inspection_certificate'])
         issue_item = issue.items.get()
 
         resp = self.client.post(
@@ -4008,10 +4041,12 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(generated.entry_type, 'ISSUE')
         self.assertEqual(generated.from_location, self.store)
         self.assertEqual(generated.to_location, self.child_store)
-        self.assertEqual(generated.status, 'PENDING_ACK')
+        self.assertEqual(generated.status, 'COMPLETED')
+        self.assertEqual(generated.inspection_certificate, issue.inspection_certificate)
         self.assertEqual(generated.items.get().quantity, 2)
         linked_receipt = StockEntry.objects.get(reference_entry=generated, reference_purpose='AUTO_RECEIPT')
-        self.assertEqual(linked_receipt.status, 'PENDING_ACK')
+        self.assertEqual(linked_receipt.inspection_certificate, issue.inspection_certificate)
+        self.assertEqual(linked_receipt.status, 'COMPLETED')
 
     def test_request_correction_rejects_no_changed_lines(self):
         user = self._make_user('stock_entry_correction_no_change')
