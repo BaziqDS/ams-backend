@@ -10,19 +10,61 @@ from ..models.item_model import Item
 from ..models.batch_model import ItemBatch
 from ..models.instance_model import InstanceStatus, ItemInstance
 from ..models.stock_record_model import StockRecord
-from ..models.category_model import CategoryType, TrackingType
+from ..models.category_model import TrackingType
 from ..services.deletion_policy import get_delete_blockers
 
 class PersonSerializer(serializers.ModelSerializer):
     standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        field = self.fields.get('standalone_locations')
+        if not field or not user or not user.is_authenticated or user.is_superuser:
+            return
+
+        from ..models.location_model import Location
+
+        if not hasattr(user, 'profile'):
+            field.child_relation.queryset = Location.objects.none()
+            return
+
+        profile = user.profile
+        if profile.power_level == 0:
+            field.child_relation.queryset = Location.objects.filter(is_active=True, is_standalone=True)
+            return
+
+        accessible_locs = profile.get_location_view_locations()
+        standalone_ids = set(
+            accessible_locs.filter(is_standalone=True).values_list('id', flat=True)
+        )
+        standalone_ids.update(
+            accessible_locs.exclude(parent_location__isnull=True)
+            .filter(parent_location__is_standalone=True)
+            .values_list('parent_location_id', flat=True)
+        )
+        field.child_relation.queryset = Location.objects.filter(
+            id__in=standalone_ids,
+            is_active=True,
+            is_standalone=True,
+        )
+
     class Meta:
         model = Person
         fields = [
-            'id', 'name', 'designation', 'department', 
+            'id', 'perse_number', 'name', 'designation', 'department',
             'standalone_locations', 'standalone_locations_display',
             'is_active', 'created_at', 'updated_at'
         ]
+        extra_kwargs = {
+            'perse_number': {'required': True, 'allow_blank': False, 'allow_null': False},
+        }
+
+    def validate_perse_number(self, value):
+        if value is None or not str(value).strip():
+            raise serializers.ValidationError('PERSE number is required.')
+        return str(value).strip()
 
 class StockEntryItemSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source='item.name', read_only=True)
@@ -86,7 +128,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
     def get_can_delete(self, obj):
         return not self.get_delete_blockers(obj)
 
-    def _should_auto_split_consumable_issue_item(self, entry_type, from_location, item_data):
+    def _should_auto_split_quantity_issue_item(self, entry_type, from_location, item_data):
         if entry_type != 'ISSUE' or not from_location:
             return False
 
@@ -100,18 +142,17 @@ class StockEntrySerializer(serializers.ModelSerializer):
             return False
 
         return (
-            category.get_tracking_type() == TrackingType.QUANTITY and
-            category.get_category_type() == CategoryType.CONSUMABLE
+            category.get_tracking_type() == TrackingType.QUANTITY
         )
 
-    def _expand_consumable_issue_items(self, entry_type, from_location, items_data):
+    def _expand_quantity_issue_items(self, entry_type, from_location, items_data):
         if entry_type != 'ISSUE' or not from_location:
             return items_data
 
         expanded_items = []
 
         for item_data in items_data:
-            if not self._should_auto_split_consumable_issue_item(entry_type, from_location, item_data):
+            if not self._should_auto_split_quantity_issue_item(entry_type, from_location, item_data):
                 expanded_items.append(item_data)
                 continue
 
@@ -159,6 +200,88 @@ class StockEntrySerializer(serializers.ModelSerializer):
                 })
             elif not matched_any_batch:
                 expanded_items.append(item_data)
+
+        return expanded_items
+
+    def _allocation_return_filter(self, *, item, batch=None, source_location=None, issued_to=None, from_location=None):
+        allocation_filter = {
+            'item': item,
+            'source_location': source_location,
+            'status': AllocationStatus.ALLOCATED,
+        }
+        if batch is not None:
+            allocation_filter['batch'] = batch
+        if issued_to:
+            allocation_filter['allocated_to_person'] = issued_to
+        else:
+            allocation_filter['allocated_to_location'] = from_location
+        return allocation_filter
+
+    def _should_auto_split_quantity_return_item(self, entry_type, to_location, issued_to, from_location, item_data):
+        if entry_type != 'RECEIPT' or not to_location:
+            return False
+
+        if not (issued_to or (from_location and not getattr(from_location, 'is_store', False))):
+            return False
+
+        item = item_data.get('item')
+        batch = item_data.get('batch')
+        if not item or batch is not None:
+            return False
+
+        category = getattr(item, 'category', None)
+        if not category:
+            return False
+
+        return category.get_tracking_type() == TrackingType.QUANTITY
+
+    def _expand_quantity_return_items(self, entry_type, to_location, issued_to, from_location, items_data):
+        if entry_type != 'RECEIPT' or not to_location:
+            return items_data
+
+        expanded_items = []
+
+        for item_data in items_data:
+            if not self._should_auto_split_quantity_return_item(entry_type, to_location, issued_to, from_location, item_data):
+                expanded_items.append(item_data)
+                continue
+
+            item = item_data['item']
+            remaining_quantity = item_data.get('quantity') or 0
+            allocation_filter = self._allocation_return_filter(
+                item=item,
+                source_location=to_location,
+                issued_to=issued_to,
+                from_location=from_location,
+            )
+            active_allocations = (
+                StockAllocation.objects
+                .filter(**allocation_filter)
+                .select_related('batch')
+                .order_by('allocated_at', 'batch_id', 'id')
+            )
+
+            for allocation in active_allocations:
+                if remaining_quantity <= 0:
+                    break
+
+                return_quantity = min(remaining_quantity, allocation.quantity)
+                if return_quantity <= 0:
+                    continue
+
+                expanded_items.append({
+                    **item_data,
+                    'batch': allocation.batch,
+                    'quantity': return_quantity,
+                })
+                remaining_quantity -= return_quantity
+
+            if remaining_quantity > 0:
+                expanded_items.append({
+                    **item_data,
+                    'batch': None,
+                    'quantity': remaining_quantity,
+                })
 
         return expanded_items
 
@@ -230,6 +353,56 @@ class StockEntrySerializer(serializers.ModelSerializer):
                     errors['items'] = 'Selected item instances must be available before issue.'
                     return
 
+    def _validate_no_duplicate_submitted_items(self, errors, items_data):
+        seen_item_ids = set()
+
+        for item_data in items_data or []:
+            item = item_data.get('item')
+            if not item:
+                continue
+
+            item_id = item.pk if hasattr(item, 'pk') else item
+            if item_id in seen_item_ids:
+                errors['items'] = 'Each item can only be added once in a stock entry.'
+                return
+            seen_item_ids.add(item_id)
+
+    def _validate_issue_stock_available(self, entry_type, from_location, items_data):
+        if entry_type != 'ISSUE' or not from_location:
+            return
+
+        requested_by_record = {}
+        for item_data in items_data or []:
+            item = item_data.get('item')
+            if not item:
+                continue
+
+            batch = item_data.get('batch')
+            item_id = item.pk if hasattr(item, 'pk') else item
+            batch_id = batch.pk if hasattr(batch, 'pk') else batch
+            key = (item_id, batch_id)
+            requested_by_record[key] = requested_by_record.get(key, 0) + (item_data.get('quantity') or 0)
+
+        for (item_id, batch_id), requested_quantity in requested_by_record.items():
+            try:
+                record = StockRecord.objects.get(
+                    item_id=item_id,
+                    location=from_location,
+                    batch_id=batch_id,
+                )
+            except StockRecord.DoesNotExist:
+                raise serializers.ValidationError({
+                    'items': 'Cannot issue stock that is not available at the source store.'
+                })
+
+            if requested_quantity > record.available_quantity:
+                raise serializers.ValidationError({
+                    'items': (
+                        f'Requested quantity ({requested_quantity}) exceeds available stock '
+                        f'({record.available_quantity}) at the source store.'
+                    )
+                })
+
     def validate(self, attrs):
         candidate = self.instance or StockEntry()
         for field, value in attrs.items():
@@ -274,6 +447,14 @@ class StockEntrySerializer(serializers.ModelSerializer):
                         for entry_item in self.instance.items.all()
                     ]
 
+                items_data = self._expand_quantity_return_items(
+                    entry_type,
+                    to_location,
+                    issued_to,
+                    from_location,
+                    items_data or [],
+                )
+
                 for item_data in items_data or []:
                     item = item_data.get('item')
                     if not item:
@@ -307,6 +488,7 @@ class StockEntrySerializer(serializers.ModelSerializer):
         if from_location and to_location and from_location.pk == to_location.pk:
             errors['to_location'] = 'Destination cannot be the same as the source store.'
         self._validate_assigned_creation_store(errors, entry_type, from_location, to_location)
+        self._validate_no_duplicate_submitted_items(errors, attrs.get('items'))
         self._validate_instances_for_entry(errors, entry_type, from_location, attrs.get('items'))
         if errors:
             raise serializers.ValidationError(errors)
@@ -330,9 +512,12 @@ class StockEntrySerializer(serializers.ModelSerializer):
 
     def _creation_status(self, validated_data):
         entry_type = validated_data.get('entry_type')
+        from_location = validated_data.get('from_location')
         to_location = validated_data.get('to_location')
         issued_to = validated_data.get('issued_to')
         if entry_type == 'ISSUE' and (issued_to or (to_location and not to_location.is_store)):
+            return 'COMPLETED'
+        if entry_type == 'RECEIPT' and (issued_to or (from_location and not from_location.is_store)):
             return 'COMPLETED'
         return 'PENDING_ACK'
 
@@ -344,25 +529,12 @@ class StockEntrySerializer(serializers.ModelSerializer):
         validated_data['status'] = self._creation_status(validated_data)
 
         from_location = validated_data.get('from_location')
+        to_location = validated_data.get('to_location')
+        issued_to = validated_data.get('issued_to')
         entry_type = validated_data.get('entry_type')
-        items_data = self._expand_consumable_issue_items(entry_type, from_location, items_data)
-
-        # Validate stock availability for all items before creating anything
-        if entry_type == 'ISSUE' and from_location:
-            for item_data in items_data:
-                item = item_data.get('item')
-                batch = item_data.get('batch')
-                quantity = item_data.get('quantity')
-                
-                try:
-                    record = StockRecord.objects.get(
-                        item=item,
-                        location=from_location,
-                        batch=batch
-                    )
-                except StockRecord.DoesNotExist:
-                    # If record doesn't exist, we'll let the model signals handle it (StockRecord creation)
-                    pass
+        items_data = self._expand_quantity_issue_items(entry_type, from_location, items_data)
+        items_data = self._expand_quantity_return_items(entry_type, to_location, issued_to, from_location, items_data)
+        self._validate_issue_stock_available(entry_type, from_location, items_data)
 
         from django.db import transaction
         with transaction.atomic():
@@ -391,6 +563,11 @@ class StockEntrySerializer(serializers.ModelSerializer):
             
             # Update nested items if provided
             if items_data is not None:
+                from_location = validated_data.get('from_location', instance.from_location)
+                entry_type = validated_data.get('entry_type', instance.entry_type)
+                items_data = self._expand_quantity_issue_items(entry_type, from_location, items_data)
+                self._validate_issue_stock_available(entry_type, from_location, items_data)
+
                 # Simple approach: clear and recreate
                 # (Appropriate since Draft entries don't have side effects yet)
                 instance.items.all().delete()

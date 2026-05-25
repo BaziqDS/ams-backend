@@ -92,6 +92,33 @@ class InspectionFinanceScopeContractTests(TestCase):
         self.assertIn(self.electrical_certificate.id, returned_ids)
         self.assertIn(self.csit_certificate.id, returned_ids)
 
+    def test_view_all_inspections_user_can_filter_by_location(self):
+        user = self._make_user("contract_finance_global_filtered", self.electrical)
+        user.user_permissions.add(self._perm("view_all_inspections"))
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(f"/api/inventory/inspections/?location={self.electrical.id}")
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = self._ids(response)
+        self.assertIn(self.electrical_certificate.id, returned_ids)
+        self.assertNotIn(self.csit_certificate.id, returned_ids)
+
+    def test_superuser_can_filter_inspections_by_location(self):
+        user = User.objects.create_superuser(
+            username="inspection_superuser_filtered",
+            email="inspection-super@example.com",
+            password="pw",
+        )
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get(f"/api/inventory/inspections/?location={self.csit.id}")
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = self._ids(response)
+        self.assertIn(self.csit_certificate.id, returned_ids)
+        self.assertNotIn(self.electrical_certificate.id, returned_ids)
+
     def test_change_permission_without_review_finance_cannot_complete_inspection(self):
         certificate = self._certificate("IC-CONTRACT-FINANCE", self.electrical)
         certificate.stage = InspectionStage.FINANCE_REVIEW

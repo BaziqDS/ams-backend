@@ -134,9 +134,28 @@ class CapabilitiesEndpointLocationsTests(TestCase):
         body = resp.json() if hasattr(resp, 'json') else json.loads(resp.content.decode())
         self.assertEqual(
             body['dependencies']['stock-entries']['manage'],
-            ['items', 'locations', 'stock-registers'],
+            ['items', 'locations', 'employees', 'stock-registers'],
         )
         self.assertNotIn('persons', body['dependencies']['stock-entries']['manage'])
+
+    def test_capabilities_exposes_reports_view_module(self):
+        user = User.objects.create_user(username='cap_api_reports', password='pw')
+        role = Group.objects.create(name='Reports View Role')
+        role.permissions.add(self._perm('inventory.view_reports'))
+        user.groups.add(role)
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get('/auth/capabilities/')
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json() if hasattr(resp, 'json') else json.loads(resp.content.decode())
+        self.assertEqual(body['modules']['reports'], 'view')
+        self.assertEqual(body['manifest']['reports'], ['view'])
+        self.assertEqual(
+            body['dependencies']['reports']['view'],
+            ['items', 'locations', 'stock-entries', 'inspections', 'depreciation'],
+        )
 
 
 class CapabilitiesEndpointCategoriesTests(TestCase):

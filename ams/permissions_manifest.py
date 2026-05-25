@@ -168,7 +168,7 @@ MODULES: dict[str, ModuleSpec] = {
                 "inventory.edit_stock_entries",
                 "inventory.acknowledge_stockentry",
             ],
-            "reads": ["items", "locations", "persons", "stock-registers", "stock-allocations"],
+            "reads": ["items", "locations", "employees", "stock-registers", "stock-allocations"],
         },
         "full": {
             "perms": [
@@ -179,7 +179,30 @@ MODULES: dict[str, ModuleSpec] = {
                 "inventory.acknowledge_stockentry",
                 "inventory.approve_stock_corrections",
             ],
-            "reads": ["items", "locations", "persons", "stock-registers", "stock-allocations"],
+            "reads": ["items", "locations", "employees", "stock-registers", "stock-allocations"],
+        },
+    },
+    "employees": {
+        "view": {
+            "perms": ["inventory.view_employees"],
+            "reads": [],
+        },
+        "manage": {
+            "perms": [
+                "inventory.view_employees",
+                "inventory.create_employees",
+                "inventory.edit_employees",
+            ],
+            "reads": ["locations"],
+        },
+        "full": {
+            "perms": [
+                "inventory.view_employees",
+                "inventory.create_employees",
+                "inventory.edit_employees",
+                "inventory.delete_employees",
+            ],
+            "reads": ["locations"],
         },
     },
     "stock-registers": {
@@ -203,6 +226,19 @@ MODULES: dict[str, ModuleSpec] = {
                 "inventory.delete_stock_registers",
             ],
             "reads": ["locations"],
+        },
+    },
+    "reports": {
+        "view": {
+            "perms": ["inventory.view_reports"],
+            "reads": [
+                "items",
+                "locations",
+                "stock-entries",
+                "stock-allocations",
+                "inspections",
+                "depreciation",
+            ],
         },
     },
     "inspections": {
@@ -295,8 +331,10 @@ READ_PERMS: dict[str, list[str]] = {
     "categories": ["inventory.view_categories"],
     "items": ["inventory.view_items"],
     "stock-entries": ["inventory.view_stock_entries"],
-    "persons": ["inventory.view_person"],
+    "employees": ["inventory.view_employees"],
+    "persons": ["inventory.view_employees", "inventory.view_person"],
     "stock-registers": ["inventory.view_stock_registers", "inventory.view_stockregister"],
+    "reports": ["inventory.view_reports"],
     "stock-allocations": ["inventory.view_stockallocation"],
     "inspections": ["inventory.view_inspectioncertificate"],
     "depreciation": ["inventory.view_depreciation"],

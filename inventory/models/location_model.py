@@ -78,6 +78,7 @@ class Location(models.Model):
             ("create_locations", "Can create locations module records"),
             ("edit_locations", "Can edit locations module records"),
             ("delete_locations", "Can delete locations module records"),
+            ("view_reports", "Can view reports module"),
             ("manage_all_locations", "Can access all locations regardless of hierarchy"),
             ("create_standalone_location", "Can create standalone locations"),
             ("create_store_location", "Can create store locations"),

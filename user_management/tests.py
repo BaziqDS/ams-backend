@@ -270,6 +270,43 @@ class CapabilityManifestStockRegistersTests(TestCase):
         self.assertEqual(caps['stock-registers'], 'manage')
 
 
+class CapabilityManifestReportsTests(TestCase):
+    def _perm(self, dotted):
+        app_label, codename = dotted.split('.', 1)
+        return Permission.objects.get(content_type__app_label=app_label, codename=codename)
+
+    def test_resolve_reports_view_includes_report_and_data_read_perms(self):
+        resolved = resolve_selections_to_codenames({'reports': 'view'})
+
+        self.assertIn('inventory.view_reports', resolved)
+        self.assertIn('inventory.view_items', resolved)
+        self.assertIn('inventory.view_locations', resolved)
+        self.assertIn('inventory.view_stock_entries', resolved)
+        self.assertIn('inventory.view_stockallocation', resolved)
+        self.assertIn('inventory.view_inspectioncertificate', resolved)
+        self.assertIn('inventory.view_depreciation', resolved)
+
+    def test_reports_module_declared_as_view_only(self):
+        self.assertIn('reports', MODULES)
+        self.assertEqual(list(MODULES['reports'].keys()), ['view'])
+
+    def test_reports_read_perm_declared(self):
+        self.assertEqual(
+            READ_PERMS.get('reports'),
+            ['inventory.view_reports'],
+        )
+
+    def test_compute_capabilities_reports_reports_level(self):
+        user = User.objects.create_user(username='cap_reports', password='x')
+        group = Group.objects.create(name='Reports View')
+        for dotted in MODULES['reports']['view']['perms']:
+            group.permissions.add(self._perm(dotted))
+        user.groups.add(group)
+
+        caps = compute_capabilities_for_user(user)
+        self.assertEqual(caps['reports'], 'view')
+
+
 class CapabilityManifestStockRegistersImplicationTests(TestCase):
     def _perm(self, dotted):
         app_label, codename = dotted.split('.', 1)

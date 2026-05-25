@@ -61,6 +61,27 @@ class StockEntryPermission(permissions.BasePermission):
         return False
 
 
+class EmployeePermission(permissions.BasePermission):
+    """Domain-permission gate for /api/inventory/employees/ and /persons/."""
+
+    def has_permission(self, request, view):  # type: ignore[override]
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+
+        if request.method in permissions.SAFE_METHODS:
+            return _has_perm(user, "inventory.view_employees") or _has_perm(user, "inventory.view_person")
+        if request.method == "POST":
+            return _has_perm(user, "inventory.create_employees")
+        if request.method in {"PUT", "PATCH"}:
+            return _has_perm(user, "inventory.edit_employees")
+        if request.method == "DELETE":
+            return _has_perm(user, "inventory.delete_employees")
+        return False
+
+
 class CategoryPermission(permissions.BasePermission):
     """Domain-permission gate for /api/inventory/categories/."""
 

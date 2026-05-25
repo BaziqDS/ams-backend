@@ -224,14 +224,6 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
-        if user.is_superuser or user.has_perm('inventory.view_all_inspections'):
-            return queryset
-        if not hasattr(user, 'profile'):
-            return queryset.none()
-
-        accessible_locations = user.profile.get_inspection_department_locations()
-        queryset = queryset.filter(department__in=accessible_locations).distinct()
-
         raw_location_ids = self.request.query_params.getlist('location') or self.request.query_params.getlist('location_id')
         selected_ids = []
         for raw in raw_location_ids:
@@ -241,7 +233,17 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 except (TypeError, ValueError):
                     continue
 
-        if selected_ids and user.profile.has_root_inspection_scope():
+        if user.is_superuser or user.has_perm('inventory.view_all_inspections'):
+            if selected_ids:
+                return queryset.filter(department_id__in=selected_ids).distinct()
+            return queryset
+        if not hasattr(user, 'profile'):
+            return queryset.none()
+
+        accessible_locations = user.profile.get_inspection_department_locations()
+        queryset = queryset.filter(department__in=accessible_locations).distinct()
+
+        if selected_ids:
             queryset = queryset.filter(
                 department_id__in=accessible_locations.filter(id__in=selected_ids).values_list('id', flat=True)
             )
