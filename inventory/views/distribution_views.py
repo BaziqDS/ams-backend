@@ -228,6 +228,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             'location',
             'location__parent_location',
             'item',
+            'item__category',
             'batch'
         ).prefetch_related(
             'location__tags',
@@ -264,3 +265,51 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'], url_path='scope-options')
     def scope_options(self, request):
         return Response(get_item_scope_options(request.user))
+
+    @action(detail=False, methods=['get'], url_path='tag-options')
+    def tag_options(self, request):
+        """
+        Location tag choices for reports.
+
+        Tags assigned to a standalone are exposed as effective filter tags for
+        its child stock locations, without mutating or displaying them as direct
+        child-location assignments elsewhere in the system.
+        """
+        accessible_locations = get_item_scope_locations(
+            request.user,
+            get_scope_tokens_from_request(request),
+        ).select_related('parent_location').prefetch_related('tags')
+
+        tags_by_id = {}
+        standalone_ids = set()
+        for location in accessible_locations:
+            for tag in location.tags.all():
+                if tag.is_active:
+                    tags_by_id[tag.id] = tag
+            standalone = location.get_parent_standalone()
+            if standalone:
+                standalone_ids.add(standalone.id)
+
+        if standalone_ids:
+            for standalone in Location.objects.filter(
+                id__in=standalone_ids,
+                is_active=True,
+            ).prefetch_related('tags'):
+                for tag in standalone.tags.all():
+                    if tag.is_active:
+                        tags_by_id[tag.id] = tag
+
+        options = [
+            {
+                'id': tag.id,
+                'name': tag.name,
+                'code': tag.code,
+                'category': tag.category,
+                'category_display': tag.get_category_display(),
+                'label': f"{tag.get_category_display()}: {tag.name}",
+                'color': tag.color,
+                'is_active': tag.is_active,
+            }
+            for tag in sorted(tags_by_id.values(), key=lambda item: (item.get_category_display(), item.name))
+        ]
+        return Response(options)

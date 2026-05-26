@@ -30,6 +30,7 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
             'item__category',
             'current_location',
             'current_location__parent_location',
+            'authority_store',
             'created_by',
             'inspection_certificate',
             'fixed_asset_entry',
@@ -76,18 +77,27 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     def _build_instance_serializer_maps(self, instances):
         instance_list = list(instances)
         instance_ids = [instance.id for instance in instance_list]
-        item_ids = {
-            instance.item_id
+        allocated_instance_ids = [
+            instance.id
             for instance in instance_list
-            if instance.status == 'ALLOCATED' and instance.item_id
-        }
+            if instance.status == 'ALLOCATED'
+        ]
 
-        allocation_by_item_batch = {}
-        if item_ids:
+        allocation_by_instance = {}
+        if allocated_instance_ids:
+            instance_entry_pairs = list(
+                StockEntryItem.objects.filter(
+                    instances__id__in=allocated_instance_ids,
+                    stock_entry__allocations__status=AllocationStatus.ALLOCATED,
+                )
+                .values_list('instances__id', 'stock_entry_id')
+                .distinct()
+            )
+            stock_entry_ids = {stock_entry_id for _, stock_entry_id in instance_entry_pairs}
+            allocation_by_stock_entry = {}
             allocations = (
                 StockAllocation.objects.filter(
-                    item_id__in=item_ids,
-                    batch__isnull=True,
+                    stock_entry_id__in=stock_entry_ids,
                     status=AllocationStatus.ALLOCATED,
                 )
                 .filter(Q(allocated_to_person__isnull=False) | Q(allocated_to_location__isnull=False))
@@ -95,9 +105,12 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 .order_by('-allocated_at')
             )
             for allocation in allocations:
-                key = (allocation.item_id, allocation.batch_id)
-                if key not in allocation_by_item_batch:
-                    allocation_by_item_batch[key] = allocation
+                if allocation.stock_entry_id not in allocation_by_stock_entry:
+                    allocation_by_stock_entry[allocation.stock_entry_id] = allocation
+            for instance_id, stock_entry_id in instance_entry_pairs:
+                allocation = allocation_by_stock_entry.get(stock_entry_id)
+                if allocation and instance_id not in allocation_by_instance:
+                    allocation_by_instance[instance_id] = allocation
 
         stock_entry_ids_by_instance = defaultdict(list)
         if instance_ids:
@@ -111,7 +124,7 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 stock_entry_ids_by_instance[instance_id].append(stock_entry_id)
 
         return {
-            'allocation_by_item_batch': allocation_by_item_batch,
+            'allocation_by_instance': allocation_by_instance,
             'stock_entry_ids_by_instance': dict(stock_entry_ids_by_instance),
         }
 

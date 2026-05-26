@@ -3,6 +3,9 @@ from ..models.allocation_model import StockAllocation, AllocationStatus
 
 class StockAllocationSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source='item.name', read_only=True)
+    item_code = serializers.CharField(source='item.code', read_only=True)
+    item_category_type = serializers.CharField(source='item.category.get_category_type', read_only=True)
+    item_subcategory_name = serializers.CharField(source='item.category.name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True, allow_null=True)
     source_location_name = serializers.CharField(source='source_location.name', read_only=True)
     allocated_to_person_name = serializers.CharField(source='allocated_to_person.name', read_only=True, allow_null=True)
@@ -13,7 +16,8 @@ class StockAllocationSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockAllocation
         fields = (
-            'id', 'item', 'item_name', 'batch', 'batch_number',
+            'id', 'item', 'item_name', 'item_code', 'item_category_type', 'item_subcategory_name',
+            'batch', 'batch_number',
             'source_location', 'source_location_name',
             'allocated_to_person', 'allocated_to_person_name',
             'allocated_to_location', 'allocated_to_location_name',

@@ -32,6 +32,15 @@ def _has(queryset_or_manager):
     return queryset_or_manager.exists()
 
 
+def _has_related(instance, related_name, to_attr=None):
+    if to_attr and hasattr(instance, to_attr):
+        return bool(getattr(instance, to_attr))
+    prefetched = getattr(instance, '_prefetched_objects_cache', {})
+    if related_name in prefetched:
+        return bool(prefetched[related_name])
+    return _has(getattr(instance, related_name).all())
+
+
 def category_delete_blockers(category):
     blockers = []
     if _has(category.subcategories.all()):
@@ -125,11 +134,11 @@ def stock_entry_delete_blockers(entry):
     blockers = []
     if entry.status != "DRAFT":
         blockers.append("This stock entry is an audit record; cancel it instead of deleting it.")
-    if _has(entry.correction_entries.all()):
+    if _has_related(entry, "correction_entries", "prefetched_correction_entries"):
         blockers.append("This stock entry has linked generated entries.")
-    if _has(entry.correction_requests.all()) or _has(entry.generated_by_correction_requests.all()):
+    if _has_related(entry, "correction_requests", "prefetched_correction_requests") or _has_related(entry, "generated_by_correction_requests"):
         blockers.append("This stock entry is linked to correction requests.")
-    if _has(entry.movements.all()) or _has(entry.allocations.all()):
+    if _has_related(entry, "movements") or _has_related(entry, "allocations"):
         blockers.append("This stock entry has movement or allocation history.")
     return blockers
 

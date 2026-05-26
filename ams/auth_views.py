@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -65,6 +66,13 @@ class CookieLoginView(APIView):
 
         user = authenticate(request, username=username, password=password)
         if user is None:
+            inactive_user = User.objects.filter(username=username, is_active=False).first()
+            if inactive_user is not None and inactive_user.check_password(password):
+                return Response(
+                    {'detail': 'Account disabled.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
             return Response(
                 {'detail': 'Invalid credentials.'},
                 status=status.HTTP_401_UNAUTHORIZED,

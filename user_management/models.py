@@ -24,6 +24,7 @@ class UserProfile(models.Model):
     """
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     employee_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    avatar = models.ImageField(upload_to='user_avatars/', null=True, blank=True)
     
     # Fundamental Access Control: WHERE is the user allowed to operate?
     assigned_locations = models.ManyToManyField(

@@ -36,6 +36,15 @@ class ItemInstance(models.Model):
     qr_code_image = models.ImageField(upload_to='qr_codes/', null=True, blank=True)
     
     current_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name='instances')
+    authority_store = models.ForeignKey(
+        Location,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='owned_instances',
+        limit_choices_to={'is_store': True},
+        help_text="Store that currently owns this instance. Allocations keep this store while current location may move.",
+    )
     status = models.CharField(max_length=20, choices=InstanceStatus.choices, default=InstanceStatus.AVAILABLE, db_index=True)
     
     # Metadata
@@ -122,6 +131,9 @@ class ItemInstance(models.Model):
         return self._clean_qr_value(getattr(self.current_location, 'name', None))
 
     def get_qr_owning_store(self):
+        if self.authority_store:
+            return self._clean_qr_value(self.authority_store.name)
+
         allocation = self.get_latest_active_allocation() if self.status == InstanceStatus.ALLOCATED else None
         if allocation and allocation.source_location:
             return self._clean_qr_value(allocation.source_location.name)

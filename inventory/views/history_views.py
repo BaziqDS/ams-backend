@@ -22,7 +22,9 @@ class MovementHistoryViewSet(viewsets.ReadOnlyModelViewSet):
             'instance',
             'batch',
             'stock_entry',
-            'allocation'
+            'allocation',
+            'allocation__allocated_to_person',
+            'allocation__allocated_to_location',
         ).order_by('-timestamp')
         
         item_id = self.request.query_params.get('item')

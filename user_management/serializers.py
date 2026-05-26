@@ -11,6 +11,7 @@ from inventory.models.location_model import Location
 
 class UserSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
+    avatar_url = serializers.SerializerMethodField()
     assigned_locations = serializers.PrimaryKeyRelatedField(
         source='profile.assigned_locations',
         many=True,
@@ -24,14 +25,24 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display')
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display', 'avatar_url')
 
 
     def get_permissions(self, obj):
         return list(obj.get_all_permissions())
 
+    def get_avatar_url(self, obj):
+        avatar = getattr(getattr(obj, 'profile', None), 'avatar', None)
+        if not avatar:
+            return None
+        request = self.context.get('request')
+        url = avatar.url
+        return request.build_absolute_uri(url) if request else url
+
 class UserManagementSerializer(serializers.ModelSerializer):
     employee_id = serializers.CharField(source='profile.employee_id', required=False, allow_blank=True)
+    avatar = serializers.ImageField(source='profile.avatar', required=False, allow_null=True, write_only=True)
+    avatar_url = serializers.SerializerMethodField()
     assigned_locations = serializers.PrimaryKeyRelatedField(
         source='profile.assigned_locations',
         many=True,
@@ -63,16 +74,18 @@ class UserManagementSerializer(serializers.ModelSerializer):
     is_active = serializers.BooleanField(source='profile.is_active', required=False)
     power_level = serializers.IntegerField(source='profile.power_level', read_only=True)
     password = serializers.CharField(write_only=True, required=False)
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     created_at = serializers.DateTimeField(source='profile.created_at', read_only=True)
 
     class Meta:
         model = User
         fields = (
             'id', 'username', 'email', 'first_name', 'last_name', 'password',
+            'current_password',
             'is_superuser', 'is_staff', 'is_active', 'power_level',
             'employee_id', 'assigned_locations', 'assigned_locations_display',
             'user_permissions_list', 'groups', 'groups_display', 'last_login',
-            'created_at',
+            'created_at', 'avatar', 'avatar_url',
         )
 
     def __init__(self, *args, **kwargs):
@@ -120,6 +133,14 @@ class UserManagementSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         user = getattr(request, 'user', None)
         return bool(user and user.is_authenticated and user.is_superuser)
+
+    def get_avatar_url(self, obj):
+        avatar = getattr(getattr(obj, 'profile', None), 'avatar', None)
+        if not avatar:
+            return None
+        request = self.context.get('request')
+        url = avatar.url
+        return request.build_absolute_uri(url) if request else url
 
     def _validate_django_privilege_flags(self, validated_data, instance=None):
         if self._request_user_can_manage_django_privileges():
@@ -189,6 +210,7 @@ class UserManagementSerializer(serializers.ModelSerializer):
         user_permissions = validated_data.pop('user_permissions', [])
         groups = validated_data.pop('groups', [])
         password = validated_data.pop('password', None)
+        validated_data.pop('current_password', None)
 
         self._validate_django_privilege_flags(validated_data)
 
@@ -246,8 +268,12 @@ class UserManagementSerializer(serializers.ModelSerializer):
         profile = user.profile
         if 'employee_id' in profile_data:
             profile.employee_id = profile_data['employee_id']
+        if 'avatar' in profile_data:
+            profile.avatar = profile_data['avatar']
         if 'is_active' in profile_data:
             profile.is_active = profile_data['is_active']
+            user.is_active = profile_data['is_active']
+            user.save(update_fields=['is_active'])
         if 'assigned_locations' in profile_data:
             profile.assigned_locations.set(profile_data['assigned_locations'])
         
@@ -256,6 +282,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop('profile', {})
+        password = validated_data.pop('password', None)
+        current_password = validated_data.pop('current_password', '')
         request = self.context.get('request')
         editing_self = (
             request is not None
@@ -264,8 +292,25 @@ class UserManagementSerializer(serializers.ModelSerializer):
             and instance.pk == request.user.pk
             and not request.user.is_superuser
         )
+        password_change_for_self = (
+            request is not None
+            and request.user is not None
+            and request.user.is_authenticated
+            and instance.pk == request.user.pk
+        )
+        editing_own_account = password_change_for_self
 
         self._validate_django_privilege_flags(validated_data, instance)
+
+        if editing_own_account and profile_data.get('is_active') is False:
+            raise serializers.ValidationError({
+                'is_active': "You cannot disable your own account.",
+            })
+
+        if password_change_for_self and password is not None and not instance.check_password(current_password):
+            raise serializers.ValidationError({
+                'current_password': "Enter your current password to change your password.",
+            })
 
         if editing_self and 'assigned_locations' in profile_data:
             incoming_ids = {loc.pk for loc in profile_data['assigned_locations']}
@@ -357,6 +402,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
         instance.last_name = validated_data.get('last_name', instance.last_name)
         instance.is_superuser = validated_data.get('is_superuser', instance.is_superuser)
         instance.is_staff = validated_data.get('is_staff', instance.is_staff)
+        if password is not None:
+            instance.set_password(password)
 
         if 'user_permissions_list' in validated_data:
             instance.user_permissions.set(validated_data['user_permissions_list'])
@@ -370,12 +417,17 @@ class UserManagementSerializer(serializers.ModelSerializer):
         profile = instance.profile
         if 'employee_id' in profile_data:
             profile.employee_id = profile_data['employee_id']
+        if 'avatar' in profile_data:
+            profile.avatar = profile_data['avatar']
         if 'is_active' in profile_data:
             profile.is_active = profile_data['is_active']
+            instance.is_active = profile_data['is_active']
         if 'assigned_locations' in profile_data:
             profile.assigned_locations.set(profile_data['assigned_locations'])
 
         profile.save()
+        if 'is_active' in profile_data:
+            instance.save(update_fields=['is_active'])
         return instance
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -384,7 +436,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserProfile
-        fields = ('id', 'user', 'employee_id', 'assigned_locations', 'assigned_locations_display', 'is_active', 'created_at', 'updated_at')
+        fields = ('id', 'user', 'employee_id', 'avatar', 'assigned_locations', 'assigned_locations_display', 'is_active', 'created_at', 'updated_at')
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)

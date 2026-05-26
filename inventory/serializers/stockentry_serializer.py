@@ -84,6 +84,11 @@ class StockEntryItemSerializer(serializers.ModelSerializer):
         cached = getattr(obj, '_source_inspection_item_cache', None)
         if cached is not None:
             return cached
+        source_map = self.context.get('stock_entry_source_inspections')
+        if source_map is not None:
+            source = source_map.get((obj.item_id, batch_number))
+            obj._source_inspection_item_cache = source
+            return source
 
         source = (
             InspectionItem.objects

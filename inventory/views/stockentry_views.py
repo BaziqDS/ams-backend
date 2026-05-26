@@ -8,6 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.person_model import Person
 from ..models.correction_model import CorrectionResolutionType, StockCorrectionRequest
+from ..models.inspection_model import InspectionItem
 from ..models.stockentry_model import StockEntry, StockEntryItem
 from ..serializers.stockentry_serializer import PersonSerializer, StockEntrySerializer
 from ..services.deletion_policy import DeletionBlocked, delete_with_policy
@@ -119,7 +120,7 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
                 'batch',
                 'stock_register',
                 'ack_stock_register',
-            ).prefetch_related('instances'),
+            ).prefetch_related('instances', 'accepted_instances'),
         ),
         Prefetch(
             'correction_requests',
@@ -133,14 +134,67 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         ),
         Prefetch(
             'correction_entries',
+            queryset=StockEntry.objects.order_by('id'),
+            to_attr='prefetched_correction_entries',
+        ),
+        Prefetch(
+            'correction_entries',
             queryset=StockEntry.objects.filter(reference_purpose='REPLACEMENT').order_by('-created_at'),
             to_attr='prefetched_replacement_entries',
         ),
+        'generated_by_correction_requests',
+        'movements',
+        'allocations',
     ).order_by('-entry_date')
     serializer_class = StockEntrySerializer
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['entry_number', 'remarks']
+
+    def _add_source_inspection_context(self, context, entries):
+        pairs = set()
+        for entry in entries:
+            entry_items = getattr(entry, '_prefetched_objects_cache', {}).get('items')
+            if entry_items is None:
+                entry_items = entry.items.all()
+            for entry_item in entry_items:
+                batch_number = getattr(getattr(entry_item, 'batch', None), 'batch_number', None)
+                if entry_item.item_id and entry_item.batch_id and batch_number:
+                    pairs.add((entry_item.item_id, batch_number))
+
+        if not pairs:
+            context['stock_entry_source_inspections'] = {}
+            return
+
+        item_ids = {item_id for item_id, _batch_number in pairs}
+        batch_numbers = {batch_number for _item_id, batch_number in pairs}
+        source_map = {}
+        for source in (
+            InspectionItem.objects
+            .select_related('inspection_certificate', 'inspection_certificate__department')
+            .filter(item_id__in=item_ids, batch_number__in=batch_numbers)
+            .order_by('item_id', 'batch_number', '-inspection_certificate__date', '-id')
+        ):
+            key = (source.item_id, source.batch_number)
+            if key in pairs and key not in source_map:
+                source_map[key] = source
+        context['stock_entry_source_inspections'] = source_map
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            context = self.get_serializer_context()
+            self._add_source_inspection_context(context, page)
+            serializer = self.get_serializer(page, many=True, context=context)
+            return self.get_paginated_response(serializer.data)
+
+        entries = list(queryset)
+        context = self.get_serializer_context()
+        self._add_source_inspection_context(context, entries)
+        serializer = self.get_serializer(entries, many=True, context=context)
+        return Response(serializer.data)
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()

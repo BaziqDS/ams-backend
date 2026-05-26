@@ -61,6 +61,42 @@ class CookieRefreshRotationTests(TestCase):
         self.assertEqual(replay_resp.status_code, 401)
 
 
+class CookieLoginAccountStatusTests(TestCase):
+    def test_disabled_user_with_correct_password_gets_account_disabled_message(self):
+        User.objects.create_user(
+            username='disabled_login_user',
+            password='CorrectPass123!',
+            is_active=False,
+        )
+        client = APIClient()
+
+        resp = client.post(
+            '/auth/cookie/login/',
+            {'username': 'disabled_login_user', 'password': 'CorrectPass123!'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.data['detail'], 'Account disabled.')
+
+    def test_disabled_user_with_wrong_password_still_gets_invalid_credentials(self):
+        User.objects.create_user(
+            username='disabled_wrong_password_user',
+            password='CorrectPass123!',
+            is_active=False,
+        )
+        client = APIClient()
+
+        resp = client.post(
+            '/auth/cookie/login/',
+            {'username': 'disabled_wrong_password_user', 'password': 'WrongPass123!'},
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.data['detail'], 'Invalid credentials.')
+
+
 class DjoserUserCreatePermissionTests(TestCase):
     def test_authenticated_user_cannot_create_account_via_djoser(self):
         user = User.objects.create_user(username='ordinary_creator', password='pw')

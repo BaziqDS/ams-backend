@@ -11,7 +11,7 @@ from .utils import ScopedViewSetMixin
 
 class StockAllocationViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = StockAllocation.objects.all().select_related(
-        'item', 'batch', 'source_location', 
+        'item', 'item__category', 'batch', 'source_location',
         'allocated_to_person', 'allocated_to_location', 
         'allocated_by', 'stock_entry'
     ).order_by('-allocated_at')
