@@ -101,6 +101,38 @@ class InspectionRelatedStockEntrySerializer(serializers.ModelSerializer):
         model = StockEntry
         fields = ('id', 'entry_number', 'entry_type', 'status', 'entry_date')
 
+
+class InspectionCertificateListSerializer(serializers.ModelSerializer):
+    department_name = serializers.CharField(source='department.name', read_only=True)
+    department_hierarchy_level = serializers.IntegerField(source='department.hierarchy_level', read_only=True)
+    initiated_by_name = serializers.CharField(source='initiated_by.username', read_only=True)
+    stock_filled_by_name = serializers.CharField(source='stock_filled_by.username', read_only=True, allow_null=True)
+    central_store_filled_by_name = serializers.CharField(source='central_store_filled_by.username', read_only=True, allow_null=True)
+    finance_reviewed_by_name = serializers.CharField(source='finance_reviewed_by.username', read_only=True, allow_null=True)
+    revision_requested_by_name = serializers.CharField(source='revision_requested_by.username', read_only=True, allow_null=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.username', read_only=True, allow_null=True)
+
+    class Meta:
+        model = InspectionCertificate
+        fields = (
+            'id', 'date', 'contract_no', 'contract_date',
+            'contractor_name', 'contractor_address',
+            'indenter', 'indent_no', 'department', 'department_name',
+            'department_hierarchy_level',
+            'date_of_delivery', 'delivery_type', 'remarks',
+            'inspected_by', 'date_of_inspection',
+            'consignee_name', 'consignee_designation',
+            'stage', 'status',
+            'initiated_by', 'initiated_by_name', 'initiated_at',
+            'stock_filled_by', 'stock_filled_by_name', 'stock_filled_at',
+            'central_store_filled_by', 'central_store_filled_by_name', 'central_store_filled_at',
+            'finance_reviewed_at', 'finance_reviewed_by', 'finance_reviewed_by_name', 'finance_check_date',
+            'revision_requested_by', 'revision_requested_by_name', 'revision_requested_at', 'revision_requested_reason', 'revision_requested_from_stage',
+            'rejected_by', 'rejected_by_name', 'rejected_at', 'rejection_reason', 'rejection_stage',
+            'created_at', 'updated_at'
+        )
+
+
 class InspectionCertificateSerializer(serializers.ModelSerializer):
     items = InspectionItemSerializer(many=True)
     documents = InspectionDocumentSerializer(many=True, read_only=True)

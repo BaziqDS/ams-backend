@@ -109,3 +109,17 @@ class LocationSerializer(serializers.ModelSerializer):
         model = Location
         fields = '__all__'
         read_only_fields = ('created_by', 'hierarchy_level', 'hierarchy_path', 'auto_created_store')
+
+
+class LocationListSerializer(LocationSerializer):
+    """Location rows for filters and selectors.
+
+    Deletion blockers are intentionally excluded from high-volume list
+    responses; delete attempts still run the full deletion policy server-side.
+    """
+
+    def get_fields(self):
+        fields = super().get_fields()
+        fields.pop('can_delete', None)
+        fields.pop('delete_blockers', None)
+        return fields

@@ -4,7 +4,7 @@ from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models.location_model import Location, LocationTag, LocationType
-from ..serializers.location_serializer import LocationSerializer, LocationTagSerializer
+from ..serializers.location_serializer import LocationListSerializer, LocationSerializer, LocationTagSerializer
 from ..permissions import LocationPermission
 from ..services.deletion_policy import DeletionBlocked, delete_with_policy
 from user_management.models import UserProfile
@@ -16,6 +16,14 @@ def _is_truthy(value):
     if isinstance(value, (list, tuple)):
         value = value[0] if value else False
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _with_location_serializer_relations(queryset):
+    return queryset.select_related(
+        'parent_location',
+        'created_by',
+        'auto_created_store',
+    ).prefetch_related('tags')
 
 
 class LocationTagViewSet(viewsets.ModelViewSet):
@@ -38,13 +46,14 @@ class LocationViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter]
     search_fields = ['name', 'code']
 
+    def get_serializer_class(self):
+        if self.action in {'list', 'assignable', 'transferrable', 'allocatable_targets'}:
+            return LocationListSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         # Add select_related to avoid N+1 on parent_location
-        queryset = Location.objects.select_related(
-            'parent_location',
-            'created_by',
-            'auto_created_store'
-        ).prefetch_related('tags').all()
+        queryset = _with_location_serializer_relations(Location.objects.all())
         
         user = self.request.user
         if user.is_superuser:
@@ -218,10 +227,12 @@ class LocationViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         if user.is_superuser:
-            queryset = Location.objects.filter(is_active=True)
+            queryset = self.get_queryset().filter(is_active=True)
         else:
             try:
-                queryset = user.profile.get_assignable_locations_for_user_management()
+                queryset = _with_location_serializer_relations(
+                    user.profile.get_assignable_locations_for_user_management()
+                )
             except UserProfile.DoesNotExist:
                 queryset = Location.objects.none()
 

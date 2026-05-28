@@ -86,6 +86,19 @@ def get_item_scope_options(user):
                 "kind": "root",
                 "location_id": root.id,
             })
+        standalones = Location.objects.filter(
+            is_standalone=True,
+            is_active=True,
+        ).exclude(
+            parent_location__isnull=True,
+        ).order_by('name')
+        for standalone in standalones:
+            options.append({
+                "id": f"standalone:{standalone.id}",
+                "label": standalone.name,
+                "kind": "standalone",
+                "location_id": standalone.id,
+            })
         return {"options": options, "default": ["all"], "is_root_scope": True}
 
     root_scope = user_has_root_item_scope(user)

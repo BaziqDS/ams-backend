@@ -9,9 +9,9 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source='item.code', read_only=True)
     item_category_name = serializers.CharField(source='item.category.name', read_only=True)
     item_model_number = serializers.CharField(source='item.model_number', read_only=True)
-    location_name = serializers.CharField(source='current_location.name', read_only=True)
-    location_code = serializers.CharField(source='current_location.code', read_only=True)
-    full_location_path = serializers.CharField(source='current_location.hierarchy_path', read_only=True)
+    location_name = serializers.SerializerMethodField()
+    location_code = serializers.SerializerMethodField()
+    full_location_path = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
     
     in_charge = serializers.SerializerMethodField()
@@ -32,11 +32,11 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             'id', 'item', 'item_name', 'item_code', 'item_category_name', 'item_model_number',
             'serial_number', 'qr_code', 'qr_code_image',
             'current_location', 'location_name', 'location_code', 'full_location_path',
-            'status', 'in_charge', 'authority_store_name', 'authority_store_code',
+            'authority_store', 'status', 'in_charge', 'authority_store_name', 'authority_store_code',
             'inspection_certificate', 'inspection_certificate_id', 'allocated_to', 'allocated_to_type',
             'stock_entry_ids', 'depreciation_summary', 'is_active', 'created_at', 'updated_at', 'created_by_name'
         ]
-        read_only_fields = ('created_at', 'updated_at', 'created_by')
+        read_only_fields = ('authority_store', 'created_at', 'updated_at', 'created_by')
 
     def _get_latest_allocation(self, obj):
         """
@@ -49,9 +49,9 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             if allocations:
                 return allocations[0]  # Already ordered by -allocated_at in prefetch
 
-        allocation_by_item_batch = self.context.get('allocation_by_item_batch')
-        if allocation_by_item_batch is not None:
-            return allocation_by_item_batch.get((obj.item_id, None))
+        allocation_by_instance = self.context.get('allocation_by_instance')
+        if allocation_by_instance is not None:
+            return allocation_by_instance.get(obj.id)
         
         # Fallback: Use the same allocation across all three methods
         # Cache on the object to avoid repeated queries in same serialization
@@ -62,6 +62,8 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
                 batch=None,
                 status=AllocationStatus.ALLOCATED
             ).filter(
+                stock_entry__items__instances=obj,
+            ).filter(
                 models.Q(allocated_to_person__isnull=False) | models.Q(allocated_to_location__isnull=False)
             ).select_related(
                 'allocated_to_person',
@@ -70,6 +72,31 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
             ).order_by('-allocated_at').first()
         
         return obj._cached_allocation
+
+    def get_location_name(self, obj):
+        latest_alloc = self._get_latest_allocation(obj) if obj.status == 'ALLOCATED' else None
+        if latest_alloc and latest_alloc.allocated_to_person:
+            return f"Allocated to {latest_alloc.allocated_to_person.name}"
+        if latest_alloc and latest_alloc.allocated_to_location:
+            return latest_alloc.allocated_to_location.name
+        return obj.current_location.name if obj.current_location else None
+
+    def get_location_code(self, obj):
+        latest_alloc = self._get_latest_allocation(obj) if obj.status == 'ALLOCATED' else None
+        if latest_alloc and latest_alloc.allocated_to_person:
+            return 'PERSON'
+        if latest_alloc and latest_alloc.allocated_to_location:
+            return latest_alloc.allocated_to_location.code
+        return obj.current_location.code if obj.current_location else None
+
+    def get_full_location_path(self, obj):
+        latest_alloc = self._get_latest_allocation(obj) if obj.status == 'ALLOCATED' else None
+        if latest_alloc and latest_alloc.allocated_to_person:
+            source_name = latest_alloc.source_location.name if latest_alloc.source_location else None
+            return f"{source_name} / {latest_alloc.allocated_to_person.name}" if source_name else latest_alloc.allocated_to_person.name
+        if latest_alloc and latest_alloc.allocated_to_location:
+            return latest_alloc.allocated_to_location.hierarchy_path
+        return obj.current_location.hierarchy_path if obj.current_location else None
 
     def get_in_charge(self, obj):
         if obj.status == 'ALLOCATED':
@@ -118,17 +145,11 @@ class ItemInstanceSerializer(serializers.ModelSerializer):
         return depreciation_summary_for_asset(asset) or empty_depreciation_summary()
 
     def get_authority_store_name(self, obj):
-        # Use prefetched parent_location relationship instead of method call
-        if obj.current_location and obj.current_location.parent_location:
-            main_store = obj.current_location.parent_location
-            if main_store.is_store:
-                return main_store.name
+        if obj.authority_store:
+            return obj.authority_store.name
         return "N/A"
 
     def get_authority_store_code(self, obj):
-        # Use prefetched parent_location relationship instead of method call
-        if obj.current_location and obj.current_location.parent_location:
-            main_store = obj.current_location.parent_location
-            if main_store.is_store:
-                return main_store.code
+        if obj.authority_store:
+            return obj.authority_store.code
         return "N/A"

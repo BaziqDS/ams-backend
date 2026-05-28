@@ -868,6 +868,25 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
         self.assertIn('groups', resp.data)
         self.assertEqual(set(manager.groups.values_list('id', flat=True)), {assigned_group.id})
 
+    def test_user_manager_can_update_user_password(self):
+        manager = self._make_user_manager('csit_password_manager', self.csit)
+        manager.user_permissions.add(self._perm('edit_user_accounts'))
+        target = self._make_managed_user('csit_password_target', self.csit_lab)
+        self.client.force_authenticate(user=manager)
+
+        resp = self.client.patch(
+            f'/api/users/management/{target.id}/',
+            {
+                'password': 'NewStrongPass123!',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        target.refresh_from_db()
+        self.assertTrue(target.check_password('NewStrongPass123!'))
+        self.assertFalse(target.check_password('pw'))
+
     def test_non_superuser_user_manager_cannot_create_staff_or_superuser(self):
         manager = self._make_user_manager('csit_privilege_create_blocked', self.csit)
         manager.user_permissions.add(self._perm('assign_user_locations'))

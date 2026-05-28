@@ -22,6 +22,7 @@ from inventory.models import (
     ItemBatch,
     ItemInstance,
     Location,
+    LocationTag,
     LocationType,
     Person,
     AllocationStatus,
@@ -1359,6 +1360,10 @@ class InspectionTrackingIntakeTests(TestCase):
 
         instances = ItemInstance.objects.filter(item=self.asset_item)
         self.assertEqual(instances.count(), 2)
+        self.assertTrue(
+            instances.filter(authority_store=self.department.auto_created_store).count(),
+            2,
+        )
         self.assertNotIn('batch', {field.name for field in ItemInstance._meta.get_fields()})
         self.assertFalse(ItemBatch.objects.filter(item=self.asset_item).exists())
         receipt_item = StockEntryItem.objects.get(
@@ -2728,6 +2733,82 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertIn(f'store:{self.store.id}', option_ids)
         self.assertNotIn(f'standalone:{self.ee.id}', option_ids)
 
+    def test_distribution_scope_options_expose_standalones_for_root_user(self):
+        user = User.objects.create_superuser(
+            username='item_distribution_scope_root',
+            password='pw',
+            email='root@example.com',
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/distribution/scope-options/')
+
+        self.assertEqual(resp.status_code, 200)
+        option_ids = {row['id'] for row in resp.data['options']}
+        self.assertIn('all', option_ids)
+        self.assertIn(f'root:{self.root.id}', option_ids)
+        self.assertIn(f'standalone:{self.csit.id}', option_ids)
+        self.assertIn(f'standalone:{self.ee.id}', option_ids)
+
+    def test_distribution_rows_include_parent_standalone_tags_for_reporting_filters(self):
+        tag = LocationTag.objects.create(name='Engineering Faculty', category='DEAN_FACULTY')
+        self.csit.tags.add(tag)
+        user = self._make_user('item_distribution_standalone_tag')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/distribution/')
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+        csit_store_row = next(row for row in payload if row['location'] == self.store.id)
+        self.assertIn(tag.id, csit_store_row['location_tags'])
+        self.assertIn('Dean Faculty: Engineering Faculty', [
+            row['label'] for row in csit_store_row['location_tags_display']
+        ])
+
+    def test_distribution_tag_options_include_parent_standalone_tags(self):
+        tag = LocationTag.objects.create(name='Engineering Faculty', category='DEAN_FACULTY')
+        self.csit.tags.add(tag)
+        user = self._make_user('item_distribution_tag_options')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/distribution/tag-options/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('Dean Faculty: Engineering Faculty', [row['label'] for row in resp.data])
+
+    def test_distribution_rows_expose_report_subcategory_and_contract_number(self):
+        certificate = InspectionCertificate.objects.create(
+            contract_no='IC-REPORT-001',
+            contractor_name='Report Supplier',
+            indenter='CSIT',
+            indent_no='IND-REPORT-001',
+            department=self.csit,
+            stage=InspectionStage.COMPLETED,
+            status='COMPLETED',
+        )
+        InspectionItem.objects.create(
+            inspection_certificate=certificate,
+            item=self.item,
+            item_description='Processor shipment',
+            tendered_quantity=5,
+            accepted_quantity=5,
+            batch_number=self.batch.batch_number,
+        )
+        user = self._make_user('item_distribution_report_fields')
+        user.user_permissions.add(self._perm('view_items'))
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get('/api/inventory/distribution/')
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data['results'] if isinstance(resp.data, dict) and 'results' in resp.data else resp.data
+        csit_store_row = next(row for row in payload if row['location'] == self.store.id)
+        self.assertEqual(csit_store_row['subcategory_name'], self.subcategory.name)
+        self.assertIn('IC-REPORT-001', csit_store_row['source_inspection_contracts'])
+
     def test_batches_allow_domain_view_items_perm(self):
         user = self._make_user('item_batch_view')
         user.user_permissions.add(self._perm('view_items'))
@@ -2975,7 +3056,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
             },
             format='json',
         )
-        self.assertEqual(ack_resp.status_code, 200)
+        self.assertEqual(ack_resp.status_code, 200, ack_resp.data)
         issue.refresh_from_db()
         return issue
 
@@ -3031,7 +3112,7 @@ class StockEntryApiDomainPermissionTests(TestCase):
             },
             format='json',
         )
-        self.assertEqual(ack_resp.status_code, 200)
+        self.assertEqual(ack_resp.status_code, 200, ack_resp.data)
         return_entry.refresh_from_db()
         return return_entry
 
@@ -3704,8 +3785,15 @@ class StockEntryApiDomainPermissionTests(TestCase):
         instance = ItemInstance.objects.create(
             item=individual_item,
             current_location=self.store,
+            authority_store=self.store,
             status='AVAILABLE',
             created_by=user,
+        )
+        StockRecord.objects.create(
+            item=individual_item,
+            batch=None,
+            location=self.store,
+            quantity=1,
         )
 
         payload = {
@@ -3758,6 +3846,145 @@ class StockEntryApiDomainPermissionTests(TestCase):
         receipt_item.refresh_from_db()
         self.assertEqual(list(receipt_item.instances.values_list('id', flat=True)), [instance.id])
         self.assertEqual(list(receipt_item.accepted_instances.values_list('id', flat=True)), [instance.id])
+        instance.refresh_from_db()
+        self.assertEqual(instance.current_location, self.child_store)
+        self.assertEqual(instance.authority_store, self.child_store)
+
+    def test_individual_allocation_to_non_store_keeps_authority_store_and_moves_current_location(self):
+        user = self._make_user('stock_entry_individual_non_store_allocation')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+
+        individual_parent = Category.objects.create(
+            name='Stock Entry Allocation Individual Hardware',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        individual_category = Category.objects.create(
+            name='Stock Entry Allocation Individual Device',
+            parent_category=individual_parent,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        individual_item = Item.objects.create(
+            name='Allocated Portable Device',
+            category=individual_category,
+            acct_unit='unit',
+        )
+        instance = ItemInstance.objects.create(
+            item=individual_item,
+            current_location=self.store,
+            authority_store=self.store,
+            status='AVAILABLE',
+            created_by=user,
+        )
+        StockRecord.objects.create(
+            item=individual_item,
+            batch=None,
+            location=self.store,
+            quantity=1,
+        )
+
+        payload = {
+            'entry_type': 'ISSUE',
+            'from_location': self.store.id,
+            'to_location': self.non_store_location.id,
+            'status': 'DRAFT',
+            'purpose': 'Individual allocation to lab',
+            'remarks': '',
+            'items': [
+                {
+                    'item': individual_item.id,
+                    'batch': None,
+                    'quantity': 1,
+                    'instances': [instance.id],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        instance.refresh_from_db()
+        self.assertEqual(instance.current_location, self.non_store_location)
+        self.assertEqual(instance.authority_store, self.store)
+        self.assertEqual(instance.status, 'ALLOCATED')
+
+    def test_individual_allocation_to_person_displays_person_as_current_location(self):
+        user = self._make_user('stock_entry_individual_person_allocation')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        user.user_permissions.add(self._perm('view_items'))
+
+        individual_parent = Category.objects.create(
+            name='Stock Entry Person Allocation Hardware',
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        individual_category = Category.objects.create(
+            name='Stock Entry Person Allocation Device',
+            parent_category=individual_parent,
+            category_type=CategoryType.FIXED_ASSET,
+            tracking_type=TrackingType.INDIVIDUAL,
+        )
+        individual_item = Item.objects.create(
+            name='Person Allocated Portable Device',
+            category=individual_category,
+            acct_unit='unit',
+        )
+        instance = ItemInstance.objects.create(
+            item=individual_item,
+            current_location=self.store,
+            authority_store=self.store,
+            status='AVAILABLE',
+            created_by=user,
+        )
+        StockRecord.objects.create(
+            item=individual_item,
+            batch=None,
+            location=self.store,
+            quantity=1,
+        )
+
+        payload = {
+            'entry_type': 'ISSUE',
+            'from_location': self.store.id,
+            'to_location': None,
+            'issued_to': self.person.id,
+            'status': 'DRAFT',
+            'purpose': 'Individual allocation to person',
+            'remarks': '',
+            'items': [
+                {
+                    'item': individual_item.id,
+                    'batch': None,
+                    'quantity': 1,
+                    'instances': [instance.id],
+                    'stock_register': None,
+                    'page_number': None,
+                    'ack_stock_register': None,
+                    'ack_page_number': None,
+                }
+            ],
+        }
+
+        self.client.force_authenticate(user=user)
+        create_resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+        self.assertEqual(create_resp.status_code, 201, create_resp.data)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.current_location, self.store)
+        self.assertEqual(instance.authority_store, self.store)
+        self.assertEqual(instance.status, 'ALLOCATED')
+
+        list_resp = self.client.get(f'/api/inventory/item-instances/?item={individual_item.id}')
+        self.assertEqual(list_resp.status_code, 200)
+        rows = list_resp.data['results'] if isinstance(list_resp.data, dict) and 'results' in list_resp.data else list_resp.data
+        self.assertEqual(rows[0]['allocated_to'], self.person.name)
+        self.assertEqual(rows[0]['allocated_to_type'], 'PERSON')
+        self.assertEqual(rows[0]['location_name'], f'Allocated to {self.person.name}')
+        self.assertEqual(rows[0]['authority_store_name'], self.store.name)
 
     def test_detail_includes_acknowledgement_audit_fields(self):
         user = self._make_user('stock_entry_detail_audit')

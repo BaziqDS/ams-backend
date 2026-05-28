@@ -1,6 +1,8 @@
 # pyright: reportAttributeAccessIssue=false
 from django.contrib.auth.models import Permission, User
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from inventory.models import (
@@ -67,6 +69,40 @@ class LocationTagMetadataTests(TestCase):
         )
         self.assertEqual(response.data['parent_location'], self.root.id)
         self.assertEqual(registrar.get_parent_standalone(), registrar)
+
+    def test_location_list_omits_delete_policy_fields_without_extra_blocker_queries(self):
+        Location.objects.bulk_create(
+            [
+                Location(
+                    name=f'List Option Location {index:02d}',
+                    code=f'LIST-OPTION-{index:02d}',
+                    location_type=LocationType.OFFICE,
+                    parent_location=self.root,
+                    is_standalone=True,
+                )
+                for index in range(25)
+            ]
+        )
+        self.client.force_authenticate(user=self.admin)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/inventory/locations/?page_size=500')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = self._rows(response)
+        self.assertGreaterEqual(len(rows), 25)
+        self.assertNotIn('can_delete', rows[0])
+        self.assertNotIn('delete_blockers', rows[0])
+        self.assertLess(len(queries), 50)
+
+    def test_location_detail_keeps_delete_policy_fields(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get(f'/api/inventory/locations/{self.root.id}/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn('can_delete', response.data)
+        self.assertIn('delete_blockers', response.data)
 
     def test_create_location_tag_api(self):
         self.client.force_authenticate(user=self.admin)

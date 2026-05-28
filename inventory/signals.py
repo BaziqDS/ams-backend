@@ -44,6 +44,7 @@ def _refresh_instance_qr_images(instances):
     for item_instance in instances.select_related(
         'item__category__parent_category',
         'current_location__parent_location',
+        'authority_store',
     ):
         item_instance.generate_qr_code_image()
         item_instance.save(update_fields=['qr_code_image'])
@@ -308,7 +309,10 @@ def process_single_stock_item(instance):
 
                     # Update instances
                     if instance.instances.exists():
-                        instance.instances.all().update(status='ALLOCATED')
+                        update_fields = {'status': 'ALLOCATED'}
+                        if entry.to_location and not entry.to_location.is_store:
+                            update_fields['current_location'] = entry.to_location
+                        instance.instances.all().update(**update_fields)
                         _refresh_instance_qr_images(instance.instances.all())
                     
                     # Record Movement History for Allocation
@@ -427,10 +431,16 @@ def process_single_stock_item(instance):
                     # Update instances location and set to AVAILABLE
                     if instance.instances.exists():
                         if instance.accepted_instances.exists():
-                            instance.accepted_instances.all().update(current_location=to_loc, status='AVAILABLE')
+                            update_fields = {'current_location': to_loc, 'status': 'AVAILABLE'}
+                            if to_loc.is_store:
+                                update_fields['authority_store'] = to_loc
+                            instance.accepted_instances.all().update(**update_fields)
                             _refresh_instance_qr_images(instance.accepted_instances.all())
                         else:
-                            instance.instances.all().update(current_location=to_loc, status='AVAILABLE')
+                            update_fields = {'current_location': to_loc, 'status': 'AVAILABLE'}
+                            if to_loc.is_store:
+                                update_fields['authority_store'] = to_loc
+                            instance.instances.all().update(**update_fields)
                             _refresh_instance_qr_images(instance.instances.all())
                      
                     logger.info(f"[SIGNAL] COMPLETED RECEIPT (TRANSFER): Incremented {effective_qty} {item.name} in {to_loc.name}")
@@ -621,18 +631,23 @@ def process_m2m_instances(sender, instance, action, pk_set, **kwargs):
         entry = instance.stock_entry
         to_loc = entry.to_location
 
-        if to_loc:
-            # Store transfer: update physical location
-            ItemInstance.objects.filter(pk__in=pk_set).update(current_location=to_loc)
+        is_allocation = entry.entry_type == 'ISSUE' and (
+            entry.issued_to or (to_loc and not to_loc.is_store)
+        )
+        if is_allocation:
+            update_fields = {'status': 'ALLOCATED'}
+            if to_loc and not to_loc.is_store:
+                update_fields['current_location'] = to_loc
+            ItemInstance.objects.filter(pk__in=pk_set).update(**update_fields)
+            _refresh_instance_qr_images(ItemInstance.objects.filter(pk__in=pk_set))
+            logger.info(f"Marked {len(pk_set)} instances as ALLOCATED for {entry.entry_number}")
+        elif to_loc:
+            update_fields = {'current_location': to_loc}
+            if to_loc.is_store:
+                update_fields['authority_store'] = to_loc
+            ItemInstance.objects.filter(pk__in=pk_set).update(**update_fields)
             _refresh_instance_qr_images(ItemInstance.objects.filter(pk__in=pk_set))
             logger.info(f"Updated {len(pk_set)} instances to location {to_loc.name}")
-        elif entry.entry_type == 'ISSUE':
-            # Person/non-store allocation: mark instances as ALLOCATED
-            is_allocation = entry.issued_to or (entry.to_location and not entry.to_location.is_store)
-            if is_allocation:
-                ItemInstance.objects.filter(pk__in=pk_set).update(status='ALLOCATED')
-                _refresh_instance_qr_images(ItemInstance.objects.filter(pk__in=pk_set))
-                logger.info(f"Marked {len(pk_set)} instances as ALLOCATED for {entry.entry_number}")
 
 @receiver(post_save, sender=InspectionCertificate)
 def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
@@ -726,6 +741,7 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
                         serial_number=None,  # Will be assigned manually by store manager
                         inspection_certificate=receipt.inspection_certificate,  # Link to IC
                         current_location=central_store,
+                        authority_store=central_store,
                         status='AVAILABLE',
                         created_by=receipt.created_by
                     )

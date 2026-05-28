@@ -3,7 +3,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from inventory.models import InspectionCertificate, Location, LocationType
+from inventory.models import InspectionCertificate, InspectionItem, Location, LocationType
 from inventory.models.inspection_model import InspectionStage
 
 
@@ -118,6 +118,30 @@ class InspectionFinanceScopeContractTests(TestCase):
         returned_ids = self._ids(response)
         self.assertIn(self.csit_certificate.id, returned_ids)
         self.assertNotIn(self.electrical_certificate.id, returned_ids)
+
+    def test_list_uses_summary_payload_without_nested_detail_collections(self):
+        InspectionItem.objects.create(
+            inspection_certificate=self.electrical_certificate,
+            item_description="Oscilloscope",
+            item_specifications="Digital",
+            tendered_quantity=1,
+            accepted_quantity=1,
+            rejected_quantity=0,
+            unit_price=100,
+        )
+        user = self._make_user("contract_summary_payload", self.electrical)
+
+        self.client.force_authenticate(user=user)
+        response = self.client.get("/api/inventory/inspections/")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        row = next(item for item in rows if item["id"] == self.electrical_certificate.id)
+        self.assertEqual(row["contract_no"], self.electrical_certificate.contract_no)
+        self.assertEqual(row["department_name"], self.electrical.name)
+        self.assertNotIn("items", row)
+        self.assertNotIn("documents", row)
+        self.assertNotIn("stock_entries", row)
 
     def test_change_permission_without_review_finance_cannot_complete_inspection(self):
         certificate = self._certificate("IC-CONTRACT-FINANCE", self.electrical)

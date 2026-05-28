@@ -10,7 +10,11 @@ from ..models.inspection_model import InspectionCertificate, InspectionItem, Ins
 from ..models.stock_register_model import StockRegister
 from ..models.batch_model import ItemBatch
 from ..models.item_model import Item
-from ..serializers.inspection_serializer import InspectionCertificateSerializer, InspectionItemSerializer
+from ..serializers.inspection_serializer import (
+    InspectionCertificateListSerializer,
+    InspectionCertificateSerializer,
+    InspectionItemSerializer,
+)
 from ams.permissions import StrictDjangoModelPermissions
 from notifications.services import (
     notify_inspection_completed,
@@ -199,6 +203,11 @@ class InspectionViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, InspectionWorkflowPermissions]
     filter_backends = [filters.SearchFilter]
     search_fields = ['contract_no', 'contractor_name', 'indenter']
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return InspectionCertificateListSerializer
+        return super().get_serializer_class()
 
     def perform_create(self, serializer):
         instance = serializer.save()
