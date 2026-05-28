@@ -457,6 +457,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
             parent_location=cls.root,
             is_standalone=True,
         )
+        cls.basic_group = Group.objects.create(name='Scoped Basic User')
 
     def setUp(self):
         self.client = APIClient()
@@ -495,7 +496,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
 
     def test_scoped_user_manager_can_assign_descendant_location(self):
         manager = self._make_user_manager('csit_manager', self.csit)
-        manager.user_permissions.add(self._perm('assign_user_locations'))
+        manager.user_permissions.add(self._perm('assign_user_locations'), self._perm('assign_user_roles'))
         self.client.force_authenticate(user=manager)
 
         resp = self.client.post(
@@ -507,6 +508,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
                 'first_name': 'CSIT',
                 'last_name': 'Child',
                 'assigned_locations': [self.csit_lab.id],
+                'groups': [self.basic_group.id],
             },
             format='json',
         )
@@ -665,7 +667,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
 
     def test_root_assigned_user_manager_can_assign_any_location(self):
         manager = self._make_user_manager('root_manager', self.root)
-        manager.user_permissions.add(self._perm('assign_user_locations'))
+        manager.user_permissions.add(self._perm('assign_user_locations'), self._perm('assign_user_roles'))
         self.client.force_authenticate(user=manager)
 
         resp = self.client.post(
@@ -677,6 +679,7 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
                 'first_name': 'Root',
                 'last_name': 'Managed',
                 'assigned_locations': [self.mechanical.id],
+                'groups': [self.basic_group.id],
             },
             format='json',
         )

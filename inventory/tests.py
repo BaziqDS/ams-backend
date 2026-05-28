@@ -98,7 +98,7 @@ class StockEntryDomainPermissionBootstrapTests(TestCase):
         self.assertIn('inventory.acknowledge_stockentry', resolved)
         self.assertIn('inventory.view_items', resolved)
         self.assertIn('inventory.view_locations', resolved)
-        self.assertIn('inventory.view_person', resolved)
+        self.assertIn('inventory.view_employees', resolved)
         self.assertIn('inventory.view_stockregister', resolved)
         self.assertIn('inventory.view_stockallocation', resolved)
         self.assertNotIn('inventory.delete_stock_entries', resolved)
@@ -565,7 +565,7 @@ class InspectionCertificateApiScopeTests(TestCase):
         self.assertIn(self.electrical_certificate.id, returned_ids)
         self.assertNotIn(self.csit_certificate.id, returned_ids)
 
-    def test_finance_reviewer_sees_all_inspections_regardless_of_assigned_location(self):
+    def test_finance_reviewer_stays_within_assigned_inspection_scope(self):
         user = self._make_user('inspection_finance_global_scope', self.electrical)
         user.user_permissions.add(self._perm('review_finance'))
 
@@ -575,7 +575,7 @@ class InspectionCertificateApiScopeTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         returned_ids = {row['id'] for row in self._rows(resp)}
         self.assertIn(self.electrical_certificate.id, returned_ids)
-        self.assertIn(self.csit_certificate.id, returned_ids)
+        self.assertNotIn(self.csit_certificate.id, returned_ids)
 
     def test_root_assigned_user_cannot_create_for_unassigned_standalones(self):
         user = self._make_user('inspection_root_create_limited', self.root)
@@ -1249,7 +1249,7 @@ class InspectionTrackingIntakeTests(TestCase):
         cls.register = StockRegister.objects.create(
             register_number='TRACK-REG-1',
             store=cls.root.auto_created_store,
-            register_type='CENTRAL',
+            register_type='CSR',
             created_by=cls.user,
         )
 
@@ -2667,6 +2667,64 @@ class ItemApiDomainPermissionTests(TestCase):
         self.assertEqual(unit['allocatedQuantity'], 3)
         self.assertEqual(unit['inTransitQuantity'], 1)
 
+    def test_distribution_hierarchical_breaks_store_totals_down_by_batch_and_allocation(self):
+        user = self._make_user('item_distribution_nested_batches')
+        user.user_permissions.add(self._perm('view_items'))
+        second_batch = ItemBatch.objects.create(
+            item=self.item,
+            batch_number='B-002',
+        )
+        lab = Location.objects.create(
+            name='CSIT Lab 1',
+            location_type=LocationType.LAB,
+            parent_location=self.csit,
+        )
+        employee = Person.objects.create(name='Dr. A. Khan')
+        StockRecord.objects.create(
+            item=self.item,
+            batch=second_batch,
+            location=self.store,
+            quantity=4,
+            allocated_quantity=1,
+        )
+        StockAllocation.objects.create(
+            item=self.item,
+            batch=self.batch,
+            source_location=self.store,
+            allocated_to_person=employee,
+            quantity=2,
+            status=AllocationStatus.ALLOCATED,
+        )
+        StockAllocation.objects.create(
+            item=self.item,
+            batch=second_batch,
+            source_location=self.store,
+            allocated_to_location=lab,
+            quantity=1,
+            status=AllocationStatus.ALLOCATED,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(f'/api/inventory/distribution/hierarchical/?item={self.item.id}')
+
+        self.assertEqual(resp.status_code, 200)
+        unit = next(row for row in resp.data if row['id'] == self.csit.id)
+        store = next(row for row in unit['stores'] if row['locationId'] == self.store.id)
+        batches = {row['batchNumber']: row for row in store['batches']}
+
+        self.assertEqual(store['quantity'], 9)
+        self.assertEqual(store['allocatedTotal'], 3)
+        self.assertEqual(batches['B-001']['quantity'], 5)
+        self.assertEqual(batches['B-001']['allocatedTotal'], 2)
+        self.assertEqual(batches['B-001']['allocations'][0]['targetName'], 'Dr. A. Khan')
+        self.assertEqual(batches['B-001']['allocations'][0]['targetType'], 'PERSON')
+        self.assertEqual(batches['B-001']['allocations'][0]['quantity'], 2)
+        self.assertEqual(batches['B-002']['quantity'], 4)
+        self.assertEqual(batches['B-002']['allocatedTotal'], 1)
+        self.assertEqual(batches['B-002']['allocations'][0]['targetName'], 'CSIT Lab 1')
+        self.assertEqual(batches['B-002']['allocations'][0]['targetType'], 'LOCATION')
+        self.assertEqual(batches['B-002']['allocations'][0]['quantity'], 1)
+
     def test_distribution_hierarchical_respects_selected_scope_filter(self):
         user = User.objects.create_user(username='item_distribution_store_filter', password='pw')
         user.profile.assigned_locations.add(self.root, self.store)
@@ -3096,23 +3154,26 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(return_resp.status_code, 201)
         return_entry = StockEntry.objects.get(id=return_resp.data['id'])
         return_item = return_entry.items.get()
-        ack_register = self._register(self.store, f'ACK-RET-{return_entry.id}')
-        ack_resp = self.client.post(
-            f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
-            {
-                'items': [
-                    {
-                        'id': return_item.id,
-                        'quantity': return_item.quantity,
-                        'instances': [],
-                        'ack_stock_register': ack_register.id,
-                        'ack_page_number': 1,
-                    }
-                ]
-            },
-            format='json',
-        )
-        self.assertEqual(ack_resp.status_code, 200, ack_resp.data)
+        if return_entry.status == 'PENDING_ACK':
+            ack_register = self._register(self.store, f'ACK-RET-{return_entry.id}')
+            ack_resp = self.client.post(
+                f'/api/inventory/stock-entries/{return_entry.id}/acknowledge/',
+                {
+                    'items': [
+                        {
+                            'id': return_item.id,
+                            'quantity': return_item.quantity,
+                            'instances': [],
+                            'ack_stock_register': ack_register.id,
+                            'ack_page_number': 1,
+                        }
+                    ]
+                },
+                format='json',
+            )
+            self.assertEqual(ack_resp.status_code, 200, ack_resp.data)
+        else:
+            self.assertEqual(return_entry.status, 'COMPLETED')
         return_entry.refresh_from_db()
         return return_entry
 

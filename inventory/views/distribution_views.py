@@ -108,7 +108,38 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
             }
         return hierarchy[unit_loc.id]
 
+    def empty_batch_group(unit, store_group, batch):
+        return {
+            "unit": unit,
+            "storeGroup": store_group,
+            "batchNumber": batch.batch_number if batch else None,
+            "batchId": batch.id if batch else None,
+            "quantity": 0,
+            "availableQuantity": 0,
+            "inTransitQuantity": 0,
+            "allocatedTotal": 0,
+            "lastUpdated": None,
+            "allocations": [],
+        }
+
+    def serialize_allocation_group(grp):
+        return {
+            "id": grp["id"],
+            "targetName": grp["targetName"],
+            "targetType": grp["targetType"],
+            "targetLocationId": grp["targetLocationId"],
+            "sourceStoreId": grp["sourceStoreId"],
+            "sourceStoreName": grp["sourceStoreName"],
+            "batchNumber": grp["batchNumber"],
+            "batchId": grp["batchId"],
+            "quantity": grp["quantity"],
+            "allocatedAt": grp["allocatedAt"],
+            "stockEntryIds": grp["stockEntryIds"],
+            "locationId": grp["targetLocationId"],
+        }
+
     store_groups = {}
+    batch_groups = {}
     for record in records:
         standalone = get_standalone(record.location)
         if not standalone:
@@ -145,6 +176,18 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
         if record.last_updated and (not group["lastUpdated"] or record.last_updated > group["lastUpdated"]):
             group["lastUpdated"] = record.last_updated
 
+        batch_key = (standalone.id, record.location.id, record.batch_id)
+        if batch_key not in batch_groups:
+            batch_groups[batch_key] = empty_batch_group(unit, group, record.batch)
+
+        batch_group = batch_groups[batch_key]
+        batch_group["quantity"] += record.quantity
+        batch_group["availableQuantity"] += record.available_quantity
+        batch_group["inTransitQuantity"] += record.in_transit_quantity
+        batch_group["allocatedTotal"] += record.allocated_quantity
+        if record.last_updated and (not batch_group["lastUpdated"] or record.last_updated > batch_group["lastUpdated"]):
+            batch_group["lastUpdated"] = record.last_updated
+
     allocations_grouped = {}
     for alloc in allocations:
         standalone = get_standalone(alloc.source_location)
@@ -157,7 +200,7 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
         source_store_id = alloc.source_location.id
         source_store_name = alloc.source_location.name
 
-        group_key = (standalone.id, target_type, target_id, source_store_id)
+        group_key = (standalone.id, target_type, target_id, source_store_id, alloc.batch_id)
         if group_key not in allocations_grouped:
             allocations_grouped[group_key] = {
                 "standalone": standalone,
@@ -167,8 +210,8 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
                 "targetLocationId": alloc.allocated_to_location.id if alloc.allocated_to_location else None,
                 "sourceStoreId": source_store_id,
                 "sourceStoreName": source_store_name,
-                "batchNumber": alloc.batch.batch_number if include_batch and alloc.batch else None,
-                "batchId": alloc.batch.id if include_batch and alloc.batch else None,
+                "batchNumber": alloc.batch.batch_number if alloc.batch else None,
+                "batchId": alloc.batch.id if alloc.batch else None,
                 "quantity": 0,
                 "allocatedAt": alloc.allocated_at,
                 "stockEntryIds": [],
@@ -181,7 +224,41 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
         if alloc.stock_entry_id and alloc.stock_entry_id not in grp["stockEntryIds"]:
             grp["stockEntryIds"].append(alloc.stock_entry_id)
 
+    for grp in allocations_grouped.values():
+        store_key = (grp["standalone"].id, grp["sourceStoreId"])
+        store_group = store_groups.get(store_key)
+        if store_group:
+            batch_key = (grp["standalone"].id, grp["sourceStoreId"], grp["batchId"])
+            if batch_key not in batch_groups:
+                batch_groups[batch_key] = empty_batch_group(
+                    store_group["unit"],
+                    store_group,
+                    None,
+                )
+                batch_groups[batch_key]["batchNumber"] = grp["batchNumber"]
+                batch_groups[batch_key]["batchId"] = grp["batchId"]
+            batch_groups[batch_key]["allocations"].append(serialize_allocation_group(grp))
+
+    batches_by_store = {}
+    for batch in batch_groups.values():
+        store = batch["storeGroup"]
+        store_key = (batch["unit"]["id"], store["locationId"])
+        batches_by_store.setdefault(store_key, []).append({
+            "batchNumber": batch["batchNumber"],
+            "batchId": batch["batchId"],
+            "quantity": batch["quantity"],
+            "availableQuantity": batch["availableQuantity"],
+            "inTransitQuantity": batch["inTransitQuantity"],
+            "allocatedTotal": batch["allocatedTotal"],
+            "lastUpdated": batch["lastUpdated"],
+            "allocations": batch["allocations"],
+        })
+
+    for batches in batches_by_store.values():
+        batches.sort(key=lambda row: (row["batchNumber"] is None, row["batchNumber"] or "", row["batchId"] or 0))
+
     for group in store_groups.values():
+        store_key = (group["unit"]["id"], group["locationId"])
         group["unit"]["stores"].append({
             "id": group["id"],
             "locationId": group["locationId"],
@@ -194,23 +271,12 @@ def build_hierarchical_distribution(user, item_id, batch_id=None, scope_tokens=N
             "inTransitQuantity": group["inTransitQuantity"],
             "allocatedTotal": group["allocatedTotal"],
             "lastUpdated": group["lastUpdated"],
+            "batches": batches_by_store.get(store_key, []),
         })
 
     for grp in allocations_grouped.values():
         unit = get_or_create_unit(grp["standalone"])
-        unit["allocations"].append({
-            "id": grp["id"],
-            "targetName": grp["targetName"],
-            "targetType": grp["targetType"],
-            "targetLocationId": grp["targetLocationId"],
-            "sourceStoreId": grp["sourceStoreId"],
-            "sourceStoreName": grp["sourceStoreName"],
-            "batchNumber": grp["batchNumber"],
-            "batchId": grp["batchId"],
-            "quantity": grp["quantity"],
-            "allocatedAt": grp["allocatedAt"],
-            "stockEntryIds": grp["stockEntryIds"],
-        })
+        unit["allocations"].append(serialize_allocation_group(grp))
 
     return list(hierarchy.values())
 

@@ -455,11 +455,17 @@ class DemoDataPopulator:
         return self._body(response)
 
     def _release_db_locks(self, pause_seconds: float = 0.05) -> None:
+        if not self._uses_sqlite_database():
+            return
+
         try:
             connections.close_all()
         finally:
             close_old_connections()
         time.sleep(pause_seconds)
+
+    def _uses_sqlite_database(self) -> bool:
+        return connections["default"].vendor == "sqlite"
 
     @staticmethod
     def _is_database_lock_error(exc: Exception) -> bool:
@@ -468,7 +474,8 @@ class DemoDataPopulator:
     def _request_with_retry(self, method: str, path: str, payload: dict[str, Any], expected: tuple[int, ...]) -> Any:
         last_exc: Exception | None = None
         for attempt in range(1, 13):
-            close_old_connections()
+            if self._uses_sqlite_database():
+                close_old_connections()
             response = None
             try:
                 request_fn = getattr(self.client, method)
@@ -483,12 +490,13 @@ class DemoDataPopulator:
                     raise
                 last_exc = exc
             finally:
-                if response is not None:
-                    try:
-                        response.close()
-                    except Exception:
-                        pass
-                self._release_db_locks(0.05 * attempt)
+                if self._uses_sqlite_database():
+                    if response is not None:
+                        try:
+                            response.close()
+                        except Exception:
+                            pass
+                    self._release_db_locks(0.05 * attempt)
 
             time.sleep(0.1 * attempt)
 
@@ -791,6 +799,7 @@ class DemoDataPopulator:
             person_data = self._post(
                 "/api/inventory/persons/",
                 {
+                    "perse_number": f"PERSE-{self.short_tag}-{index + 1:04d}",
                     "name": full_name,
                     "designation": DESIGNATIONS[index % len(DESIGNATIONS)],
                     "department": department.name,
@@ -1140,22 +1149,23 @@ class DemoDataPopulator:
         }
         created = self._post("/api/inventory/stock-entries/", payload)
         return_entry = StockEntry.objects.get(pk=created["id"])
-        return_line = return_entry.items.get()
-        self._post(
-            f"/api/inventory/stock-entries/{return_entry.id}/acknowledge/",
-            {
-                "items": [
-                    {
-                        "id": return_line.id,
-                        "quantity": return_line.quantity,
-                        "instances": [],
-                        "ack_stock_register": ack_register.id,
-                        "ack_page_number": page_number,
-                    }
-                ]
-            },
-            expected=(200,),
-        )
+        if return_entry.status == "PENDING_ACK":
+            return_line = return_entry.items.get()
+            self._post(
+                f"/api/inventory/stock-entries/{return_entry.id}/acknowledge/",
+                {
+                    "items": [
+                        {
+                            "id": return_line.id,
+                            "quantity": return_line.quantity,
+                            "instances": [],
+                            "ack_stock_register": ack_register.id,
+                            "ack_page_number": page_number,
+                        }
+                    ]
+                },
+                expected=(200,),
+            )
         return return_entry
 
     def create_manual_allocations_and_returns(self) -> None:

@@ -326,6 +326,67 @@ def _inspection_notification_metadata(inspection: InspectionCertificate) -> dict
     return metadata
 
 
+# Map each backend inspection stage to the form_id the frontend registers
+# under inspections/[id]. The proactive dispatcher uses form_id to open the
+# right modal on click — the form is auto-opened on the detail page based on
+# current stage, so the agent only needs to navigate; the form_id helps the
+# agent address it by name when scheduling the follow-up tool call.
+_INSPECTION_STAGE_FORM_IDS = {
+    InspectionStage.STOCK_DETAILS: "inspection_detail_{id}_stock_details",
+    InspectionStage.CENTRAL_REGISTER: "inspection_detail_{id}_central_register",
+    InspectionStage.FINANCE_REVIEW: "inspection_detail_{id}_finance_review",
+}
+
+
+def _inspection_intent_target(inspection: InspectionCertificate) -> dict[str, object]:
+    """Pointer the proactive agent uses to fill the next stage of an inspection."""
+    target: dict[str, object] = {
+        "record_id": inspection.id,
+        "module": "inspections",
+        "route": f"/inspections/{inspection.id}",
+    }
+    form_id_template = _INSPECTION_STAGE_FORM_IDS.get(inspection.stage)
+    if form_id_template:
+        target["form_id"] = form_id_template.format(id=inspection.id)
+    return target
+
+
+def _stock_entry_intent_target(entry: StockEntry) -> dict[str, object]:
+    return {
+        "record_id": entry.id,
+        "module": "stock-entries",
+        "route": f"/stock-entries/{entry.id}",
+    }
+
+
+def _stock_correction_intent_target(correction: StockCorrectionRequest) -> dict[str, object]:
+    """Corrections live on the original entry's detail page."""
+    return {
+        "record_id": correction.original_entry_id,
+        "module": "stock-entries",
+        "route": f"/stock-entries/{correction.original_entry_id}",
+    }
+
+
+def _with_intent(
+    metadata: dict[str, object],
+    *,
+    suggested_intent: str,
+    intent_target: dict[str, object],
+) -> dict[str, object]:
+    """Merge proactive-agent hints into an existing metadata dict.
+
+    Frontend's notificationEvents.parseNotificationEvent() reads these keys
+    from inside metadata first, then from top-level columns (when we add
+    those later). For now we put them inside metadata so no migration is
+    needed — see frontend docs in src/lib/notificationEvents.ts.
+    """
+    enriched = dict(metadata)
+    enriched["suggested_intent"] = suggested_intent
+    enriched["intent_target"] = intent_target
+    return enriched
+
+
 def _stock_entry_notification_metadata(entry: StockEntry) -> dict[str, object]:
     item_summary = entry.items.aggregate(total_quantity=Coalesce(Sum("quantity"), Value(0)))
     metadata: dict[str, object] = {
@@ -381,7 +442,11 @@ def notify_inspection_initiated(inspection: InspectionCertificate, actor: User |
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata=_inspection_notification_metadata(inspection),
+        metadata=_with_intent(
+            _inspection_notification_metadata(inspection),
+            suggested_intent="fill_next_stage",
+            intent_target=_inspection_intent_target(inspection),
+        ),
     )
 
 
@@ -397,7 +462,11 @@ def notify_inspection_submitted_to_central_register(inspection: InspectionCertif
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata=_inspection_notification_metadata(inspection),
+        metadata=_with_intent(
+            _inspection_notification_metadata(inspection),
+            suggested_intent="fill_next_stage",
+            intent_target=_inspection_intent_target(inspection),
+        ),
     )
 
 
@@ -413,7 +482,14 @@ def notify_inspection_submitted_to_finance_review(inspection: InspectionCertific
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata=_inspection_notification_metadata(inspection),
+        metadata=_with_intent(
+            _inspection_notification_metadata(inspection),
+            # Finance review is a review step rather than a stage to fill —
+            # the proactive card should offer "review the record", not
+            # "fill the next stage".
+            suggested_intent="review_record",
+            intent_target=_inspection_intent_target(inspection),
+        ),
     )
 
 
@@ -429,6 +505,9 @@ def notify_inspection_completed(inspection: InspectionCertificate, actor: User |
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
+        # Completed inspections do NOT carry a proactive intent — there is
+        # nothing actionable left. They still surface in the notification
+        # feed, just without an auto-fire card.
         metadata=_inspection_notification_metadata(inspection),
     )
 
@@ -453,7 +532,14 @@ def notify_inspection_rejected(inspection: InspectionCertificate, actor: User | 
         entity_type="inspection",
         entity_id=inspection.id,
         actor=actor,
-        metadata=_inspection_notification_metadata(inspection),
+        metadata=_with_intent(
+            _inspection_notification_metadata(inspection),
+            # A rejected inspection needs the user to fix the rejected fields
+            # before resubmitting — the agent's correct_form intent maps to
+            # opening the form and re-resolving the disputed values.
+            suggested_intent="correct_form",
+            intent_target=_inspection_intent_target(inspection),
+        ),
     )
 
 
@@ -480,7 +566,11 @@ def notify_stock_entry_pending_ack(entry: StockEntry, actor: User | None = None)
         entity_type="stock_entry",
         entity_id=entry.id,
         actor=actor or entry.created_by,
-        metadata=_stock_entry_notification_metadata(entry),
+        metadata=_with_intent(
+            _stock_entry_notification_metadata(entry),
+            suggested_intent="review_record",
+            intent_target=_stock_entry_intent_target(entry),
+        ),
     )
 
 
@@ -515,7 +605,11 @@ def notify_correction_requested(correction: StockCorrectionRequest, actor: User 
         entity_type="stock_correction",
         entity_id=correction.id,
         actor=actor,
-        metadata=_stock_correction_notification_metadata(correction),
+        metadata=_with_intent(
+            _stock_correction_notification_metadata(correction),
+            suggested_intent="review_record",
+            intent_target=_stock_correction_intent_target(correction),
+        ),
     )
 
 
