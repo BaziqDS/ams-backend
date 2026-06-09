@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m venv venv
-          .\venv\Scripts\pip.exe install --upgrade pip
+          .\venv\Scripts\python.exe -m pip install --upgrade pip
           .\venv\Scripts\pip.exe install -r requirements.txt
           .\venv\Scripts\pip.exe install waitress
 
