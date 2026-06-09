@@ -37,6 +37,8 @@ class DepreciationPolicySerializer(serializers.ModelSerializer):
 
 
 class DepreciationAssetClassSerializer(serializers.ModelSerializer):
+    display_name = serializers.CharField(read_only=True)
+    display_code = serializers.CharField(read_only=True)
     policy_name = serializers.CharField(source="policy.name", read_only=True)
     category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
     current_rate = serializers.SerializerMethodField()
@@ -44,8 +46,9 @@ class DepreciationAssetClassSerializer(serializers.ModelSerializer):
     class Meta:
         model = DepreciationAssetClass
         fields = [
-            "id", "name", "code", "category", "category_name", "policy", "policy_name",
-            "description", "is_active", "current_rate", "created_at", "updated_at", "created_by",
+            "id", "name", "code", "display_name", "display_code", "category", "category_name",
+            "policy", "policy_name", "description", "is_active", "current_rate",
+            "created_at", "updated_at", "created_by",
         ]
         read_only_fields = ["created_at", "updated_at", "created_by"]
 
@@ -67,7 +70,7 @@ class DepreciationAssetClassSerializer(serializers.ModelSerializer):
 
 
 class DepreciationRateVersionSerializer(serializers.ModelSerializer):
-    asset_class_name = serializers.CharField(source="asset_class.name", read_only=True)
+    asset_class_name = serializers.CharField(source="asset_class.display_name", read_only=True)
 
     class Meta:
         model = DepreciationRateVersion
@@ -146,7 +149,7 @@ class DepreciationEntrySerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_rate_version_label(self, obj):
-        return f"{obj.rate_version.asset_class.code} {obj.rate}% from {obj.rate_version.effective_from}"
+        return f"{obj.rate_version.asset_class.display_code} {obj.rate}% from {obj.rate_version.effective_from}"
 
 
 class FixedAssetRegisterEntrySerializer(serializers.ModelSerializer):
@@ -154,7 +157,7 @@ class FixedAssetRegisterEntrySerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source="item.code", read_only=True)
     instance_serial = serializers.CharField(source="instance.serial_number", read_only=True, allow_null=True)
     batch_number = serializers.CharField(source="batch.batch_number", read_only=True, allow_null=True)
-    asset_class_name = serializers.CharField(source="asset_class.name", read_only=True)
+    asset_class_name = serializers.CharField(source="asset_class.display_name", read_only=True)
     policy_name = serializers.CharField(source="policy.name", read_only=True, allow_null=True)
     source_contract_no = serializers.CharField(source="source_inspection.contract_no", read_only=True, allow_null=True)
     depreciation_summary = serializers.SerializerMethodField()

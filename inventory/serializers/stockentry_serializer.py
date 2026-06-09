@@ -13,6 +13,12 @@ from ..models.instance_model import InstanceStatus, ItemInstance
 from ..models.stock_record_model import StockRecord
 from ..models.category_model import TrackingType
 from ..services.deletion_policy import get_delete_blockers
+from ..services.stock_correction_service import (
+    can_start_correction,
+    correction_target_entry,
+    is_generated_correction_entry,
+    is_supported_correction_entry,
+)
 
 class PersonSerializer(serializers.ModelSerializer):
     standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
@@ -535,6 +541,15 @@ class StockEntrySerializer(serializers.ModelSerializer):
 
         if from_location and to_location and from_location.pk == to_location.pk:
             errors['to_location'] = 'Destination cannot be the same as the source store.'
+        reference_entry = attrs.get('reference_entry', getattr(candidate, 'reference_entry', None))
+        reference_purpose = attrs.get('reference_purpose', getattr(candidate, 'reference_purpose', None))
+        if reference_purpose == 'REPLACEMENT':
+            if not reference_entry:
+                errors['reference_entry'] = 'Replacement entries must reference the cancelled or reversed source entry.'
+            else:
+                has_reversal = reference_entry.correction_entries.filter(reference_purpose='REVERSAL').exists()
+                if reference_entry.status != 'CANCELLED' and not has_reversal:
+                    errors['reference_entry'] = 'Replacement entries can only be created for cancelled entries or entries with an applied reversal.'
         self._validate_assigned_creation_store(errors, entry_type, from_location, to_location)
         self._validate_no_duplicate_submitted_items(errors, attrs.get('items'))
         self._validate_instances_for_entry(errors, entry_type, from_location, attrs.get('items'))
@@ -665,18 +680,20 @@ class StockEntrySerializer(serializers.ModelSerializer):
         return bool(obj.status == 'PENDING_ACK' and self._user_can_edit_entries())
 
     def get_can_correct(self, obj):
-        if obj.inspection_certificate_id and obj.entry_type == 'RECEIPT' and obj.from_location_id is None:
-            return False
-        return bool(obj.status == 'COMPLETED' and obj.from_location_id and self._user_can_edit_entries())
+        return bool(self._user_can_edit_entries() and can_start_correction(obj))
 
     def get_can_request_reversal(self, obj):
+        target = correction_target_entry(obj)
         return bool(
-            obj.status == 'COMPLETED'
+            self._user_can_edit_entries()
+            and target == obj
+            and is_supported_correction_entry(target)
+            and not is_generated_correction_entry(target)
             and obj.entry_type == 'ISSUE'
             and obj.from_location_id
             and obj.to_location_id
             and getattr(obj.to_location, 'is_store', False)
-            and self._user_can_edit_entries()
+            and can_start_correction(obj)
         )
 
     def _correction_source_entry(self, obj):

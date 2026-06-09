@@ -76,8 +76,16 @@ class DepreciationAssetClass(models.Model):
     class Meta:
         ordering = ["name"]
 
+    @property
+    def display_name(self):
+        return self.category.name if self.category_id and self.category else self.name
+
+    @property
+    def display_code(self):
+        return self.category.code if self.category_id and self.category and self.category.code else self.code
+
     def __str__(self):
-        return f"{self.name} ({self.code})"
+        return f"{self.display_name} ({self.display_code})"
 
 
 class DepreciationRateVersion(models.Model):

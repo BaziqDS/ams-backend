@@ -49,6 +49,8 @@ class LocationViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action in {'list', 'assignable', 'transferrable', 'allocatable_targets'}:
             return LocationListSerializer
+        if self.request.method == 'GET' and self.action in {'standalone', 'children'}:
+            return LocationListSerializer
         return super().get_serializer_class()
 
     def get_queryset(self):

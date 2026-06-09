@@ -111,7 +111,7 @@ def rate_version_for_asset(asset: FixedAssetRegisterEntry, fiscal_year_start_dat
                 and rate.effective_to >= fiscal_year_start_date
             ):
                 return rate
-        raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.code}.")
+        raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.display_code}.")
 
     rate = asset.asset_class.rate_versions.filter(
         effective_from__lte=fiscal_year_start_date,
@@ -126,7 +126,7 @@ def rate_version_for_asset(asset: FixedAssetRegisterEntry, fiscal_year_start_dat
     ).order_by("-effective_from", "-created_at").first()
     if rate:
         return rate
-    raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.code}.")
+    raise ValueError(f"No depreciation rate is configured for asset class {asset.asset_class.display_code}.")
 
 
 def _prefetched_depreciation_entries(asset: FixedAssetRegisterEntry):

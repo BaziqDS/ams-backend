@@ -19,6 +19,7 @@ from inventory.models import (
     InspectionStage,
     Item,
     ItemBatch,
+    ItemInstance,
     Location,
     LocationType,
     StockRecord,
@@ -329,6 +330,12 @@ class DepreciationRunCalculationTests(DepreciationTestDataMixin, TestCase):
 
 
 class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
+    def _rows(self, response):
+        data = response.data
+        if isinstance(data, dict) and "results" in data:
+            return data["results"]
+        return data
+
     def test_uncapitalized_payload_includes_depreciation_setup_context(self):
         furniture = Category.objects.create(
             name="Furniture Fixtures",
@@ -382,8 +389,96 @@ class DepreciationApiPermissionTests(DepreciationTestDataMixin, TestCase):
         self.assertEqual(row["depreciation_category_name"], "Furniture Fixtures")
         self.assertEqual(row["depreciation_category_code"], "FURN-FIX")
         self.assertEqual(row["depreciation_setup_name"], "Furniture Fixtures")
-        self.assertEqual(row["depreciation_setup_code"], "DEP-FURN-FIX")
+        self.assertEqual(row["depreciation_setup_code"], "FURN-FIX")
         self.assertEqual(row["depreciation_rate"], "10.00")
+
+    def test_category_backed_asset_class_payload_uses_current_category_display(self):
+        asset_class = DepreciationAssetClass.objects.create(
+            name="IT Euiqpments",
+            code="DEP-OLD-IT",
+            category=self.fixed_parent,
+            created_by=self.user,
+        )
+        rate = DepreciationRateVersion.objects.create(
+            asset_class=asset_class,
+            rate=Decimal("20.00"),
+            effective_from=date(2026, 7, 1),
+            source_reference="Finance setup",
+            created_by=self.user,
+            approved_by=self.user,
+        )
+        FixedAssetRegisterEntry.objects.create(
+            item=self.laptop,
+            instance=ItemInstance.objects.create(
+                item=self.laptop,
+                serial_number="LAPTOP-CAT-DISPLAY-1",
+                current_location=self.department.auto_created_store,
+                created_by=self.user,
+            ),
+            target_type="INSTANCE",
+            asset_class=asset_class,
+            original_cost=Decimal("100000.00"),
+            capitalization_date=date(2026, 7, 1),
+            depreciation_start_date=date(2026, 7, 1),
+            created_by=self.user,
+        )
+        self.fixed_parent.name = "IT Equipments"
+        self.fixed_parent.code = "IT-EQ"
+        self.fixed_parent.save()
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        self.user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="inventory", codename="view_depreciation")
+        )
+
+        classes_response = client.get("/api/inventory/depreciation/asset-classes/")
+        assets_response = client.get("/api/inventory/depreciation/assets/")
+        rates_response = client.get("/api/inventory/depreciation/rates/")
+
+        self.assertEqual(classes_response.status_code, 200)
+        class_row = next(row for row in self._rows(classes_response) if row["id"] == asset_class.id)
+        self.assertEqual(class_row["name"], "IT Euiqpments")
+        self.assertEqual(class_row["display_name"], "IT Equipments")
+        self.assertEqual(class_row["display_code"], "IT-EQ")
+
+        self.assertEqual(assets_response.status_code, 200)
+        asset_row = next(row for row in self._rows(assets_response) if row["asset_class"] == asset_class.id)
+        self.assertEqual(asset_row["asset_class_name"], "IT Equipments")
+
+        self.assertEqual(rates_response.status_code, 200)
+        rate_row = next(row for row in self._rows(rates_response) if row["id"] == rate.id)
+        self.assertEqual(rate_row["asset_class_name"], "IT Equipments")
+
+    def test_renaming_category_syncs_generated_depreciation_asset_class(self):
+        category = Category.objects.create(
+            name="IT Euiqpments",
+            code="IT-EUI",
+            category_type=CategoryType.FIXED_ASSET,
+        )
+        generated_class = DepreciationAssetClass.objects.create(
+            name="IT Euiqpments",
+            code="DEP-IT-EUI",
+            category=category,
+            created_by=self.user,
+        )
+        custom_class = DepreciationAssetClass.objects.create(
+            name="Custom Lab Equipment",
+            code="CUSTOM-LAB",
+            category=category,
+            created_by=self.user,
+        )
+
+        category.name = "IT Equipments"
+        category.code = "IT-EQ"
+        category.save()
+
+        generated_class.refresh_from_db()
+        custom_class.refresh_from_db()
+        self.assertEqual(generated_class.name, "IT Equipments")
+        self.assertEqual(generated_class.code, "DEP-IT-EQ")
+        self.assertEqual(custom_class.name, "Custom Lab Equipment")
+        self.assertEqual(custom_class.code, "CUSTOM-LAB")
 
     def test_depreciation_endpoints_require_depreciation_permission(self):
         client = APIClient()

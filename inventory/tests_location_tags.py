@@ -95,6 +95,58 @@ class LocationTagMetadataTests(TestCase):
         self.assertNotIn('delete_blockers', rows[0])
         self.assertLess(len(queries), 50)
 
+    def test_location_standalone_list_uses_lightweight_serializer(self):
+        Location.objects.bulk_create(
+            [
+                Location(
+                    name=f'Standalone Option Location {index:02d}',
+                    code=f'STANDALONE-OPTION-{index:02d}',
+                    location_type=LocationType.OFFICE,
+                    parent_location=self.root,
+                    is_standalone=True,
+                )
+                for index in range(25)
+            ]
+        )
+        self.client.force_authenticate(user=self.admin)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/inventory/locations/standalone/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = self._rows(response)
+        self.assertGreaterEqual(len(rows), 25)
+        self.assertNotIn('can_delete', rows[0])
+        self.assertNotIn('delete_blockers', rows[0])
+        self.assertLess(len(queries), 50)
+
+    def test_location_children_list_uses_lightweight_serializer(self):
+        standalone = Location.objects.create(
+            name='Children Lightweight Parent',
+            location_type=LocationType.DEPARTMENT,
+            parent_location=self.root,
+            is_standalone=True,
+        )
+        for index in range(25):
+            Location.objects.create(
+                name=f'Child Option Location {index:02d}',
+                code=f'CHILD-OPTION-{index:02d}',
+                location_type=LocationType.OFFICE,
+                parent_location=standalone,
+                is_standalone=False,
+            )
+        self.client.force_authenticate(user=self.admin)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(f'/api/inventory/locations/{standalone.id}/children/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = self._rows(response)
+        self.assertGreaterEqual(len(rows), 25)
+        self.assertNotIn('can_delete', rows[0])
+        self.assertNotIn('delete_blockers', rows[0])
+        self.assertLess(len(queries), 50)
+
     def test_location_detail_keeps_delete_policy_fields(self):
         self.client.force_authenticate(user=self.admin)
 

@@ -138,12 +138,16 @@ class Category(models.Model):
         
         is_new = self.pk is None
         old_rate = None
+        old_name = None
+        old_code = None
         
         if not is_new:
             try:
                 # Use a fresh query to avoid cached instance issues
                 old_instance = Category.objects.get(pk=self.pk)
                 old_rate = old_instance.default_depreciation_rate
+                old_name = old_instance.name
+                old_code = old_instance.code
             except Category.DoesNotExist:
                 pass
 
@@ -170,6 +174,26 @@ class Category(models.Model):
                 changed_by=request_user,
                 notes=final_notes
             )
+
+        if not is_new and (old_name != self.name or old_code != self.code):
+            self._sync_generated_depreciation_asset_classes(old_name, old_code)
+
+    def _sync_generated_depreciation_asset_classes(self, old_name, old_code):
+        from .depreciation_model import DepreciationAssetClass
+
+        old_default_code = f"DEP-{old_code or f'CAT-{self.pk}'}"[:50]
+        new_default_code = f"DEP-{self.code or f'CAT-{self.pk}'}"[:50]
+        for asset_class in DepreciationAssetClass.objects.filter(category=self):
+            update_fields = []
+            if old_name is not None and asset_class.name == old_name:
+                asset_class.name = self.name
+                update_fields.append("name")
+            if old_code is not None and asset_class.code == old_default_code:
+                asset_class.code = new_default_code
+                update_fields.append("code")
+            if update_fields:
+                update_fields.append("updated_at")
+                asset_class.save(update_fields=update_fields)
 
 class CategoryRateHistory(models.Model):
     """

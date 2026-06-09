@@ -4302,6 +4302,20 @@ class StockEntryApiDomainPermissionTests(TestCase):
         self.assertEqual(replacement.reference_purpose, 'REPLACEMENT')
         self.assertEqual(replacement.inspection_certificate, source.inspection_certificate)
 
+    def test_replacement_entry_rejects_active_source_entry(self):
+        user = self._make_user('stock_entry_bad_replacement')
+        user.user_permissions.add(self._perm('create_stock_entries'))
+        self.client.force_authenticate(user=user)
+        source = self._completed_transfer(user, quantity=2, purpose='Invalid replacement source')
+        payload = self._payload('Invalid replacement entry')
+        payload['reference_entry'] = source.id
+        payload['reference_purpose'] = 'REPLACEMENT'
+
+        resp = self.client.post('/api/inventory/stock-entries/', payload, format='json')
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('reference_entry', resp.data)
+
     def test_completed_transfer_correction_upward_creates_additional_linked_issue(self):
         user = self._make_user('stock_entry_correction_upward')
         user.user_permissions.add(self._perm('edit_stock_entries'))
@@ -4356,6 +4370,110 @@ class StockEntryApiDomainPermissionTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn('Change at least one corrected quantity', resp.data['detail'])
+        self.assertFalse(issue.correction_requests.exists())
+
+    def test_request_correction_rejects_duplicate_active_correction(self):
+        user = self._make_user('stock_entry_duplicate_correction')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Duplicate correction')
+        issue_item = issue.items.get()
+
+        first_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Only two units should have been sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+        second_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Now trying a competing correction.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 3, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(first_resp.status_code, 201)
+        self.assertEqual(second_resp.status_code, 400)
+        self.assertIn('active correction', second_resp.data['detail'])
+        self.assertEqual(issue.correction_requests.count(), 1)
+
+    def test_generated_correction_entry_is_not_correctable_again(self):
+        user = self._make_user('stock_entry_generated_correction_blocked')
+        user.user_permissions.add(self._perm('view_stock_entries'))
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Generated correction source')
+        issue_item = issue.items.get()
+
+        correction_resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'Two more units were physically sent.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 6, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(correction_resp.status_code, 201)
+        generated = StockEntry.objects.get(reference_entry=issue, reference_purpose='ADDITIONAL_MOVEMENT')
+        generated.status = 'COMPLETED'
+        generated.save(update_fields=['status'])
+        generated_item = generated.items.get()
+
+        detail_resp = self.client.get(f'/api/inventory/stock-entries/{generated.id}/')
+        request_resp = self.client.post(
+            f'/api/inventory/stock-entries/{generated.id}/request-correction/',
+            {
+                'reason': 'Trying to correct a generated correction entry.',
+                'lines': [
+                    {'id': generated_item.id, 'corrected_quantity': generated_item.quantity + 1, 'instances': []}
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertEqual(detail_resp.data['can_correct'], False)
+        self.assertEqual(detail_resp.data['can_request_reversal'], False)
+        self.assertEqual(request_resp.status_code, 400)
+        self.assertIn('cannot be corrected', request_resp.data['detail'])
+
+    def test_request_correction_rejects_mixed_resolution_until_supported(self):
+        user = self._make_user('stock_entry_mixed_correction_blocked')
+        user.user_permissions.add(self._perm('edit_stock_entries'))
+        self.client.force_authenticate(user=user)
+        issue = self._completed_transfer(user, quantity=4, purpose='Mixed correction')
+        issue_item = issue.items.get()
+        extra_item = StockEntryItem.objects.create(
+            stock_entry=issue,
+            item=self.consumable_item,
+            batch=self.consumable_batch_a,
+            quantity=2,
+        )
+
+        resp = self.client.post(
+            f'/api/inventory/stock-entries/{issue.id}/request-correction/',
+            {
+                'reason': 'One line was over-recorded and another was under-recorded.',
+                'lines': [
+                    {'id': issue_item.id, 'corrected_quantity': 2, 'instances': []},
+                    {'id': extra_item.id, 'corrected_quantity': 3, 'instances': []},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('one correction action', resp.data['detail'])
         self.assertFalse(issue.correction_requests.exists())
 
     def test_linked_receipt_exposes_pending_correction_from_source_issue(self):

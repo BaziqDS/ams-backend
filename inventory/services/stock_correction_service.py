@@ -18,6 +18,27 @@ from ..models.category_model import TrackingType
 from ..models.stock_record_model import StockRecord
 from ..models.stockentry_model import StockEntry, StockEntryItem
 
+GENERATED_CORRECTION_REFERENCE_PURPOSES = {
+    'ADDITIONAL_MOVEMENT',
+    'REVERSAL',
+    'REJECTION_RETURN',
+    'REPLACEMENT',
+    'ADJUSTMENT',
+}
+
+ACTIVE_CORRECTION_STATUSES = {
+    CorrectionStatus.REQUESTED,
+    CorrectionStatus.APPROVED,
+}
+
+AUTO_APPLY_RESOLUTION_TYPES = {
+    CorrectionResolutionType.ADDITIONAL_MOVEMENT,
+    CorrectionResolutionType.ALLOCATION_INCREASE,
+    CorrectionResolutionType.ALLOCATION_REDUCTION,
+    CorrectionResolutionType.RETURN_INCREASE,
+    CorrectionResolutionType.RETURN_REDUCTION,
+}
+
 
 @dataclass
 class CorrectionLineInput:
@@ -53,6 +74,50 @@ def _is_allocation_return(entry: StockEntry) -> bool:
         and entry.to_location
         and (entry.issued_to or (entry.from_location and not entry.from_location.is_store))
     )
+
+
+def is_generated_correction_entry(entry: StockEntry) -> bool:
+    return bool(entry.reference_entry_id and entry.reference_purpose in GENERATED_CORRECTION_REFERENCE_PURPOSES)
+
+
+def has_active_correction(entry: StockEntry) -> bool:
+    return entry.correction_requests.filter(status__in=ACTIVE_CORRECTION_STATUSES).exists()
+
+
+def correction_target_entry(entry: StockEntry) -> StockEntry:
+    if (
+        entry.entry_type == 'RECEIPT'
+        and entry.reference_entry_id
+        and entry.reference_purpose == 'AUTO_RECEIPT'
+    ):
+        return entry.reference_entry
+    return entry
+
+
+def is_supported_correction_entry(entry: StockEntry) -> bool:
+    target = correction_target_entry(entry)
+    if target.status != 'COMPLETED':
+        return False
+    if is_generated_correction_entry(target):
+        return False
+    return _is_store_transfer(target) or _is_allocation_issue(target) or _is_allocation_return(target)
+
+
+def can_start_correction(entry: StockEntry) -> bool:
+    target = correction_target_entry(entry)
+    return is_supported_correction_entry(entry) and not has_active_correction(target)
+
+
+def ensure_entry_can_start_correction(entry: StockEntry):
+    target = correction_target_entry(entry)
+    if target.status != 'COMPLETED':
+        raise serializers.ValidationError({'detail': 'Only completed entries can be corrected. Cancel pending entries instead.'})
+    if is_generated_correction_entry(target):
+        raise serializers.ValidationError({'detail': 'Generated correction, reversal, return, and replacement entries cannot be corrected again.'})
+    if not is_supported_correction_entry(entry):
+        raise serializers.ValidationError({'detail': 'This stock entry type cannot be corrected with the contextual correction workflow.'})
+    if has_active_correction(target):
+        raise serializers.ValidationError({'detail': 'This stock entry already has an active correction request.'})
 
 
 def _effective_original_quantity(entry_item: StockEntryItem) -> int:
@@ -244,8 +309,7 @@ def _line_from_payload(entry: StockEntry, raw_line) -> CorrectionLineInput:
 
 
 def build_correction_preview(entry: StockEntry, payload) -> dict:
-    if entry.status != 'COMPLETED':
-        raise serializers.ValidationError({'detail': 'Only completed entries can be corrected. Cancel pending entries instead.'})
+    ensure_entry_can_start_correction(entry)
 
     raw_lines = payload.get('lines') or []
     if not raw_lines:
@@ -534,6 +598,10 @@ def create_correction_request(entry: StockEntry, payload, user, *, auto_apply=Tr
     preview = build_correction_preview(entry, payload)
     if preview['resolution_type'] == CorrectionResolutionType.NO_CHANGE:
         raise serializers.ValidationError({'detail': 'Change at least one corrected quantity before submitting a correction.'})
+    if preview['resolution_type'] == CorrectionResolutionType.MIXED:
+        raise serializers.ValidationError({'detail': 'Submit one correction action at a time. Split mixed increases and reversals into separate correction requests.'})
+    if preview['resolution_type'] == CorrectionResolutionType.ADJUSTMENT_REQUIRED:
+        raise serializers.ValidationError({'detail': 'This stock entry type cannot be corrected with the contextual correction workflow.'})
 
     status = CorrectionStatus.BLOCKED if preview['resolution_type'] == CorrectionResolutionType.BLOCKED else CorrectionStatus.REQUESTED
 
@@ -558,13 +626,7 @@ def create_correction_request(entry: StockEntry, payload, user, *, auto_apply=Tr
             if line.affected_instance_ids:
                 correction_line.affected_instances.set(ItemInstance.objects.filter(id__in=line.affected_instance_ids))
 
-        if auto_apply and status != CorrectionStatus.BLOCKED and preview['resolution_type'] in {
-            CorrectionResolutionType.ADDITIONAL_MOVEMENT,
-            CorrectionResolutionType.ALLOCATION_INCREASE,
-            CorrectionResolutionType.ALLOCATION_REDUCTION,
-            CorrectionResolutionType.RETURN_INCREASE,
-            CorrectionResolutionType.RETURN_REDUCTION,
-        }:
+        if auto_apply and status != CorrectionStatus.BLOCKED and preview['resolution_type'] in AUTO_APPLY_RESOLUTION_TYPES:
             apply_correction(correction, user=user, require_approval=False)
 
     return correction

@@ -154,8 +154,8 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
             "depreciation_category_name": category.name if category else None,
             "depreciation_category_code": category.code if category else None,
             "depreciation_setup": setup.id if setup else None,
-            "depreciation_setup_name": setup.name if setup else None,
-            "depreciation_setup_code": setup.code if setup else None,
+            "depreciation_setup_name": setup.display_name if setup else None,
+            "depreciation_setup_code": setup.display_code if setup else None,
             "depreciation_rate": str(rate.rate) if rate else None,
         }
 
@@ -196,8 +196,8 @@ class FixedAssetRegisterEntryViewSet(viewsets.ModelViewSet):
                 "depreciation_category_name": category.name if category else None,
                 "depreciation_category_code": category.code if category else None,
                 "depreciation_setup": setup.id if setup else None,
-                "depreciation_setup_name": setup.name if setup else None,
-                "depreciation_setup_code": setup.code if setup else None,
+                "depreciation_setup_name": setup.display_name if setup else None,
+                "depreciation_setup_code": setup.display_code if setup else None,
                 "depreciation_rate": str(rate.rate) if rate else None,
             }
         return contexts
