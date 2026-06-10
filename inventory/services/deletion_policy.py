@@ -52,6 +52,56 @@ def category_delete_blockers(category):
     return blockers
 
 
+def bulk_item_delete_blockers(item_ids):
+    """
+    Compute delete blockers for many items with a fixed number of queries
+    (one per dependency type) instead of ~10 EXISTS queries per item.
+    Returns {item_id: [blocker messages]} using the same messages as
+    item_delete_blockers.
+    """
+    from inventory.models import (
+        FixedAssetRegisterEntry,
+        InspectionItem,
+        ItemBatch,
+        ItemInstance,
+        MaintenanceMeterReading,
+        MaintenancePlan,
+        MaintenanceWorkOrder,
+        MovementHistory,
+        StockAllocation,
+        StockRecord,
+    )
+
+    item_ids = list(item_ids)
+    if not item_ids:
+        return {}
+
+    def ids_with(model):
+        return set(model.objects.filter(item_id__in=item_ids).values_list('item_id', flat=True).distinct())
+
+    checks = [
+        (ids_with(StockRecord), "This item has inventory balance or distribution history."),
+        (ids_with(StockEntryItem), "This item is used in stock entries."),
+        (ids_with(ItemInstance), "This item has item instances."),
+        (ids_with(ItemBatch), "This item has item batches."),
+        (ids_with(StockAllocation), "This item is used in stock allocations."),
+        (ids_with(InspectionItem), "This item is linked to inspection certificates."),
+        (ids_with(MovementHistory), "This item has movement history."),
+        (ids_with(FixedAssetRegisterEntry), "This item is capitalized in the fixed asset register."),
+        (
+            ids_with(MaintenancePlan) | ids_with(MaintenanceWorkOrder) | ids_with(MaintenanceMeterReading),
+            "This item is linked to maintenance records.",
+        ),
+    ]
+
+    blockers = {item_id: [] for item_id in item_ids}
+    for blocked_ids, message in checks:
+        for item_id in blocked_ids:
+            if item_id in blockers:
+                blockers[item_id].append(message)
+    return blockers
+
+
 def item_delete_blockers(item):
     blockers = []
     if _has(item.stock_records.all()):

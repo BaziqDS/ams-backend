@@ -10,7 +10,7 @@ from ..models.stock_record_model import StockRecord
 from ..models.allocation_model import StockAllocation, AllocationStatus
 from ..serializers.item_serializer import ItemSerializer
 from ..permissions import ItemPermission, ItemCopilotSearchPermission
-from ..services.deletion_policy import DeletionBlocked, delete_with_policy
+from ..services.deletion_policy import DeletionBlocked, bulk_item_delete_blockers, delete_with_policy
 from ..services import item_search
 from .utils import get_item_scope_locations, get_scope_tokens_from_request
 
@@ -162,6 +162,8 @@ class ItemViewSet(viewsets.ModelViewSet):
         elif self.action == 'retrieve':
             item_ids = [self.kwargs.get('pk')]
             context['standalone_location_counts'] = self._build_standalone_location_counts(item_ids)
+        if hasattr(self, '_delete_blockers_by_item'):
+            context['delete_blockers_by_item'] = self._delete_blockers_by_item
         return context
 
     def list(self, request, *args, **kwargs):
@@ -171,11 +173,13 @@ class ItemViewSet(viewsets.ModelViewSet):
         if page is not None:
             item_ids = [item.id for item in page]
             self._standalone_location_counts = self._build_standalone_location_counts(item_ids)
+            self._delete_blockers_by_item = bulk_item_delete_blockers(item_ids)
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
 
         item_ids = list(queryset.values_list('id', flat=True))
         self._standalone_location_counts = self._build_standalone_location_counts(item_ids)
+        self._delete_blockers_by_item = bulk_item_delete_blockers(item_ids)
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 

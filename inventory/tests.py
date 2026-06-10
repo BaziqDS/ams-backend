@@ -2893,6 +2893,201 @@ class ItemApiDomainPermissionTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
 
+    def test_serial_import_preview_matches_blank_scoped_instances(self):
+        user = self._make_user('item_instance_serial_preview')
+        user.user_permissions.add(self._perm('view_items'), self._perm('change_item_instance'))
+        certificate = InspectionCertificate.objects.create(
+            contract_no='CN-SERIAL-BASIC-001',
+            contract_date=timezone.now().date(),
+            contractor_name='Serial Vendor',
+            indenter='CSIT',
+            department=self.csit,
+        )
+        first_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+        second_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/item-instances/serial-import-preview/',
+            {
+                'item': self.item.id,
+                'inspection_contract_no': 'CN-SERIAL-BASIC-001',
+                'store_ids': [self.store.id],
+                'serial_numbers': '1. CPU-101\n2. CPU-102\n',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['can_apply'])
+        self.assertEqual(resp.data['available_instance_count'], 2)
+        self.assertEqual(
+            [(line['serial_number'], line['instance'], line['status']) for line in resp.data['lines']],
+            [('CPU-101', first_blank.id, 'MATCHED'), ('CPU-102', second_blank.id, 'MATCHED')],
+        )
+
+    def test_serial_import_preview_scopes_by_inspection_contract_number(self):
+        user = self._make_user('item_instance_serial_contract_preview')
+        user.user_permissions.add(self._perm('view_items'), self._perm('change_item_instance'))
+        certificate = InspectionCertificate.objects.create(
+            contract_no='CN-SERIAL-001',
+            contract_date=timezone.now().date(),
+            contractor_name='Serial Vendor',
+            indenter='CSIT',
+            department=self.csit,
+        )
+        first_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+        second_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+        ItemInstance.objects.create(item=self.item, current_location=self.store)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/item-instances/serial-import-preview/',
+            {
+                'item': self.item.id,
+                'inspection_contract_no': 'CN-SERIAL-001',
+                'store_ids': [self.store.id],
+                'serial_numbers': 'CPU-CN-001\nCPU-CN-002',
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['inspection_certificate'], certificate.id)
+        self.assertEqual(resp.data['inspection_contract_no'], 'CN-SERIAL-001')
+        self.assertEqual(resp.data['available_instance_count'], 2)
+        self.assertEqual(
+            [line['instance'] for line in resp.data['lines']],
+            [first_blank.id, second_blank.id],
+        )
+
+    def test_serial_import_apply_requires_assignments_from_selected_contract(self):
+        user = self._make_user('item_instance_serial_contract_apply')
+        user.user_permissions.add(self._perm('view_items'), self._perm('change_item_instance'))
+        certificate = InspectionCertificate.objects.create(
+            contract_no='CN-SERIAL-002',
+            contract_date=timezone.now().date(),
+            contractor_name='Serial Vendor',
+            indenter='CSIT',
+            department=self.csit,
+        )
+        matching_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+        other_blank = ItemInstance.objects.create(item=self.item, current_location=self.store)
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/item-instances/serial-import-apply/',
+            {
+                'item': self.item.id,
+                'inspection_contract_no': 'CN-SERIAL-002',
+                'store_ids': [self.store.id],
+                'assignments': [
+                    {'instance': matching_blank.id, 'serial_number': 'CPU-CN-101'},
+                    {'instance': other_blank.id, 'serial_number': 'CPU-CN-102'},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not available in your scope', str(resp.data))
+
+    def test_serial_import_apply_updates_matched_blank_instances(self):
+        user = self._make_user('item_instance_serial_apply')
+        user.user_permissions.add(self._perm('view_items'), self._perm('change_item_instance'))
+        certificate = InspectionCertificate.objects.create(
+            contract_no='CN-SERIAL-BASIC-002',
+            contract_date=timezone.now().date(),
+            contractor_name='Serial Vendor',
+            indenter='CSIT',
+            department=self.csit,
+        )
+        first_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+        second_blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/item-instances/serial-import-apply/',
+            {
+                'item': self.item.id,
+                'inspection_contract_no': 'CN-SERIAL-BASIC-002',
+                'store_ids': [self.store.id],
+                'assignments': [
+                    {'instance': first_blank.id, 'serial_number': 'CPU-201'},
+                    {'instance': second_blank.id, 'serial_number': 'CPU-202'},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['applied_count'], 2)
+        first_blank.refresh_from_db()
+        second_blank.refresh_from_db()
+        self.assertEqual(first_blank.serial_number, 'CPU-201')
+        self.assertEqual(second_blank.serial_number, 'CPU-202')
+
+    def test_serial_import_apply_rejects_existing_serial_number(self):
+        user = self._make_user('item_instance_serial_duplicate')
+        user.user_permissions.add(self._perm('view_items'), self._perm('change_item_instance'))
+        certificate = InspectionCertificate.objects.create(
+            contract_no='CN-SERIAL-BASIC-003',
+            contract_date=timezone.now().date(),
+            contractor_name='Serial Vendor',
+            indenter='CSIT',
+            department=self.csit,
+        )
+        blank = ItemInstance.objects.create(
+            item=self.item,
+            current_location=self.store,
+            inspection_certificate=certificate,
+        )
+
+        self.client.force_authenticate(user=user)
+        resp = self.client.post(
+            '/api/inventory/item-instances/serial-import-apply/',
+            {
+                'item': self.item.id,
+                'inspection_contract_no': 'CN-SERIAL-BASIC-003',
+                'store_ids': [self.store.id],
+                'assignments': [
+                    {'instance': blank.id, 'serial_number': 'CPU-001'},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('already assigned', str(resp.data))
+
 
 class StockEntryApiDomainPermissionTests(TestCase):
     @classmethod

@@ -19,7 +19,15 @@ def _has_perm(user, codename: str) -> bool:
 
 
 class UserAccountPermission(permissions.BasePermission):
-    """Gates /api/users/management/ and /api/users/profiles/."""
+    """Gates /api/users/management/ and /api/users/profiles/.
+
+    Self-edit exception: any authenticated user may GET or PATCH their own
+    record (so the profile-settings flow — avatar, name, email — works
+    without admin perms). Field-level restrictions are enforced in
+    ``UserViewSet.partial_update`` so a non-admin self-edit can only change
+    ``first_name``, ``last_name``, ``email`` and ``avatar`` — never
+    ``is_superuser``, ``groups``, ``user_permissions``, etc.
+    """
 
     def has_permission(self, request, view):
         user = request.user
@@ -27,6 +35,13 @@ class UserAccountPermission(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
+
+        # Self-edit allowance — works for both the UserViewSet (pk == user.id)
+        # and UserProfileViewSet (pk == user.profile.id).
+        if request.method in {"GET", "PATCH"}:
+            target_pk = view.kwargs.get("pk")
+            if target_pk is not None and self._is_self_target(user, view, target_pk):
+                return True
 
         if request.method in permissions.SAFE_METHODS:
             return (
@@ -40,6 +55,37 @@ class UserAccountPermission(permissions.BasePermission):
         if request.method == "DELETE":
             return _has_perm(user, "user_management.delete_user_accounts")
         return False
+
+    @staticmethod
+    def _is_self_target(user, view, target_pk) -> bool:
+        """Return True iff `target_pk` identifies the requester's own record.
+
+        Handles both UserViewSet (where pk == User.pk) and UserProfileViewSet
+        (where pk == UserProfile.pk and User.pk lives via .user_id).
+        """
+        try:
+            pk_int = int(target_pk)
+        except (TypeError, ValueError):
+            return False
+
+        # Heuristic: queryset model tells us whether pk is User or UserProfile.
+        # Falls back to comparing against both possibilities.
+        try:
+            model = view.queryset.model  # type: ignore[attr-defined]
+        except AttributeError:
+            model = None
+        if model is None:
+            try:
+                model = view.get_queryset().model
+            except Exception:  # pragma: no cover — best-effort fallback
+                model = None
+
+        if model is not None and model.__name__ == "UserProfile":
+            profile = getattr(user, "profile", None)
+            return profile is not None and profile.pk == pk_int
+
+        # Default: assume User model.
+        return user.pk == pk_int
 
 
 class RolePermission(permissions.BasePermission):

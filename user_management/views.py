@@ -3,12 +3,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth.models import User, Permission, Group
 from django.db.models import Count, Prefetch
+from django.http import QueryDict
 
 from .models import UserProfile
 from .permissions import (
     AvailableRolePermissionsPermission,
     RolePermission,
     UserAccountPermission,
+    _has_perm,
 )
 from .serializers import (
     GroupSerializer,
@@ -16,6 +18,16 @@ from .serializers import (
     UserProfileSerializer,
     UserSerializer,
 )
+
+# Fields a non-admin is allowed to change on their OWN record via the
+# /api/users/management/ self-edit path. Keep this set tight — adding a
+# field here means a regular user can self-assign it without admin perms.
+SELF_EDIT_ALLOWED_FIELDS = frozenset({
+    "first_name",
+    "last_name",
+    "email",
+    "avatar",
+})
 
 
 def _visible_users_queryset(request_user):
@@ -107,6 +119,51 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return _visible_users_queryset(self.request.user)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Override to sanitize input for non-admin self-edits.
+
+        Background: the profile-settings modal in the topbar lets any user
+        update their own name and avatar via PATCH. The permission class
+        allows this (see UserAccountPermission), but we still need to
+        prevent a regular user from escalating privileges by including
+        fields like ``is_superuser`` or ``groups`` in the same request.
+        Here we strip every field that isn't in ``SELF_EDIT_ALLOWED_FIELDS``
+        when the requester is editing their own record without admin perms.
+        Admins and superusers are unaffected.
+        """
+        instance = self.get_object()
+        user = request.user
+        is_admin = (
+            user.is_superuser
+            or _has_perm(user, "user_management.edit_user_accounts")
+        )
+        if instance.pk == user.pk and not is_admin:
+            sanitized = self._restrict_to_self_edit_fields(request.data)
+            serializer = self.get_serializer(
+                instance, data=sanitized, partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            return Response(serializer.data)
+        return super().partial_update(request, *args, **kwargs)
+
+    @staticmethod
+    def _restrict_to_self_edit_fields(data):
+        """Return a copy of `data` containing only the safe self-edit fields.
+
+        Handles both QueryDict (multipart upload — what the avatar form
+        sends) and plain dict (JSON). Preserves the original type so the
+        downstream serializer parses files correctly.
+        """
+        if isinstance(data, QueryDict):
+            clean = QueryDict("", mutable=True)
+            for key in data.keys():
+                if key in SELF_EDIT_ALLOWED_FIELDS:
+                    clean.setlist(key, data.getlist(key))
+            return clean
+        # Plain dict / Mapping
+        return {k: v for k, v in data.items() if k in SELF_EDIT_ALLOWED_FIELDS}
 
 
 class GroupViewSet(viewsets.ModelViewSet):

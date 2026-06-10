@@ -101,7 +101,15 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =============================================================================
 # DATABASE
 # =============================================================================
-if IS_PRODUCTION:
+# Database selection — decoupled from IS_PRODUCTION so a developer can run
+# the local app in production-like mode (DEBUG off, secure cookies) while
+# still pointing at SQLite, OR run in development mode against Postgres for
+# hybrid-search testing. USE_POSTGRES defaults to IS_PRODUCTION for backwards
+# compatibility with the existing prod deploy that relied on the implicit
+# coupling. Override either independently via .env.
+USE_POSTGRES = config('USE_POSTGRES', default=IS_PRODUCTION, cast=bool)
+
+if USE_POSTGRES:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
@@ -297,5 +305,13 @@ ITEM_SEARCH_RRF_K = config('ITEM_SEARCH_RRF_K', default=60, cast=int)
 ITEM_SEARCH_BM25_TOP_N = config('ITEM_SEARCH_BM25_TOP_N', default=30, cast=int)
 ITEM_SEARCH_SEMANTIC_TOP_N = config(
     'ITEM_SEARCH_SEMANTIC_TOP_N', default=30, cast=int,
+)
+
+# Minimum cosine similarity for SEMANTIC-ONLY candidates. pgvector ranks every
+# embedded item by distance, so without a floor the result tail is just
+# "nearest available" noise rather than actual matches. Hits that also matched
+# BM25 are kept regardless — lexical agreement is evidence enough. 0 disables.
+ITEM_SEARCH_MIN_SEMANTIC_SCORE = config(
+    'ITEM_SEARCH_MIN_SEMANTIC_SCORE', default=0.35, cast=float,
 )
 

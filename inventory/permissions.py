@@ -167,6 +167,12 @@ class ItemInstancePermission(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return _has_perm(user, "inventory.view_items")
         if request.method == "POST":
+            action = getattr(view, "action", None)
+            if action in {"serial_import_preview", "serial_import_apply"}:
+                return (
+                    _has_perm(user, "inventory.edit_items")
+                    or _has_perm(user, "inventory.change_item_instance")
+                )
             return _has_perm(user, "inventory.create_items")
         if request.method in {"PUT", "PATCH"}:
             return (

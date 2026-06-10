@@ -12,6 +12,7 @@ class StockRecordSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source='item.code', read_only=True)
     subcategory_name = serializers.CharField(source='item.category.name', read_only=True)
     category_type = serializers.CharField(source='item.category.get_category_type', read_only=True)
+    low_stock_threshold = serializers.IntegerField(source='item.low_stock_threshold', read_only=True)
     source_inspection_contracts = serializers.SerializerMethodField()
 
     def _reporting_tags(self, obj):
@@ -80,7 +81,7 @@ class StockRecordSerializer(serializers.ModelSerializer):
         model = StockRecord
         fields = [
             'id', 'item', 'item_name', 'batch', 'batch_number', 
-            'item_code', 'subcategory_name', 'category_type', 'source_inspection_contracts',
+            'item_code', 'subcategory_name', 'category_type', 'low_stock_threshold', 'source_inspection_contracts',
             'location', 'location_name', 'location_tags', 'location_tags_display',
             'quantity', 'in_transit_quantity',
             'available_quantity', 'last_updated'

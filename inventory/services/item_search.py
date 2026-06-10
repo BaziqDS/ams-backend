@@ -102,6 +102,7 @@ def hybrid_search_items(
     bm25_top = getattr(settings, 'ITEM_SEARCH_BM25_TOP_N', 30)
     semantic_top = getattr(settings, 'ITEM_SEARCH_SEMANTIC_TOP_N', 30)
     rrf_k = getattr(settings, 'ITEM_SEARCH_RRF_K', 60)
+    min_semantic_score = getattr(settings, 'ITEM_SEARCH_MIN_SEMANTIC_SCORE', 0.0)
 
     return _run_sql(
         bm25_query=bm25_query,
@@ -112,12 +113,14 @@ def hybrid_search_items(
         bm25_top=bm25_top,
         semantic_top=semantic_top,
         rrf_k=rrf_k,
+        min_semantic_score=min_semantic_score,
         limit=limit,
     )
 
 
 def _run_sql(*, bm25_query, query_vec, have_semantic, tracking_type,
-             category_type, bm25_top, semantic_top, rrf_k, limit):
+             category_type, bm25_top, semantic_top, rrf_k,
+             min_semantic_score, limit):
     """Execute the fused hybrid query in a single round-trip to Postgres."""
     # tracking_type is a HARD filter (warehouse invariant). category_type is
     # treated as a soft alignment signal — apply only if provided; the BM25
@@ -186,7 +189,8 @@ def _run_sql(*, bm25_query, query_vec, have_semantic, tracking_type,
              COALESCE(1.0 / ({rrf_k} + bm25.bm25_rank), 0)
                + COALESCE(1.0 / ({rrf_k} + semantic.sem_rank), 0) AS rrf_score,
              bm25.bm25_rank,
-             semantic.sem_rank
+             semantic.sem_rank,
+             semantic.sem_score
       FROM fused_ids f
       LEFT JOIN bm25 ON bm25.id = f.id
       LEFT JOIN semantic ON semantic.id = f.id
@@ -209,6 +213,9 @@ def _run_sql(*, bm25_query, query_vec, have_semantic, tracking_type,
     JOIN inventory_item i ON i.id = s.id
     LEFT JOIN inventory_category cat ON cat.id = i.category_id
     LEFT JOIN inventory_category parent_cat ON parent_cat.id = cat.parent_category_id
+    -- Semantic-only candidates must clear the similarity floor; BM25-backed
+    -- candidates pass unconditionally (lexical agreement is real evidence).
+    WHERE s.bm25_rank IS NOT NULL OR COALESCE(s.sem_score, 0) >= %s
     ORDER BY s.rrf_score DESC
     LIMIT %s
     """
@@ -224,7 +231,8 @@ def _run_sql(*, bm25_query, query_vec, have_semantic, tracking_type,
         if tracking_type:
             params.append(tracking_type)
         params.append(query_vec)
-    # final LIMIT
+    # similarity floor for semantic-only hits, then final LIMIT
+    params.append(float(min_semantic_score or 0.0))
     params.append(int(limit))
 
     try:

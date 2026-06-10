@@ -232,3 +232,80 @@ class CopilotSearchEndpointTests(TestCase):
         self.assertIn("semantic_rank=1", hit["signals"])
         self.assertIn("tracking_match", hit["signals"])
         self.assertEqual(hit["score"], 0.0282)
+
+
+# ---------------------------------------------------------------------------
+# Postgres-only integration test — semantic similarity floor
+# ---------------------------------------------------------------------------
+
+from unittest import skipUnless
+
+from django.conf import settings as django_settings
+from django.db import connection
+
+
+@skipUnless(connection.vendor == "postgresql", "requires Postgres + pgvector")
+@override_settings(ITEM_SEARCH_HYBRID_ENABLED=True)
+class SemanticScoreFloorTests(TestCase):
+    """
+    Semantic-only candidates below ITEM_SEARCH_MIN_SEMANTIC_SCORE must be
+    excluded; BM25-backed candidates pass regardless of similarity.
+    """
+
+    def setUp(self):
+        category = Category.objects.create(
+            name="Floor Test Supplies",
+            category_type=CategoryType.CONSUMABLE,
+            tracking_type=TrackingType.QUANTITY,
+        )
+        self.close_item = Item.objects.create(
+            name="Floor Close Match",
+            code="FLR-0001",
+            category=category,
+            description="strongly related item",
+        )
+        self.far_item = Item.objects.create(
+            name="Floor Far Match",
+            code="FLR-0002",
+            category=category,
+            description="unrelated item",
+        )
+        dim = django_settings.EMBEDDING_DIM
+        # close_item embedding == query vector (cosine sim 1.0);
+        # far_item is orthogonal (cosine sim 0.0).
+        self.query_vec = [1.0] + [0.0] * (dim - 1)
+        far_vec = [0.0, 1.0] + [0.0] * (dim - 2)
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE inventory_item SET embedding = %s::vector WHERE id = %s",
+                [str(self.query_vec), self.close_item.id],
+            )
+            cur.execute(
+                "UPDATE inventory_item SET embedding = %s::vector WHERE id = %s",
+                [str(far_vec), self.far_item.id],
+            )
+
+    def _search(self):
+        # bm25 query is nonsense so neither item gets lexical support and the
+        # floor is the only thing deciding inclusion.
+        with patch(
+            "inventory.services.item_search.embed_text",
+            return_value=self.query_vec,
+        ):
+            return item_search.hybrid_search_items(query_name="zzzqqqxx")
+
+    @override_settings(ITEM_SEARCH_MIN_SEMANTIC_SCORE=0.35)
+    def test_floor_excludes_low_similarity_semantic_only_hits(self):
+        hits = self._search()
+        self.assertIsNotNone(hits)
+        ids = [h.id for h in hits]
+        self.assertIn(self.close_item.id, ids)
+        self.assertNotIn(self.far_item.id, ids)
+
+    @override_settings(ITEM_SEARCH_MIN_SEMANTIC_SCORE=0.0)
+    def test_floor_disabled_returns_all_semantic_hits(self):
+        hits = self._search()
+        self.assertIsNotNone(hits)
+        ids = [h.id for h in hits]
+        self.assertIn(self.close_item.id, ids)
+        self.assertIn(self.far_item.id, ids)

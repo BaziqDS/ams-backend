@@ -49,11 +49,22 @@ class ItemSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
+    def _delete_blockers(self, obj):
+        # Cache per object: can_delete + delete_blockers would otherwise run
+        # the full dependency scan (~10 queries) twice per item.
+        if not hasattr(obj, '_cached_delete_blockers'):
+            bulk = self.context.get('delete_blockers_by_item')
+            if bulk is not None:
+                obj._cached_delete_blockers = bulk.get(obj.id, [])
+            else:
+                obj._cached_delete_blockers = get_delete_blockers(obj)
+        return obj._cached_delete_blockers
+
     def get_delete_blockers(self, obj):
-        return get_delete_blockers(obj)
+        return self._delete_blockers(obj)
 
     def get_can_delete(self, obj):
-        return not self.get_delete_blockers(obj)
+        return not self._delete_blockers(obj)
 
 
     def validate_description(self, value):

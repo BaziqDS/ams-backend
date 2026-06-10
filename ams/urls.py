@@ -42,5 +42,9 @@ urlpatterns = [
 if settings.ENABLE_SILK:
     urlpatterns.append(path('silk/', include('silk.urls', namespace='silk')))
 
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# Serve user-uploaded media (avatars, inspection docs, QR labels) directly
+# from Django regardless of DEBUG. This deploy is Windows + Waitress (no
+# Nginx / CDN in front), so Django is the only thing that can serve /media/.
+# Gating this on DEBUG previously caused a silent 404 trap whenever the
+# environment flipped to production-like settings.
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
