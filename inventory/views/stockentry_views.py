@@ -6,6 +6,7 @@ from rest_framework import viewsets, permissions, filters, serializers, status
 logger = logging.getLogger(__name__)
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from ..models.allocation_model import AllocationStatus, StockAllocation
 from ..models.person_model import Person
 from ..models.correction_model import CorrectionResolutionType, StockCorrectionRequest
 from ..models.inspection_model import InspectionItem
@@ -37,7 +38,15 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     ViewSet for employees/persons.
     Optimized to avoid N+1 in get_parent_standalone loop.
     """
-    queryset = Person.objects.filter(is_active=True).prefetch_related('standalone_locations').order_by('name', 'id')
+    queryset = Person.objects.filter(is_active=True).prefetch_related(
+        'standalone_locations',
+        Prefetch(
+            'allocations',
+            queryset=StockAllocation.objects.filter(
+                status=AllocationStatus.ALLOCATED
+            ).select_related('item'),
+        ),
+    ).order_by('name', 'id')
     serializer_class = PersonSerializer
     permission_classes = [permissions.IsAuthenticated, EmployeePermission]
 

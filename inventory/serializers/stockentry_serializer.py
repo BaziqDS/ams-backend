@@ -22,6 +22,25 @@ from ..services.stock_correction_service import (
 
 class PersonSerializer(serializers.ModelSerializer):
     standalone_locations_display = serializers.StringRelatedField(source='standalone_locations', many=True, read_only=True)
+    issued_items = serializers.SerializerMethodField()
+
+    def get_issued_items(self, obj):
+        # Currently-issued items only (status ALLOCATED), grouped per item so
+        # the same item issued across multiple transactions shows once with a
+        # combined quantity. PersonViewSet prefetches active allocations with
+        # their items, so this loop adds no queries on list responses.
+        grouped = {}
+        for allocation in obj.allocations.all():
+            if allocation.status != AllocationStatus.ALLOCATED:
+                continue
+            entry = grouped.setdefault(allocation.item_id, {
+                'item_id': allocation.item_id,
+                'name': allocation.item.name,
+                'code': allocation.item.code,
+                'quantity': 0,
+            })
+            entry['quantity'] += allocation.quantity
+        return sorted(grouped.values(), key=lambda item: (item['name'] or '').lower())
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -62,7 +81,7 @@ class PersonSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'perse_number', 'name', 'designation', 'department',
             'standalone_locations', 'standalone_locations_display',
-            'is_active', 'created_at', 'updated_at'
+            'issued_items', 'is_active', 'created_at', 'updated_at'
         ]
         extra_kwargs = {
             'perse_number': {'required': True, 'allow_blank': False, 'allow_null': False},
