@@ -12,6 +12,7 @@ from inventory.models.location_model import Location
 class UserSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
     avatar_url = serializers.SerializerMethodField()
+    ai_enabled = serializers.BooleanField(source='profile.ai_enabled', read_only=True)
     assigned_locations = serializers.PrimaryKeyRelatedField(
         source='profile.assigned_locations',
         many=True,
@@ -25,7 +26,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display', 'avatar_url')
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display', 'avatar_url', 'ai_enabled')
 
 
     def get_permissions(self, obj):
@@ -43,6 +44,7 @@ class UserManagementSerializer(serializers.ModelSerializer):
     employee_id = serializers.CharField(source='profile.employee_id', required=False, allow_blank=True)
     avatar = serializers.ImageField(source='profile.avatar', required=False, allow_null=True, write_only=True)
     avatar_url = serializers.SerializerMethodField()
+    ai_enabled = serializers.BooleanField(source='profile.ai_enabled', required=False)
     assigned_locations = serializers.PrimaryKeyRelatedField(
         source='profile.assigned_locations',
         many=True,
@@ -85,7 +87,7 @@ class UserManagementSerializer(serializers.ModelSerializer):
             'is_superuser', 'is_staff', 'is_active', 'power_level',
             'employee_id', 'assigned_locations', 'assigned_locations_display',
             'user_permissions_list', 'groups', 'groups_display', 'last_login',
-            'created_at', 'avatar', 'avatar_url',
+            'created_at', 'avatar', 'avatar_url', 'ai_enabled',
         )
 
     def __init__(self, *args, **kwargs):
@@ -270,6 +272,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
             profile.employee_id = profile_data['employee_id']
         if 'avatar' in profile_data:
             profile.avatar = profile_data['avatar']
+        if 'ai_enabled' in profile_data:
+            profile.ai_enabled = profile_data['ai_enabled']
         if 'is_active' in profile_data:
             profile.is_active = profile_data['is_active']
             user.is_active = profile_data['is_active']
@@ -419,6 +423,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
             profile.employee_id = profile_data['employee_id']
         if 'avatar' in profile_data:
             profile.avatar = profile_data['avatar']
+        if 'ai_enabled' in profile_data:
+            profile.ai_enabled = profile_data['ai_enabled']
         if 'is_active' in profile_data:
             profile.is_active = profile_data['is_active']
             instance.is_active = profile_data['is_active']
@@ -436,7 +442,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserProfile
-        fields = ('id', 'user', 'employee_id', 'avatar', 'assigned_locations', 'assigned_locations_display', 'is_active', 'created_at', 'updated_at')
+        fields = ('id', 'user', 'employee_id', 'avatar', 'assigned_locations', 'assigned_locations_display', 'is_active', 'ai_enabled', 'created_at', 'updated_at')
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)

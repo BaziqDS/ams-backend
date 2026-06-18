@@ -27,6 +27,7 @@ SELF_EDIT_ALLOWED_FIELDS = frozenset({
     "last_name",
     "email",
     "avatar",
+    "ai_enabled",
 })
 
 

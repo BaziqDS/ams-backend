@@ -494,6 +494,38 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
             return resp.data['results']
         return resp.data
 
+    def test_current_user_ai_preference_defaults_false(self):
+        user = self._make_managed_user('ai_default_user', self.csit_lab)
+        self.client.force_authenticate(user=user)
+
+        resp = self.client.get('/auth/users/me/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('ai_enabled', resp.data)
+        self.assertIs(resp.data['ai_enabled'], False)
+
+    def test_non_admin_can_toggle_own_ai_preference_without_privilege_escalation(self):
+        user = self._make_managed_user('ai_self_toggle_user', self.csit_lab)
+        self.client.force_authenticate(user=user)
+
+        resp = self.client.patch(
+            f'/api/users/management/{user.id}/',
+            {
+                'first_name': 'AI',
+                'ai_enabled': True,
+                'is_superuser': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        self.assertEqual(user.first_name, 'AI')
+        self.assertTrue(user.profile.ai_enabled)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(resp.data['ai_enabled'])
+
     def test_scoped_user_manager_can_assign_descendant_location(self):
         manager = self._make_user_manager('csit_manager', self.csit)
         manager.user_permissions.add(self._perm('assign_user_locations'), self._perm('assign_user_roles'))
