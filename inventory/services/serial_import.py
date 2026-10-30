@@ -1,11 +1,16 @@
 import logging
 import re
-import time
 from pathlib import Path
 
 from decouple import config
 
 logger = logging.getLogger(__name__)
+
+
+class SerialExtractionPending(Exception):
+    def __init__(self, job_id):
+        self.job_id = job_id
+        super().__init__('Serial extraction is pending.')
 
 
 class SerialImportParseError(Exception):
@@ -75,7 +80,6 @@ def extract_serials_with_llamaextract(uploaded_file, suffix):
             f"LLAMA_EXTRACT_TIER must be 'agentic' or 'cost_effective'; got {tier}"
         )
     base_url = config("LLAMA_CLOUD_BASE_URL", default="https://api.cloud.llamaindex.ai").rstrip("/")
-    poll_timeout = int(config("LLAMA_EXTRACT_TIMEOUT_SECONDS", default="90"))
     headers = {"Authorization": f"Bearer {api_key}"}
     qs = {"project_id": project_id}
 
@@ -90,7 +94,7 @@ def extract_serials_with_llamaextract(uploaded_file, suffix):
             files={"file": (filename, file_bytes)},
             data={"purpose": "extract"},
             params=qs,
-            timeout=30,
+            timeout=10,
         )
         upload_resp.raise_for_status()
         file_id = upload_resp.json().get("id")
@@ -112,39 +116,40 @@ def extract_serials_with_llamaextract(uploaded_file, suffix):
                     "confidence_scores": False,
                 },
             },
-            timeout=30,
+            timeout=10,
         )
         create_resp.raise_for_status()
         job_id = create_resp.json().get("id")
         if not job_id:
             raise SerialImportParseError("LlamaExtract job creation returned no id.")
 
-        deadline = time.monotonic() + poll_timeout
-        result_data = None
-        while time.monotonic() < deadline:
-            status_resp = requests.get(
-                f"{base_url}/api/v2/extract/{job_id}",
-                headers=headers,
-                params={**qs, "expand": ["extract_metadata", "metadata"]},
-                timeout=15,
-            )
-            status_resp.raise_for_status()
-            body = status_resp.json()
-            state = (body.get("status") or "").upper()
-            if state in {"SUCCESS", "COMPLETED"}:
-                result_data = body.get("extract_result") or body.get("data") or {}
-                break
-            if state in {"ERROR", "FAILED", "CANCELLED"}:
-                raise SerialImportParseError(
-                    f"LlamaExtract job failed: {body.get('error') or state}"
-                )
-            time.sleep(2)
-
-        if result_data is None:
-            raise SerialImportParseError("LlamaExtract timed out before completion.")
+        raise SerialExtractionPending(job_id)
     except requests.RequestException as exc:
-        raise SerialImportParseError(f"LlamaCloud request failed: {exc}") from exc
+        raise SerialImportParseError("Serial extraction provider is temporarily unavailable.") from exc
 
+def poll_serial_extraction(job_id):
+    """One provider status check; waiting happens between client requests."""
+    import requests
+    api_key = config('LLAMA_CLOUD_API_KEY', default='').strip()
+    project_id = config('LLAMA_CLOUD_PROJECT_ID', default='').strip()
+    base_url = config('LLAMA_CLOUD_BASE_URL', default='https://api.cloud.llamaindex.ai').rstrip('/')
+    try:
+        response = requests.get(
+            f'{base_url}/api/v2/extract/{job_id}',
+            headers={'Authorization': f'Bearer {api_key}'},
+            params={'project_id': project_id, 'expand': ['extract_metadata', 'metadata']},
+            timeout=10,
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SerialImportParseError('Serial extraction status is temporarily unavailable.') from exc
+    state = (body.get('status') or '').upper()
+    if state in {'ERROR', 'FAILED', 'CANCELLED'}:
+        raise SerialImportParseError('Serial extraction failed. Please retry with a clearer document.')
+    if state not in {'SUCCESS', 'COMPLETED'}:
+        raise SerialExtractionPending(job_id)
+    result_data = body.get('extract_result') or body.get('data') or {}
     serials = result_data.get("serials") or [] if isinstance(result_data, dict) else []
     candidates = []
     seen = set()

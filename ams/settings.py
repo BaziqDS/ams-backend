@@ -172,7 +172,7 @@ REST_FRAMEWORK = {
 # =============================================================================
 from datetime import timedelta
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=12),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
@@ -201,6 +201,9 @@ COOKIE_SECURE = config(
     cast=bool,
 )
 
+VOICE_MINUTE_LIMIT = config('VOICE_MINUTE_LIMIT', default=20, cast=int)
+VOICE_DAILY_LIMIT = config('VOICE_DAILY_LIMIT', default=200, cast=int)
+
 CSRF_TRUSTED_ORIGINS = config(
     'CSRF_TRUSTED_ORIGINS',
     default=FRONTEND_URL,
@@ -221,8 +224,9 @@ DJOSER = {
     },
     'PERMISSIONS': {
         'user_create': ['ams.permissions.DjoserUserCreateDisabled'],
-        'user': ['rest_framework.permissions.IsAuthenticated'],
-        'user_list': ['rest_framework.permissions.IsAuthenticated'],
+        'user': ['ams.permissions.DjoserSelfOnly'],
+        'user_list': ['ams.permissions.DjoserSelfOnly'],
+        'user_delete': ['ams.permissions.DjoserUserCreateDisabled'],
         'token_create': ['rest_framework.permissions.AllowAny'],
     },
 }
@@ -277,3 +281,16 @@ ITEM_SEARCH_MIN_SEMANTIC_SCORE = config(
     'ITEM_SEARCH_MIN_SEMANTIC_SCORE', default=0.35, cast=float,
 )
 
+
+# Enable these individually for an HTTPS deployment (see .env.example).
+SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
+SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=0, cast=int)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=False, cast=bool)
+SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=False, cast=bool)
+# Enable only behind a trusted proxy that overwrites X-Forwarded-Proto.
+if config('TRUST_PROXY_HTTPS_HEADER', default=False, cast=bool):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+COOKIE_DOMAIN = config('COOKIE_DOMAIN', default='').strip() or None
+SESSION_COOKIE_DOMAIN = COOKIE_DOMAIN
+CSRF_COOKIE_DOMAIN = COOKIE_DOMAIN

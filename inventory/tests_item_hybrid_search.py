@@ -102,47 +102,16 @@ class ItemPostSaveSignalTests(TestCase):
         defaults.update(kwargs)
         return Item.objects.create(**defaults)
 
-    @patch("inventory.signals._has_embedding", return_value=True)
-    @patch("inventory.signals._write_embedding")
     @patch("inventory.signals.embed_item")
     @patch("inventory.signals._refresh_tsvector")
-    @patch("inventory.signals.connection")
-    def test_no_reembed_when_irrelevant_field_changes(
-        self, mock_conn, mock_refresh, mock_embed, mock_write, mock_has,
-    ):
-        # Force the SQLite test run to look like Postgres so the signal body
-        # executes. The actual DB writes are mocked out.
-        mock_conn.vendor = "postgresql"
-
-        class _FakeResult:
-            text = "T"
-            text_hash = "stable-hash"
-            vector = [0.0]
-            error = None
-
-        mock_embed.return_value = _FakeResult()
-
+    def test_saves_refresh_lexical_index_without_reembedding_in_request(self, refresh, embed):
         item = self._make_item()
-        # Initial save triggered one embed call.
-        self.assertEqual(mock_embed.call_count, 1)
-
-        # Simulate that the hash got persisted.
-        Item.objects.filter(pk=item.pk).update(embedded_text_hash="stable-hash")
-        item.refresh_from_db()
-
-        # Now save again touching nothing that matters.
-        with patch(
-            "inventory.signals.build_item_embedding_text",
-            return_value="T",
-        ):
-            with patch(
-                "inventory.signals.hash_text",
-                return_value="stable-hash",
-            ):
-                item.save()
-
-        # Should not have re-embedded — hash match + _has_embedding=True.
-        self.assertEqual(mock_embed.call_count, 1)
+        item.is_active = False
+        item.save(update_fields=['is_active'])
+        item.description = 'new description'
+        item.save(update_fields=['description'])
+        embed.assert_not_called()
+        self.assertEqual(refresh.call_count, 3)
 
 
 # ---------------------------------------------------------------------------

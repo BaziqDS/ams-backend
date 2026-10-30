@@ -1,6 +1,8 @@
 from django.http import StreamingHttpResponse
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -9,23 +11,34 @@ from ai_assistant.service import AssistantConfigurationError, InventoryAssistant
 
 class ConversationTurnSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=["user", "assistant"])
-    content = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    content = serializers.CharField(allow_blank=False, trim_whitespace=True, max_length=4000)
 
 
 class AssistantChatRequestSerializer(serializers.Serializer):
-    message = serializers.CharField(allow_blank=False, trim_whitespace=True)
-    history = ConversationTurnSerializer(many=True, required=False, default=list)
+    message = serializers.CharField(allow_blank=False, trim_whitespace=True, max_length=4000)
+    history = ConversationTurnSerializer(many=True, required=False, default=list, max_length=20)
+
+
+class AssistantEnabled(BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user.is_authenticated and request.user.profile.ai_enabled)
+
+
+class AssistantThrottle(UserRateThrottle):
+    scope = 'assistant'
+    rate = '10/minute'
 
 
 class AssistantChatView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, AssistantEnabled]
+    throttle_classes = [AssistantThrottle]
 
     def post(self, request):
         serializer = AssistantChatRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         try:
-            service = InventoryAssistantService()
+            service = InventoryAssistantService(user=request.user)
             response = service.chat(
                 message=serializer.validated_data["message"],
                 history=serializer.validated_data.get("history", []),
@@ -44,7 +57,8 @@ class AssistantChatView(APIView):
 
 
 class AssistantChatStreamView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, AssistantEnabled]
+    throttle_classes = [AssistantThrottle]
 
     def post(self, request):
         serializer = AssistantChatRequestSerializer(data=request.data)
@@ -52,7 +66,7 @@ class AssistantChatStreamView(APIView):
 
         def event_stream():
             try:
-                service = InventoryAssistantService()
+                service = InventoryAssistantService(user=request.user)
                 for event in service.stream_chat_events(
                     message=serializer.validated_data["message"],
                     history=serializer.validated_data.get("history", []),

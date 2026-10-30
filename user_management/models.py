@@ -3,6 +3,15 @@ from django.contrib.auth.models import Group, User, Permission
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 
+
+class VoiceUsage(models.Model):
+    """Provider quotas shared by all web workers via PostgreSQL."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, primary_key=True)
+    day = models.DateField()
+    daily_count = models.PositiveIntegerField(default=0)
+    minute_started_at = models.DateTimeField()
+    minute_count = models.PositiveIntegerField(default=0)
+
 class RoleMetadata(models.Model):
     group = models.OneToOneField(Group, on_delete=models.CASCADE, related_name='role_metadata')
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_role_metadata')

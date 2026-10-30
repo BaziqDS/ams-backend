@@ -27,7 +27,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Create logs directory
         run: |
@@ -37,16 +37,29 @@ jobs:
         run: |
           python -m venv venv
           .\venv\Scripts\python.exe -m pip install --upgrade pip
-          .\venv\Scripts\pip.exe install -r requirements.txt
+          .\venv\Scripts\pip.exe install -r requirements.lock.txt
           .\venv\Scripts\pip.exe install waitress
 
       - name: Create environment file
         env:
+          AMS_COOKIE_DOMAIN: ${{ secrets.COOKIE_DOMAIN }}
+          AMS_SECURE_SSL_REDIRECT: ${{ secrets.SECURE_SSL_REDIRECT }}
+          AMS_SECURE_HSTS_SECONDS: ${{ secrets.SECURE_HSTS_SECONDS }}
+          AMS_TRUST_PROXY_HTTPS_HEADER: ${{ secrets.TRUST_PROXY_HTTPS_HEADER }}
+          AMS_FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+          AMS_CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          AMS_SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          AMS_DB_NAME: ${{ secrets.DB_NAME }}
+          AMS_DB_USER: ${{ secrets.DB_USER }}
+          AMS_DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          AMS_DB_HOST: ${{ secrets.DB_HOST }}
+          AMS_DB_PORT: ${{ secrets.DB_PORT }}
+          AMS_ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
           AMS_COOKIE_SECURE: ${{ secrets.COOKIE_SECURE }}
           AMS_CSRF_TRUSTED_ORIGINS: ${{ secrets.CSRF_TRUSTED_ORIGINS }}
         run: |
-          $frontendUrl = "${{ secrets.FRONTEND_URL }}".Trim()
-          $corsAllowedOrigins = "${{ secrets.CORS_ALLOWED_ORIGINS }}".Trim()
+          $frontendUrl = $env:AMS_FRONTEND_URL.Trim()
+          $corsAllowedOrigins = $env:AMS_CORS_ALLOWED_ORIGINS.Trim()
           $cookieSecure = $env:AMS_COOKIE_SECURE
           if ([string]::IsNullOrWhiteSpace($cookieSecure)) { $cookieSecure = "True" }
           $csrfTrustedOrigins = $env:AMS_CSRF_TRUSTED_ORIGINS
@@ -80,18 +93,23 @@ jobs:
 
           $lines = @(
             "DEBUG=False",
-            "SECRET_KEY=${{ secrets.SECRET_KEY }}",
-            "DB_NAME=${{ secrets.DB_NAME }}",
-            "DB_USER=${{ secrets.DB_USER }}",
-            "DB_PASSWORD=${{ secrets.DB_PASSWORD }}",
-            "DB_HOST=${{ secrets.DB_HOST }}",
-            "DB_PORT=${{ secrets.DB_PORT }}",
-            "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}",
+            "SECRET_KEY=$env:AMS_SECRET_KEY",
+            "DB_NAME=$env:AMS_DB_NAME",
+            "DB_USER=$env:AMS_DB_USER",
+            "DB_PASSWORD=$env:AMS_DB_PASSWORD",
+            "DB_HOST=$env:AMS_DB_HOST",
+            "DB_PORT=$env:AMS_DB_PORT",
+            "ALLOWED_HOSTS=$env:AMS_ALLOWED_HOSTS",
             "CORS_ALLOWED_ORIGINS=$corsAllowedOrigins",
             "CSRF_TRUSTED_ORIGINS=$csrfTrustedOrigins",
             "COOKIE_SECURE=$cookieSecure",
+            "COOKIE_DOMAIN=$env:AMS_COOKIE_DOMAIN",
             "FRONTEND_URL=$frontendUrl"
           )
+          foreach ($setting in @('SECURE_SSL_REDIRECT', 'SECURE_HSTS_SECONDS', 'TRUST_PROXY_HTTPS_HEADER')) {
+            $value = [Environment]::GetEnvironmentVariable("AMS_$setting")
+            if (-not [string]::IsNullOrWhiteSpace($value)) { $lines += "$setting=$value" }
+          }
           # Write UTF-8 without BOM so python-decouple reads the first key correctly.
           $envPath = Join-Path (Resolve-Path ".").Path ".env"
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

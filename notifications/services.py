@@ -1007,8 +1007,9 @@ def build_user_alerts(user: User) -> list[dict[str, object]]:
     )]
 
 
-def build_notification_summary(user: User) -> dict[str, object]:
-    alerts = build_user_alerts(user)
+def build_notification_summary(user: User, *, alerts=None) -> dict[str, object]:
+    if alerts is None:
+        alerts = build_user_alerts(user)
     unread_notifications = UserNotification.objects.filter(user=user, is_read=False).count()
     modules: dict[str, dict[str, int]] = defaultdict(lambda: {"count": 0, "critical": 0})
     open_alerts = 0

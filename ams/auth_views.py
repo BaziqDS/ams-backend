@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.middleware.csrf import get_token, rotate_token
+from rest_framework.authentication import SessionAuthentication
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -19,6 +21,16 @@ ACCESS_COOKIE = 'ams_access'
 REFRESH_COOKIE = 'ams_refresh'
 
 
+class CsrfTokenView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        response = Response({'csrfToken': get_token(request)})
+        response['Cache-Control'] = 'no-store'
+        return response
+
+
 def _set_token_cookies(response, access_token: str, refresh_token: str | None = None):
     secure = settings.COOKIE_SECURE
     samesite = 'Lax'
@@ -31,6 +43,7 @@ def _set_token_cookies(response, access_token: str, refresh_token: str | None = 
         secure=secure,
         samesite=samesite,
         path='/',
+        domain=settings.COOKIE_DOMAIN,
     )
     if refresh_token is not None:
         response.set_cookie(
@@ -41,6 +54,7 @@ def _set_token_cookies(response, access_token: str, refresh_token: str | None = 
             secure=secure,
             samesite=samesite,
             path='/',
+            domain=settings.COOKIE_DOMAIN,
         )
 
 
@@ -52,9 +66,11 @@ class CookieLoginView(APIView):
     Returns 200 with { "detail": "Login successful." }
     """
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
+        SessionAuthentication().enforce_csrf(request)
         username = request.data.get('username')
         password = request.data.get('password')
 
@@ -78,6 +94,7 @@ class CookieLoginView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+        rotate_token(request)
         refresh = RefreshToken.for_user(user)
         response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
         _set_token_cookies(response, str(refresh.access_token), str(refresh))
@@ -93,9 +110,11 @@ class CookieRefreshView(APIView):
     block legitimate silent refreshes.
     """
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = []  # exempt from global throttle
 
     def post(self, request):
+        SessionAuthentication().enforce_csrf(request)
         raw_refresh = request.COOKIES.get(REFRESH_COOKIE)
         if not raw_refresh:
             return Response(
@@ -128,7 +147,13 @@ class CookieLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        raw_refresh = request.COOKIES.get(REFRESH_COOKIE)
+        if raw_refresh:
+            try:
+                RefreshToken(raw_refresh).blacklist()
+            except TokenError:
+                pass  # An invalid/already-revoked token must not prevent logout.
         response = Response({'detail': 'Logged out.'}, status=status.HTTP_200_OK)
-        response.delete_cookie(ACCESS_COOKIE, path='/')
-        response.delete_cookie(REFRESH_COOKIE, path='/')
+        response.delete_cookie(ACCESS_COOKIE, path='/', domain=settings.COOKIE_DOMAIN)
+        response.delete_cookie(REFRESH_COOKIE, path='/', domain=settings.COOKIE_DOMAIN)
         return response

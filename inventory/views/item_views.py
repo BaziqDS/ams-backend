@@ -104,6 +104,12 @@ class ItemViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        ids = self.request.query_params.get('ids')
+        if ids is not None:
+            tokens = ids.split(',')
+            if len(tokens) > 100 or any(not token.isdigit() for token in tokens):
+                return queryset.none()
+            queryset = queryset.filter(pk__in=[int(token) for token in tokens])
         user = self.request.user
         if not hasattr(user, 'profile'):
             return queryset.none()

@@ -295,6 +295,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
             'location__parent_location',
             'item',
             'item__category',
+            'item__category__parent_category',
             'batch'
         ).prefetch_related(
             'location__tags',
@@ -311,7 +312,7 @@ class StockRecordViewSet(ScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         return queryset.filter(
             location__in=get_item_scope_locations(user, get_scope_tokens_from_request(self.request))
-        ).distinct()
+        ).distinct().order_by('id')
 
     @action(detail=False, methods=['get'])
     def hierarchical(self, request):

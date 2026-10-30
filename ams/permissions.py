@@ -1,6 +1,16 @@
 from rest_framework import permissions
 
 
+class DjoserSelfOnly(permissions.BasePermission):
+    """Account settings only; scoped administration lives under /api/users/."""
+
+    def has_permission(self, request, view):
+        return bool(request.user.is_authenticated and view.action != 'list')
+
+    def has_object_permission(self, request, view, obj):
+        return obj.pk == request.user.pk
+
+
 class DjoserUserCreateDisabled(permissions.BasePermission):
     message = 'Use the scoped user management API to create accounts.'
 

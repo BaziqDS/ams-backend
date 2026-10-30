@@ -27,6 +27,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_superuser', 'is_staff', 'permissions', 'assigned_locations', 'groups_display', 'avatar_url', 'ai_enabled')
+        read_only_fields = ('id', 'is_superuser', 'is_staff')
 
 
     def get_permissions(self, obj):
@@ -340,8 +341,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
                     ),
                 })
 
-        if editing_self and 'user_permissions_list' in validated_data:
-            incoming_ids = {perm.pk for perm in validated_data['user_permissions_list']}
+        if editing_self and 'user_permissions' in validated_data:
+            incoming_ids = {perm.pk for perm in validated_data['user_permissions']}
             current_ids = set(instance.user_permissions.values_list('pk', flat=True))
             if incoming_ids != current_ids:
                 raise serializers.ValidationError({
@@ -373,7 +374,7 @@ class UserManagementSerializer(serializers.ModelSerializer):
                 'groups': "You do not have permission to assign roles to users.",
             })
 
-        if 'user_permissions_list' in validated_data and not self._request_user_has_permission('assign_user_roles'):
+        if 'user_permissions' in validated_data and not self._request_user_has_permission('assign_user_roles'):
             raise serializers.ValidationError({
                 'user_permissions_list': "You do not have permission to assign direct permissions to users.",
             })
@@ -409,8 +410,8 @@ class UserManagementSerializer(serializers.ModelSerializer):
         if password is not None:
             instance.set_password(password)
 
-        if 'user_permissions_list' in validated_data:
-            instance.user_permissions.set(validated_data['user_permissions_list'])
+        if 'user_permissions' in validated_data:
+            instance.user_permissions.set(validated_data['user_permissions'])
 
         if 'groups' in validated_data:
             instance.groups.set(validated_data['groups'])
@@ -443,6 +444,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
         fields = ('id', 'user', 'employee_id', 'avatar', 'assigned_locations', 'assigned_locations_display', 'is_active', 'ai_enabled', 'created_at', 'updated_at')
+
+    def update(self, instance, validated_data):
+        # Reuse the management contract, including assignment permissions,
+        # self-edit restrictions, active-user sync and scoped location checks.
+        manager = UserManagementSerializer(
+            instance.user, data=self.initial_data, partial=self.partial,
+            context=self.context,
+        )
+        manager.is_valid(raise_exception=True)
+        manager.save()
+        instance.refresh_from_db()
+        return instance
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)

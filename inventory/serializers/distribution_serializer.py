@@ -2,6 +2,41 @@ from rest_framework import serializers
 from ..models.stock_record_model import StockRecord
 from ..models.inspection_model import InspectionItem
 from ..models.stockentry_model import StockEntryItem
+from ..models.location_model import Location
+
+
+class StockRecordListSerializer(serializers.ListSerializer):
+    def to_representation(self, data):
+        rows = list(data.all() if hasattr(data, 'all') else data)
+        if not rows:
+            return []
+        # Location paths use stable codes. Load ancestors once for this page,
+        # including their tags, regardless of hierarchy depth.
+        codes = {code for row in rows for code in row.location.hierarchy_path.split('/') if code}
+        locations = {loc.code: loc for loc in Location.objects.filter(code__in=codes).prefetch_related('tags')}
+        item_ids = {row.item_id for row in rows}
+        batch_numbers = {row.batch.batch_number for row in rows if row.batch_id}
+        inspections = {}
+        if batch_numbers:
+            for item in InspectionItem.objects.filter(item_id__in=item_ids, batch_number__in=batch_numbers).select_related('inspection_certificate').order_by('-inspection_certificate__date', '-id'):
+                inspections.setdefault((item.item_id, item.batch_number), []).append(item.inspection_certificate.contract_no)
+        entries = {}
+        for item in StockEntryItem.objects.filter(
+            item_id__in=item_ids, stock_entry__status='COMPLETED',
+            stock_entry__inspection_certificate__isnull=False,
+        ).select_related('stock_entry__inspection_certificate').order_by('-stock_entry__entry_date', '-id'):
+            entries.setdefault((item.item_id, item.batch_id), []).append(item.stock_entry.inspection_certificate.contract_no)
+        for row in rows:
+            tags = {tag.id: tag for tag in row.location.tags.all()}
+            for code in reversed(row.location.hierarchy_path.split('/')):
+                ancestor = locations.get(code)
+                if ancestor and ancestor.is_standalone:
+                    tags.update({tag.id: tag for tag in ancestor.tags.all()})
+                    break
+            row._reporting_tags = sorted(tags.values(), key=lambda tag: tag.name)
+            contracts = inspections.get((row.item_id, row.batch.batch_number), []) if row.batch_id else []
+            row._source_contracts = list(dict.fromkeys(contracts + entries.get((row.item_id, row.batch_id), [])))
+        return super().to_representation(rows)
 
 class StockRecordSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
@@ -16,6 +51,8 @@ class StockRecordSerializer(serializers.ModelSerializer):
     source_inspection_contracts = serializers.SerializerMethodField()
 
     def _reporting_tags(self, obj):
+        if hasattr(obj, '_reporting_tags'):
+            return obj._reporting_tags
         tags_by_id = {tag.id: tag for tag in obj.location.tags.all()}
         standalone = obj.location.get_parent_standalone()
         if standalone and standalone.id != obj.location_id:
@@ -42,6 +79,8 @@ class StockRecordSerializer(serializers.ModelSerializer):
         ]
 
     def get_source_inspection_contracts(self, obj):
+        if hasattr(obj, '_source_contracts'):
+            return obj._source_contracts
         contracts = []
         seen = set()
 
@@ -79,6 +118,7 @@ class StockRecordSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StockRecord
+        list_serializer_class = StockRecordListSerializer
         fields = [
             'id', 'item', 'item_name', 'batch', 'batch_number', 
             'item_code', 'subcategory_name', 'category_type', 'low_stock_threshold', 'source_inspection_contracts',

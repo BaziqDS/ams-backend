@@ -11,6 +11,8 @@ class AssistantChatApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user = User.objects.create_user(username="assistant.user", password="pw")
+        self.user.profile.ai_enabled = True
+        self.user.profile.save(update_fields=['ai_enabled'])
 
     def test_chat_endpoint_requires_authentication(self):
         response = self.client.post("/api/ai/chat/", {"message": "hello"}, format="json")
@@ -71,6 +73,11 @@ class AssistantChatApiTests(TestCase):
 
 
 class AssistantServiceFormattingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='formatter')
+        self.user.profile.ai_enabled = True
+        self.user.profile.save(update_fields=['ai_enabled'])
+
     @patch("ai_assistant.service._import_langchain_dependencies")
     @patch("ai_assistant.service._import_openrouter_model")
     def test_chat_handles_missing_formatter_keys_without_crashing(self, model_import_mock, deps_import_mock):
@@ -83,7 +90,7 @@ class AssistantServiceFormattingTests(TestCase):
                 return FakeStructuredModel()
 
         class FakeSqlAgent:
-            def invoke(self, _payload):
+            def invoke(self, _payload, **kwargs):
                 class Message:
                     content = "There are no assets in the system."
 
@@ -105,13 +112,13 @@ class AssistantServiceFormattingTests(TestCase):
                 return cls()
 
         def fake_create_agent(_model, _tools, system_prompt):
-            self.assertIn("SQL database", system_prompt)
+            self.assertIn("read-only", system_prompt)
             return FakeSqlAgent()
 
         model_import_mock.return_value = FakeModel()
-        deps_import_mock.return_value = (fake_create_agent, FakeToolkit, FakeDatabase)
+        deps_import_mock.return_value = (fake_create_agent, lambda fn: fn)
 
-        service = InventoryAssistantService()
+        service = InventoryAssistantService(user=self.user)
         response = service.chat(message="Show me inventory health", history=[])
 
         self.assertEqual(response.mode, "text")
@@ -132,7 +139,7 @@ class AssistantServiceFormattingTests(TestCase):
                 yield FakeChunk('Card([])')
 
         class FakeSqlAgent:
-            def invoke(self, _payload):
+            def invoke(self, _payload, **kwargs):
                 class Message:
                     content = "Two items are below their threshold."
 
@@ -154,13 +161,13 @@ class AssistantServiceFormattingTests(TestCase):
                 return cls()
 
         def fake_create_agent(_model, _tools, system_prompt):
-            self.assertIn("SQL database", system_prompt)
+            self.assertIn("read-only", system_prompt)
             return FakeSqlAgent()
 
         model_import_mock.return_value = FakeModel()
-        deps_import_mock.return_value = (fake_create_agent, FakeToolkit, FakeDatabase)
+        deps_import_mock.return_value = (fake_create_agent, lambda fn: fn)
 
-        service = InventoryAssistantService()
+        service = InventoryAssistantService(user=self.user)
         events = list(service.stream_chat_events(message="Show low inventory", history=[]))
 
         self.assertEqual(events[0]["type"], "status")

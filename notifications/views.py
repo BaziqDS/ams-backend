@@ -12,7 +12,10 @@ class NotificationSummaryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        return Response(build_notification_summary(request.user))
+        alerts = build_user_alerts(request.user)
+        summary = build_notification_summary(request.user, alerts=alerts)
+        summary['alerts'] = NotificationAlertSerializer(alerts, many=True).data
+        return Response(summary)
 
 
 class NotificationAlertsView(APIView):

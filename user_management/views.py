@@ -76,11 +76,26 @@ def _visible_users_queryset(request_user):
 
 
 class UserProfileViewSet(viewsets.ModelViewSet):
+    http_method_names = ['get', 'patch', 'put', 'head', 'options']
     queryset = UserProfile.objects.all().select_related("user").prefetch_related("assigned_locations")
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated, UserAccountPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ["user__username", "employee_id"]
+
+    def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.user_id == request.user.pk and not (
+            request.user.is_superuser or _has_perm(request.user, 'edit_user_accounts')
+        ):
+            serializer = self.get_serializer(
+                instance, data=UserViewSet._restrict_to_self_edit_fields(request.data),
+                partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            return Response(serializer.data)
+        return super().partial_update(request, *args, **kwargs)
 
     def get_queryset(self):
         request_user = self.request.user

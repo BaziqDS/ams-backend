@@ -807,9 +807,9 @@ def auto_generate_stock_from_inspection(sender, instance, created, **kwargs):
 # no-op for unrelated saves (e.g. last_used_at updates), keeping write
 # amplification and embedding-API spend low.
 #
-# Synchronous by design (per user choice). Errors are caught — the Item save
-# is the source of truth, embedding is best-effort. The backfill command
-# retries items whose embedded_text_hash is empty.
+# Embeddings are processed by backfill_item_embeddings outside web requests.
+# Schedule that idempotent command to keep semantic search current. The cheap
+# lexical index stays synchronous so saved items remain searchable immediately.
 
 _INDEXED_FIELDS = ('name', 'code', 'description', 'specifications',
                    'category_id', 'acct_unit')
@@ -827,21 +827,6 @@ def refresh_item_search_index(sender, instance: Item, created, **kwargs):
         # catalog (is_provisional flips to False).
         return
 
-    desired_text = build_item_embedding_text(instance)
-    desired_hash = hash_text(desired_text)
-
-    # Skip if nothing material changed. `embedding` is not a Django field
-    # (Postgres-only column), so we check it via raw SQL.
-    if instance.embedded_text_hash == desired_hash and _has_embedding(instance.pk):
-        _refresh_tsvector(instance.pk)
-        return
-
-    # Recompute embedding inline.
-    result = embed_item(instance)
-
-    Item.objects.filter(pk=instance.pk).update(embedded_text_hash=result.text_hash)
-    if result.vector is not None:
-        _write_embedding(instance.pk, result.vector)
     _refresh_tsvector(instance.pk)
 
 
@@ -861,18 +846,21 @@ def _has_embedding(item_id: int) -> bool:
         return False
 
 
-def _write_embedding(item_id: int, vector) -> None:
+def _write_embedding(item_id: int, vector) -> bool:
     """Persist an embedding vector to the Postgres-only column."""
     if connection.vendor != 'postgresql':
-        return
+        return False
     try:
         with connection.cursor() as cur:
             cur.execute(
                 "UPDATE inventory_item SET embedding = %s::vector WHERE id = %s",
                 [str(list(vector)), item_id],
             )
+        return True
     except Exception as exc:
         logger.warning("Failed to write embedding for item %s: %s", item_id, exc)
+
+        return False
 
 
 def _refresh_tsvector(item_id: int) -> None:

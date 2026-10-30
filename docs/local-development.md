@@ -45,14 +45,14 @@ working test databases without granting the application role superuser access.
 
 ```powershell
 py -3.13 -m venv venv
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m pip install -r requirements.lock.txt
 ```
 
 Alternatively, with uv installed:
 
 ```powershell
 uv venv --python 3.13 venv
-uv pip install --python venv\Scripts\python.exe -r requirements.txt
+uv pip install --python venv\Scripts\python.exe -r requirements.lock.txt
 ```
 
 Copy `.env.example` to `.env` if `.env` does not already exist. Generate a
@@ -60,7 +60,9 @@ unique `SECRET_KEY` and fill in the PostgreSQL connection details. `.env` is
 ignored by Git. PostgreSQL is always used. For local HTTP access, set
 `DEBUG=True`, `COOKIE_SECURE=False`, `ALLOWED_HOSTS=localhost,127.0.0.1`, and
 set `FRONTEND_URL`, CORS and CSRF origins to the local frontend URLs.
-The current local `.env` already contains these values.
+When starting from the HTTPS example, also set `SECURE_SSL_REDIRECT=False`,
+`SECURE_HSTS_SECONDS=0`, `TRUST_PROXY_HTTPS_HEADER=False`, and clear
+`COOKIE_DOMAIN` for localhost. The current local `.env` already uses local values.
 
 ## PostgreSQL database
 
@@ -111,3 +113,5 @@ configured. For application tests on the local PostgreSQL server:
 
 PostgreSQL is the only configured backend. See [deployment.md](deployment.md)
 for the server handoff and the deployment-oriented `.env.example`.
+
+Install `requirements-dev.txt` to run the complete test suite (includes the PDF test dependency).

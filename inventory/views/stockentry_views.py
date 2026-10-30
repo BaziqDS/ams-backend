@@ -1,6 +1,8 @@
 from django.utils import timezone
 import logging
-from django.db.models import Prefetch, Q
+from django.db.models import Prefetch, Q, OuterRef, Subquery, F
+from django.db.models.functions import Coalesce
+from rest_framework.pagination import PageNumberPagination
 from rest_framework import viewsets, permissions, filters, serializers, status
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,10 @@ class PersonViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
 
 EmployeeViewSet = PersonViewSet
 
+
+class MovementPagination(PageNumberPagination):
+    page_size = 12
+
 class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     """
     ViewSet for Stock Entries.
@@ -159,6 +165,41 @@ class StockEntryViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, StockEntryPermission]
     filter_backends = [filters.SearchFilter]
     search_fields = ['entry_number', 'remarks']
+
+    @action(detail=False, methods=['get'])
+    def movements(self, request):
+        """Paginate movements rather than splitting issue/auto-receipt pairs."""
+        visible = self.get_queryset()
+        receipts = visible.filter(
+            entry_type='RECEIPT', reference_purpose='AUTO_RECEIPT',
+            reference_entry_id=OuterRef('pk'),
+        ).order_by('-entry_date', '-id')
+        anchors = visible.exclude(
+            entry_type='RECEIPT', reference_purpose='AUTO_RECEIPT',
+            reference_entry_id__in=visible.values('pk'),
+        ).annotate(effective_status=Coalesce(Subquery(receipts.values('status')[:1]), F('status')))
+        search = request.query_params.get('search', '').strip()
+        if search:
+            anchors = anchors.filter(
+                Q(entry_number__icontains=search) | Q(remarks__icontains=search)
+                | Q(purpose__icontains=search) | Q(from_location__name__icontains=search)
+                | Q(to_location__name__icontains=search) | Q(issued_to__name__icontains=search)
+                | Q(items__item__name__icontains=search)
+                | Q(correction_entries__id__in=visible.filter(entry_number__icontains=search).values('pk'))
+            )
+        entry_status = request.query_params.get('status')
+        if entry_status and entry_status != 'all':
+            anchors = anchors.filter(effective_status=entry_status)
+        paginator = MovementPagination()
+        page = paginator.paginate_queryset(anchors.distinct().order_by('-entry_date', '-id'), request, view=self)
+        rows = list(page)
+        rows.extend(visible.filter(
+            entry_type='RECEIPT', reference_purpose='AUTO_RECEIPT',
+            reference_entry_id__in=[row.pk for row in page],
+        ))
+        context = self.get_serializer_context()
+        self._add_source_inspection_context(context, rows)
+        return paginator.get_paginated_response(self.get_serializer(rows, many=True, context=context).data)
 
     def _add_source_inspection_context(self, context, entries):
         pairs = set()

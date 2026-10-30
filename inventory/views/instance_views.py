@@ -1,3 +1,5 @@
+from django.core import signing
+from inventory.services.serial_import import SerialExtractionPending, poll_serial_extraction
 from collections import defaultdict
 import json
 
@@ -290,6 +292,18 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         - Uploaded text file ? regex parse on decoded contents.
         - Uploaded binary file ? LlamaExtract schema-driven extraction.
         """
+        ticket = self.request.data.get('extraction_ticket')
+        if ticket:
+            try:
+                job = signing.loads(ticket, salt='serial-extraction', max_age=600)
+                if job['user'] != self.request.user.pk:
+                    raise signing.BadSignature('Wrong owner')
+            except (signing.BadSignature, KeyError, TypeError):
+                raise ValidationError({'extraction_ticket': 'Invalid or expired extraction ticket.'})
+            try:
+                return poll_serial_extraction(job['job']), 'file', 'llamaextract'
+            except SerialImportParseError as exc:
+                raise ValidationError({'file': str(exc)})
         text = self.request.data.get('serial_numbers') or self.request.data.get('raw_text') or ''
         if text:
             return parse_serial_candidates(str(text)), 'text', 'line_split'
@@ -366,7 +380,14 @@ class ItemInstanceViewSet(ScopedViewSetMixin, viewsets.ModelViewSet):
         item = self._get_individual_item()
         store_ids = self._get_serial_import_store_ids()
         certificate = self._get_serial_import_certificate(required=True)
-        candidates, source, extraction_mode = self._get_serial_candidates()
+        try:
+            candidates, source, extraction_mode = self._get_serial_candidates()
+        except SerialExtractionPending as pending:
+            ticket = request.data.get('extraction_ticket') or signing.dumps(
+                {'user': request.user.pk, 'job': pending.job_id}, salt='serial-extraction',
+            )
+            return Response({'status': 'processing', 'extraction_ticket': ticket, 'retry_after': 2},
+                            status=202, headers={'Retry-After': '2'})
         if not candidates:
             raise ValidationError({
                 'serial_numbers': 'No serial numbers were found in the provided content.',

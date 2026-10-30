@@ -26,7 +26,7 @@ import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection
+from django.db import connection, transaction
 
 from inventory.models.item_model import Item
 from inventory.services.embeddings import (
@@ -72,6 +72,23 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **opts):
+        if connection.vendor != 'postgresql':
+            raise CommandError('Hybrid search requires PostgreSQL.')
+        # Scheduled invocations may overlap. Only one worker spends provider
+        # credits at a time, including across separate server processes.
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_try_advisory_lock(%s)', [419872601])
+            locked = cursor.fetchone()[0]
+        if not locked:
+            self.stdout.write('Another embedding worker is running; skipping.')
+            return
+        try:
+            return self._backfill(*args, **opts)
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pg_advisory_unlock(%s)', [419872601])
+
+    def _backfill(self, *args, **opts):
         if connection.vendor != 'postgresql':
             raise CommandError(
                 "Hybrid search is Postgres-only. Active DB vendor is "
@@ -148,15 +165,21 @@ class Command(BaseCommand):
                     continue
 
                 result = embed_item(item)
-                Item.objects.filter(pk=item.pk).update(
-                    embedded_text_hash=result.text_hash,
-                )
-                if result.vector is None:
-                    failed += 1
-                else:
-                    _write_embedding(item.pk, result.vector)
-                    embedded += 1
-                _refresh_tsvector(item.pk)
+                # Provider calls happen before taking a row lock. Never publish
+                # an old vector if the item changed while the provider worked.
+                with transaction.atomic():
+                    current = Item.objects.select_for_update(of=('self',)).select_related('category__parent_category').filter(pk=item.pk, is_provisional=False).first()
+                    if current is None or hash_text(build_item_embedding_text(current)) != result.text_hash:
+                        skipped += 1
+                        continue
+                    if result.vector is None:
+                        failed += 1
+                    elif _write_embedding(item.pk, result.vector):
+                        Item.objects.filter(pk=item.pk).update(embedded_text_hash=result.text_hash)
+                        embedded += 1
+                    else:
+                        failed += 1
+                    _refresh_tsvector(item.pk)
 
             if limit and processed >= limit:
                 break
