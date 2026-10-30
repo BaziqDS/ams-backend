@@ -41,9 +41,16 @@ jobs:
           .\venv\Scripts\pip.exe install waitress
 
       - name: Create environment file
+        env:
+          AMS_COOKIE_SECURE: ${{ secrets.COOKIE_SECURE }}
+          AMS_CSRF_TRUSTED_ORIGINS: ${{ secrets.CSRF_TRUSTED_ORIGINS }}
         run: |
           $frontendUrl = "${{ secrets.FRONTEND_URL }}".Trim()
           $corsAllowedOrigins = "${{ secrets.CORS_ALLOWED_ORIGINS }}".Trim()
+          $cookieSecure = $env:AMS_COOKIE_SECURE
+          if ([string]::IsNullOrWhiteSpace($cookieSecure)) { $cookieSecure = "True" }
+          $csrfTrustedOrigins = $env:AMS_CSRF_TRUSTED_ORIGINS
+          if ([string]::IsNullOrWhiteSpace($csrfTrustedOrigins)) { $csrfTrustedOrigins = $frontendUrl }
 
           if ([string]::IsNullOrWhiteSpace($frontendUrl)) {
             Write-Host "ERROR: FRONTEND_URL secret is empty."
@@ -72,7 +79,7 @@ jobs:
           }
 
           $lines = @(
-            "ENVIRONMENT=production",
+            "DEBUG=False",
             "SECRET_KEY=${{ secrets.SECRET_KEY }}",
             "DB_NAME=${{ secrets.DB_NAME }}",
             "DB_USER=${{ secrets.DB_USER }}",
@@ -81,6 +88,8 @@ jobs:
             "DB_PORT=${{ secrets.DB_PORT }}",
             "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}",
             "CORS_ALLOWED_ORIGINS=$corsAllowedOrigins",
+            "CSRF_TRUSTED_ORIGINS=$csrfTrustedOrigins",
+            "COOKIE_SECURE=$cookieSecure",
             "FRONTEND_URL=$frontendUrl"
           )
           # Write UTF-8 without BOM so python-decouple reads the first key correctly.
@@ -90,7 +99,7 @@ jobs:
 
       - name: Verify production database config
         run: |
-          & .\venv\Scripts\python.exe manage.py shell -c "from django.conf import settings; import sys; print('ENVIRONMENT=' + settings.ENVIRONMENT); print('ENGINE=' + settings.DATABASES['default']['ENGINE']); print('NAME=' + str(settings.DATABASES['default'].get('NAME'))); sys.exit(0 if settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql' else 1)"
+          & .\venv\Scripts\python.exe manage.py shell -c "from django.conf import settings; import sys; print('ENGINE=' + settings.DATABASES['default']['ENGINE']); print('NAME=' + str(settings.DATABASES['default'].get('NAME'))); sys.exit(0 if settings.DATABASES['default']['ENGINE'] == 'django.db.backends.postgresql' else 1)"
 
       - name: Run migrations
         run: |

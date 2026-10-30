@@ -1,9 +1,9 @@
 """
 One-shot import of 13 inspections extracted from inspection_data.md.
 
-Run from the backend root with USE_POSTGRES=true so it hits the restored Postgres:
+Run from the backend root with .env pointing at the restored PostgreSQL database:
 
-    set USE_POSTGRES=true && venv\\Scripts\\python.exe scripts\\import_inspections.py
+    venv\\Scripts\\python.exe scripts\\import_inspections.py
 
 The script is idempotent on contract_no — re-running skips inspections already created.
 """

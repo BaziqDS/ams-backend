@@ -1,10 +1,11 @@
 # Database Backups
 
-AMS uses SQLite in development and PostgreSQL in production. The development
-backup commands are real operational tooling for the local SQLite database, but
-they are not a replacement for PostgreSQL WAL/PITR in production.
+AMS uses PostgreSQL for all installations. Use PostgreSQL tooling for active
+database backups and server migration. The existing SQLite commands are legacy
+utilities for old SQLite backup files; they cannot back up or restore the
+configured PostgreSQL database.
 
-## Development SQLite Commands
+## Legacy SQLite Commands
 
 Create a backup:
 
@@ -44,8 +45,8 @@ Each backup creates:
 - `ams-sqlite-YYYYMMDD-HHMMSS.sqlite3`
 - `ams-sqlite-YYYYMMDD-HHMMSS.metadata.json`
 
-The metadata records the source database path, database engine, Django
-environment, file size, SHA-256 checksum, creation timestamp, and migration
+The metadata records the source database path, database engine,
+file size, SHA-256 checksum, creation timestamp, and migration
 state summary.
 
 Verification checks:
@@ -55,7 +56,7 @@ Verification checks:
 - SQLite `PRAGMA integrity_check` returns `ok`,
 - whether the `django_migrations` table is present.
 
-## Production PostgreSQL Target
+## PostgreSQL Backups
 
 For production on your own server or container, use PostgreSQL-specific tooling
 instead of the SQLite commands:
@@ -69,5 +70,4 @@ instead of the SQLite commands:
 
 The intended production pattern is full/base backups plus WAL archiving. That
 allows restoring to a specific time before accidental deletion, corruption, or an
-attack. SQLite development backups prove the operator workflow, but SQLite does
-not provide PostgreSQL-style WAL/PITR recovery.
+attack. The legacy SQLite utilities do not provide PostgreSQL-style WAL/PITR recovery.

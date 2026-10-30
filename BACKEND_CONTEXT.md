@@ -8,8 +8,8 @@ The **Asset Management System (AMS) Django backend**. A DRF-based JSON API servi
 
 - Django `5.2.8`, DRF `3.16`, SimpleJWT `5.5`, Djoser `2.3`
 - Python project root: `ams/` (settings, root urls, custom auth)
-- Dev DB: SQLite (`db.sqlite3`). Prod DB: PostgreSQL with `pgvector`.
-- `ATOMIC_REQUESTS = True` in both DB modes.
+- Database: PostgreSQL with `pgvector` for all installations.
+- `ATOMIC_REQUESTS = True`.
 - Default DRF permission: `IsAuthenticated` + cookie-JWT auth class.
 
 ## Apps
@@ -82,10 +82,10 @@ Multi-stage **inspection workflow**: DRAFT → STOCK_DETAILS → CENTRAL_REGISTE
 
 Driven by `python-decouple` reading `.env`:
 
-- `ENVIRONMENT` (`development` | `production`) — `IS_PRODUCTION` flips DEBUG, DB, CORS, cookie-secure
+- No application mode selector; configure `DEBUG` and `COOKIE_SECURE` explicitly.
 - `SECRET_KEY`, `ALLOWED_HOSTS`
 - `ENABLE_SILK` — adds the django-silk profiler at `/silk/`
-- DB env vars (sqlite path in dev, postgres + pgvector in prod)
+- PostgreSQL connection variables: `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`; see `.env.example` and `docs/deployment.md`.
 - CORS allow-list via `django-cors-headers`
 
 ## Key dependencies

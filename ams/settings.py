@@ -11,7 +11,6 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
-from urllib.parse import urlparse
 from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -19,18 +18,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # =============================================================================
-# ENVIRONMENT DETECTION
-# =============================================================================
-ENVIRONMENT = config('ENVIRONMENT', default='development')
-IS_PRODUCTION = ENVIRONMENT == 'production'
-
-
-# =============================================================================
 # SECURITY
 # =============================================================================
 SECRET_KEY = config('SECRET_KEY')
 
-DEBUG = not IS_PRODUCTION
+DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
@@ -101,37 +93,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =============================================================================
 # DATABASE
 # =============================================================================
-# Database selection — decoupled from IS_PRODUCTION so a developer can run
-# the local app in production-like mode (DEBUG off, secure cookies) while
-# still pointing at SQLite, OR run in development mode against Postgres for
-# hybrid-search testing. USE_POSTGRES defaults to IS_PRODUCTION for backwards
-# compatibility with the existing prod deploy that relied on the implicit
-# coupling. Override either independently via .env.
-USE_POSTGRES = config('USE_POSTGRES', default=IS_PRODUCTION, cast=bool)
-
-if USE_POSTGRES:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('DB_NAME'),
-            'USER': config('DB_USER'),
-            'PASSWORD': config('DB_PASSWORD'),
-            'HOST': config('DB_HOST', default='localhost'),
-            'PORT': config('DB_PORT', default='5432'),
-            'ATOMIC_REQUESTS': True,
-        }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'),
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST', default='127.0.0.1'),
+        'PORT': config('DB_PORT', default='5432'),
+        'ATOMIC_REQUESTS': True,
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-            'OPTIONS': {
-                'timeout': 20,
-            },
-            'ATOMIC_REQUESTS': True,
-        }
-    }
+}
 
 
 # =============================================================================
@@ -215,30 +187,23 @@ SIMPLE_JWT = {
 # =============================================================================
 CORS_ALLOW_CREDENTIALS = True
 
-if IS_PRODUCTION:
-    CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv())
-else:
-    CORS_ALLOWED_ORIGINS = config(
-        'CORS_ALLOWED_ORIGINS',
-        default='http://localhost:3000,http://127.0.0.1:3000',
-        cast=Csv(),
-    )
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv())
 
 
 # =============================================================================
 # FRONTEND URL (QR codes, links)
 # =============================================================================
-FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+FRONTEND_URL = config('FRONTEND_URL')
 
 COOKIE_SECURE = config(
     'COOKIE_SECURE',
-    default=IS_PRODUCTION and urlparse(FRONTEND_URL).scheme.lower() == 'https',
+    default=True,
     cast=bool,
 )
 
 CSRF_TRUSTED_ORIGINS = config(
     'CSRF_TRUSTED_ORIGINS',
-    default=FRONTEND_URL if IS_PRODUCTION else 'http://localhost:3000,http://127.0.0.1:3000',
+    default=FRONTEND_URL,
     cast=Csv(),
 )
 
@@ -264,21 +229,18 @@ DJOSER = {
 
 
 # =============================================================================
-# PRODUCTION SECURITY HARDENING
+# SECURITY HEADERS AND COOKIES
 # =============================================================================
-if IS_PRODUCTION:
-    SECURE_BROWSER_XSS_FILTER = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    X_FRAME_OPTIONS = 'DENY'
-    SESSION_COOKIE_SECURE = COOKIE_SECURE
-    CSRF_COOKIE_SECURE = COOKIE_SECURE
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+SESSION_COOKIE_SECURE = COOKIE_SECURE
+CSRF_COOKIE_SECURE = COOKIE_SECURE
 
 
 # =============================================================================
 # COPILOT HYBRID ITEM SEARCH (agent-only Central Register linking)
 # =============================================================================
-# Postgres-only. SQLite dev installs skip the embedding columns and the
-# copilot endpoint falls back to standard keyword search.
+# When disabled, the copilot endpoint uses standard keyword search.
 ITEM_SEARCH_HYBRID_ENABLED = config(
     'ITEM_SEARCH_HYBRID_ENABLED', default=False, cast=bool,
 )

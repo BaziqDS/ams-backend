@@ -45,8 +45,6 @@ class DatabaseBackupServiceTests(SimpleTestCase):
 
             with override_settings(
                 BASE_DIR=base_dir,
-                ENVIRONMENT="development",
-                IS_PRODUCTION=False,
                 DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
             ):
                 with patch("ams.database_backups.get_migration_state", return_value={"available": True, "count": 1}):
@@ -72,8 +70,6 @@ class DatabaseBackupServiceTests(SimpleTestCase):
 
             with override_settings(
                 BASE_DIR=base_dir,
-                ENVIRONMENT="development",
-                IS_PRODUCTION=False,
                 DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
             ):
                 with patch("ams.database_backups.get_migration_state", return_value={"available": True, "count": 1}):
@@ -91,8 +87,6 @@ class DatabaseBackupServiceTests(SimpleTestCase):
 
             with override_settings(
                 BASE_DIR=base_dir,
-                ENVIRONMENT="development",
-                IS_PRODUCTION=False,
                 DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
             ):
                 with patch("ams.database_backups.get_migration_state", return_value={"available": True, "count": 1}):
@@ -110,8 +104,6 @@ class DatabaseBackupServiceTests(SimpleTestCase):
 
             with override_settings(
                 BASE_DIR=base_dir,
-                ENVIRONMENT="development",
-                IS_PRODUCTION=False,
                 DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
             ):
                 with patch("ams.database_backups.get_migration_state", return_value={"available": True, "count": 1}):
@@ -136,20 +128,10 @@ class DatabaseBackupServiceTests(SimpleTestCase):
             self.assertEqual(read_marker(db_path), "before")
             self.assertEqual(read_marker(rollback_path), "after")
 
-    def test_restore_backup_refuses_production_environment(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            base_dir = Path(temp_dir)
-            db_path = base_dir / "db.sqlite3"
-            create_sqlite_database(db_path)
-
-            with override_settings(
-                BASE_DIR=base_dir,
-                ENVIRONMENT="production",
-                IS_PRODUCTION=True,
-                DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
-            ):
-                with self.assertRaisesMessage(CommandError, "ENVIRONMENT=production"):
-                    restore_backup("ams-sqlite-20990101-000000", confirm=True)
+    @override_settings(DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "ams"}})
+    def test_legacy_restore_refuses_postgresql(self):
+        with self.assertRaisesMessage(CommandError, "only supports SQLite"):
+            restore_backup("ams-sqlite-20990101-000000", confirm=True)
 
     def test_list_backups_reads_metadata_newest_first(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -159,8 +141,6 @@ class DatabaseBackupServiceTests(SimpleTestCase):
 
             with override_settings(
                 BASE_DIR=base_dir,
-                ENVIRONMENT="development",
-                IS_PRODUCTION=False,
                 DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": db_path}},
             ):
                 with patch("ams.database_backups.get_migration_state", return_value={"available": True, "count": 1}):

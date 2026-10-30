@@ -526,6 +526,46 @@ class UserManagementLocationAssignmentScopeTests(TestCase):
         self.assertFalse(user.is_superuser)
         self.assertTrue(resp.data['ai_enabled'])
 
+    def test_ai_preference_persists_per_user_and_can_be_disabled_with_multipart(self):
+        user = self._make_managed_user('ai_persistent_user', self.csit_lab)
+        other = self._make_managed_user('ai_other_user', self.csit_lab)
+        self.client.force_authenticate(user=user)
+
+        for enabled in [True, False]:
+            response = self.client.patch(
+                f'/api/users/management/{user.id}/',
+                {'ai_enabled': str(enabled).lower()},
+                format='multipart',
+            )
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertIs(response.data['ai_enabled'], enabled)
+
+            # A new authentication session must read the saved account setting.
+            self.client.force_authenticate(user=User.objects.get(pk=user.pk))
+            current = self.client.get('/auth/users/me/')
+            self.assertEqual(current.status_code, 200)
+            self.assertIs(current.data['ai_enabled'], enabled)
+
+            self.client.force_authenticate(user=other)
+            current = self.client.get('/auth/users/me/')
+            self.assertIs(current.data['ai_enabled'], False)
+            self.client.force_authenticate(user=user)
+
+    def test_non_admin_cannot_change_another_users_ai_preference(self):
+        user = self._make_managed_user('ai_self_only_user', self.csit_lab)
+        other = self._make_managed_user('ai_protected_user', self.csit_lab)
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            f'/api/users/management/{other.id}/',
+            {'ai_enabled': True},
+            format='json',
+        )
+
+        self.assertIn(response.status_code, [403, 404])
+        other.profile.refresh_from_db()
+        self.assertFalse(other.profile.ai_enabled)
+
     def test_scoped_user_manager_can_assign_descendant_location(self):
         manager = self._make_user_manager('csit_manager', self.csit)
         manager.user_permissions.add(self._perm('assign_user_locations'), self._perm('assign_user_roles'))

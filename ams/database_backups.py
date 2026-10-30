@@ -47,8 +47,8 @@ def is_sqlite_database() -> bool:
 def require_sqlite_database() -> Path:
     if not is_sqlite_database():
         raise CommandError(
-            "Only SQLite development backups are currently supported. "
-            "Production PostgreSQL should use pgBackRest/Barman with WAL archiving."
+            "This legacy backup utility only supports SQLite files. "
+            "For PostgreSQL, use pg_dump/pg_restore or pgBackRest/Barman."
         )
     name = get_default_database()["NAME"]
     db_path = Path(name)
@@ -112,7 +112,6 @@ def create_sqlite_backup(label: str = "") -> dict:
         "metadata_file": str(metadata_path),
         "sha256": checksum,
         "file_size_bytes": backup_path.stat().st_size,
-        "django_environment": getattr(settings, "ENVIRONMENT", "unknown"),
         "migration_state": get_migration_state(),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
@@ -193,12 +192,10 @@ def verify_backup(backup_id: str) -> BackupVerification:
 
 
 def restore_backup(backup_id: str, confirm: bool = False) -> dict:
-    if getattr(settings, "ENVIRONMENT", "development") == "production" or getattr(settings, "IS_PRODUCTION", False):
-        raise CommandError("Refusing to restore a database while ENVIRONMENT=production.")
-    if not confirm:
-        raise CommandError("Restore requires --confirm because it replaces the active development database.")
-
     target_path = require_sqlite_database()
+    if not confirm:
+        raise CommandError("Restore requires --confirm because it replaces the active SQLite database.")
+
     verification = verify_backup(backup_id)
 
     created_at = timezone.now()

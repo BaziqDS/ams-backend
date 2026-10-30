@@ -25,8 +25,9 @@ backend/
 ## CONVENTIONS
 - Auth default is `IsAuthenticated` plus cookie JWT auth class in settings.
 - Frontend-facing schema lives in DRF serializers; update them before assuming client fields.
-- Development DB is sqlite; production DB is postgres.
-- `ATOMIC_REQUESTS=True` is enabled in both DB modes.
+- PostgreSQL is the only configured database backend; connection settings live in `.env`. Docker is not required.
+- There is no application mode selector. Configure `DEBUG`, origins and cookie security individually; see `.env.example`.
+- `ATOMIC_REQUESTS=True` is enabled.
 - User/role APIs live under `/api/users/`; inventory under `/api/inventory/`.
 
 ## ANTI-PATTERNS
@@ -51,3 +52,6 @@ python manage.py migrate
 - `user_management` is the main frontend contract surface for admin pages.
 - `inventory` has the highest complexity/churn and gets its own child AGENTS file.
 - `backend/.github/workflows/deploy.yml` is operationally important: Windows + NSSM + Waitress.
+
+## FRONTEND WRITING AND VISUAL HIERARCHY
+- Whenever working on a frontend, website, application UI, or reusable interface components, avoid unnecessary secondary labels and descriptions. Let the layout do the explaining.
